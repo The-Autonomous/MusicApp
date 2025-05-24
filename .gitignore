@@ -1,0 +1,7 @@
+
+/__pycache__
+*.mp3
+*.json
+LOCAL_autoUpdate.py
+*.txt
+*.lnk
