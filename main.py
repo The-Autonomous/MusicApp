@@ -1,4 +1,4 @@
-DevMode = True
+DevMode = False
 
 try:
     from autoDependency import AutoDependencies
