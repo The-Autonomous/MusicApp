@@ -582,7 +582,7 @@ class GhostOverlay:
                 self.key_hints_popup.destroy()
                 self.key_hints_popup = None
             self.show_key_hints()
-            
+          
     def show_key_hints(self):
         if not self.playerState:
             return
