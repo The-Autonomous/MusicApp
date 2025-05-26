@@ -5,6 +5,13 @@ except:
 
 AutoDependencies().install()
 
+try:
+    from autoUpdate import AutoUpdater
+except:
+    from .autoUpdate import AutoUpdater
+
+AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
+
 import tkinter as tk
 
 try:
@@ -24,7 +31,6 @@ def main():
     controller.start()
     overlay.set_text("Initializing...")
     root.mainloop()
-
 
 if __name__ == '__main__':
     Administrator()

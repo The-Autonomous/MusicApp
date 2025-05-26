@@ -122,9 +122,5 @@ class AutoUpdater:
 
 
 if __name__ == "__main__":
-    updater = AutoUpdater(
-        "https://github.com/The-Autonomous/MusicApp",
-        branch="main"
-    )
-    updater.update()
+    AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
     print("Code Completed")
