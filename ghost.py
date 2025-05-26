@@ -2,19 +2,21 @@ import ctypes, psutil, os
 import tkinter as tk
 from tkinter import font, messagebox # Added messagebox
 from threading import Lock, RLock # Added RLock for SettingsHandler
-from pynput import keyboard
-from time import monotonic
+from pynput import keyboard, mouse
+from time import monotonic, sleep
 import json # Added json
 
 # Radio Direct Link
 try:
     from radioIpScanner import SimpleRadioScan
+    from adminRaise import Administrator
 except ImportError: # More specific exception
     from .radioIpScanner import SimpleRadioScan
+    from adminRaise import Administrator
 
 # Windows API constants
 WS_EX_LAYERED = 0x00080000
-# WS_EX_TRANSPARENT = 0x00000020 # Not currently used after change
+WS_EX_TRANSPARENT = 0x00000020 # Not currently used after change
 GWL_EXSTYLE = -20
 
 ### Utilities ###
@@ -120,6 +122,64 @@ def create_rounded_rectangle(self, x1, y1, x2, y2, radius=25, **kwargs):
 
 tk.Canvas.create_rounded_rectangle = create_rounded_rectangle
 
+class MouseTracker:
+    def __init__(self):
+        self.user32 = ctypes.windll.user32
+        self.isAdmin = Administrator(False).is_admin() # Call But Dont Force Popup Admin Instead Get Current Admin 
+
+        if not self.isAdmin:
+            print("MouseTracker: Not in admin mode, initializing pynput listener thread.")
+            self._right_button_pressed = False
+            
+            # Initialize the pynput listener.
+            # Crucially, set daemon=True. This means the thread will automatically exit
+            # when the main program exits, even if you forget to call .stop().
+            # However, it's still good practice to explicitly call .stop() for clean shutdown.
+            self.listener = mouse.Listener(
+                on_click=self._on_click,
+                daemon=True # This makes the thread a daemon thread
+            )
+            self.listener.start() # Start the listener thread immediately upon initialization
+
+    def _on_click(self, x, y, button, pressed):
+        """Internal callback for pynput mouse events."""
+        if button == mouse.Button.right:
+            self._right_button_pressed = pressed
+        # print(f"pynput: {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
+
+    def mouse_pos(self):
+        """Returns [x, y] of mouse cursor (works in fullscreen games).
+        This method typically works without admin rights for basic cursor position,
+        so it can use ctypes in both admin and non-admin modes.
+        """
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        pt = POINT()
+        self.user32.GetCursorPos(ctypes.byref(pt))
+        return [pt.x, pt.y]
+
+    def is_right_mouse_down(self):
+        """Returns True if right mouse button is pressed."""
+        if self.isAdmin:
+            # Use GetKeyState if running as administrator
+            return self.user32.GetKeyState(0x02) < 0  # 0x02 = Right Mouse Button VK_CODE
+        else:
+            # Use the state tracked by pynput's listener if not administrator
+            return self._right_button_pressed
+
+    def stop(self):
+        """Stops the pynput listener if it was started and is still active."""
+        if not self.isAdmin:
+            if hasattr(self, 'listener') and self.listener.is_alive():
+                print("Stopping pynput listener thread.")
+                self.listener.stop()
+                # Use .join() only if you need to ensure the thread has completely terminated
+                # before proceeding, otherwise, daemon=True is often enough for exit.
+                # If your app needs a very specific shutdown order, keep .join().
+                self.listener.join(timeout=1) # Give it a short timeout to terminate
+                if self.listener.is_alive():
+                    print("Warning: pynput listener thread did not terminate cleanly.")
+
 class GhostOverlay:
     def __init__(self, root):
         self.root = root
@@ -129,6 +189,9 @@ class GhostOverlay:
         self.key_hints_popup = None
         self.key_hints_list_frame = None # For updating status
         self.modification_status_label = None # For "Listening..." message
+        
+        self.mouseEvents = MouseTracker()
+        self.clickThroughState = True # True To Click Through False To Click On
 
         self.triggerDebounce = [0, 1.0] # Reduced debounce for faster UI response
         self.text_lock = Lock()
@@ -525,107 +588,120 @@ class GhostOverlay:
         if not self.playerState:
             return
         
+        # Destroy existing popup if it exists
         if self.key_hints_popup:
             self.key_hints_popup.destroy()
-            self.key_hints_popup = None
         
-        self.key_hints_popup = tk.Toplevel(self.root) # Make it child of root
+        # Create the popup window with optimized settings
+        self.key_hints_popup = tk.Toplevel(self.root)
         self.key_hints_popup.overrideredirect(True)
         self.key_hints_popup.configure(bg="#1e1e1e")
-        self.key_hints_popup.attributes("-topmost", True)
-
+        self.key_hints_popup.attributes("-topmost", True, "-alpha", 0.0)  # Start invisible
+        
+        # Pre-calculate geometry before making visible
+        popup_width = 450  # Fixed width to avoid initial calculations
+        popup_height = 600  # Fixed height (will adjust with content)
+        
+        # Center on screen without waiting for widgets
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x_coord = (screen_width - popup_width) // 2
+        y_coord = (screen_height - popup_height) // 2
+        self.key_hints_popup.geometry(f"{popup_width}x{popup_height}+{x_coord}+{y_coord}")
+        
+        # Main frame with grid layout
         main_frame = tk.Frame(self.key_hints_popup, bg="#2e2e2e", bd=2, relief="ridge")
-        main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.key_hints_popup.grid_rowconfigure(0, weight=1)
-        self.key_hints_popup.grid_columnconfigure(0, weight=1)
-
-        tk.Label(main_frame, text="✨ Music Player Controls ✨", font=("Helvetica", 18, "bold"), bg="#2e2e2e", fg="#00ffd5") \
-            .grid(row=0, column=0, columnspan=2, pady=(5,10)) # columnspan for title
-
-        separator = tk.Frame(main_frame, height=2, bg="#444444")
-        separator.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,10))
-
-        self.key_hints_list_frame = tk.Frame(main_frame, bg="#2e2e2e") # Store for status label
-        self.key_hints_list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        main_frame.grid_rowconfigure(2, weight=1)
-
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title label
+        title_label = tk.Label(main_frame, text="✨ Music Player Controls ✨", 
+                            font=("Helvetica", 18, "bold"), bg="#2e2e2e", fg="#00ffd5")
+        title_label.pack(pady=(5,10))
+        
+        # Separator
+        tk.Frame(main_frame, height=2, bg="#444444").pack(fill=tk.X, pady=(0,10))
+        
+        # Create canvas with scrollbar for key hints
+        canvas = tk.Canvas(main_frame, bg="#2e2e2e", highlightthickness=0)
+        scrollbar = tk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#2e2e2e")
+        
+        # Configure canvas scrolling
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all"),
+                width=e.width  # Match canvas width to content
+            )
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Add key actions to scrollable frame
         for i, action in enumerate(self.key_actions):
+            frame = tk.Frame(scrollable_frame, bg="#2e2e2e")
+            frame.pack(fill=tk.X, pady=1)
+            
             keys_display = " + ".join(k.upper() for k in action['required'])
             hint_text = action['hint']
             
-            action_row_frame = tk.Frame(self.key_hints_list_frame, bg="#2e2e2e")
-            action_row_frame.grid(row=i, column=0, sticky="ew", pady=1)
-
-            label_text = f"{keys_display:<20} →  {hint_text}" # Pad keys for alignment
-            tk.Label(action_row_frame, text=label_text, font=("Consolas", 11), bg="#2e2e2e", fg="#ffffff", anchor="w", justify=tk.LEFT) \
-                .pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
-
+            label = tk.Label(frame, 
+                            text=f"{keys_display:<20} →  {hint_text}",
+                            font=("Consolas", 11), 
+                            bg="#2e2e2e", fg="#ffffff",
+                            anchor="w", justify=tk.LEFT)
+            label.pack(side="left", padx=10, fill=tk.X, expand=True)
+            
             if action.get('modifiable'):
-                modify_button = tk.Button(
-                    action_row_frame, text="⚙️", font=("Arial Unicode MS", 10), # Gear emoji
-                    bg="#555555", fg="#ffffff", activebackground="#777777", relief="flat",
-                    command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
-                )
-                modify_button.pack(side=tk.RIGHT, padx=(0,10))
-
-        # Status Label for modification instructions
-        self.modification_status_label = tk.Label(
-            self.key_hints_list_frame, text="", font=("Helvetica", 10, "italic"),
-            fg="yellow", bg="#2e2e2e", anchor="w", justify=tk.LEFT, wraplength=380 # Adjust wraplength
-        )
-        self.modification_status_label.grid(row=len(self.key_actions), column=0, sticky="ew", pady=(10,5), padx=10)
-
-
-        # Buttons Frame
+                tk.Button(frame, text="⚙️", font=("Arial Unicode MS", 10),
+                        bg="#555555", fg="#ffffff", 
+                        command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
+                        ).pack(side="right", padx=(0,10))
+        
+        # Status label
+        self.modification_status_label = tk.Label(scrollable_frame, 
+                                                text="",
+                                                font=("Helvetica", 10, "italic"),
+                                                fg="yellow", bg="#2e2e2e",
+                                                wraplength=popup_width-40)
+        self.modification_status_label.pack(fill=tk.X, pady=(10,5), padx=10)
+        
+        # Bottom buttons
         buttons_frame = tk.Frame(main_frame, bg="#2e2e2e")
-        buttons_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10,0))
-        buttons_frame.columnconfigure(0, weight=1) # Make buttons expand
-        buttons_frame.columnconfigure(1, weight=1)
-
-
-        reset_btn = tk.Button(
-            buttons_frame, text="Reset Bindings", command=self._confirm_reset_bindings,
-            font=("Helvetica", 12), bg="#ffae42", fg="#000000", # Orange
-            activebackground="#ff8c00", activeforeground="#000000", relief="raised", bd=2, padx=10, pady=5
-        )
-        reset_btn.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,0))
+        buttons_frame.pack(fill=tk.X, pady=(10,0))
         
-        close_btn = tk.Button(
-            buttons_frame, text="✖ Close", command=self.key_hints_popup.destroy,
-            font=("Helvetica", 14, "bold"), bg="#ff4d4d", fg="#ffffff",
-            activebackground="#ff1a1a", activeforeground="#ffffff", relief="raised", bd=2, padx=10, pady=5
-        )
-        close_btn.grid(row=0, column=1, sticky="ew", padx=5, pady=(5,0))
-
-
-        self.key_hints_popup.bind("<Escape>", lambda e: self.key_hints_popup.destroy())
+        tk.Button(buttons_frame, text="Reset Bindings", 
+                command=self._confirm_reset_bindings,
+                font=("Helvetica", 12), bg="#ffae42").pack(side="left", expand=True, padx=5)
         
-        # Drag-to-move (bind to main_frame and title for better coverage)
-        def start_move(e): self.key_hints_popup._x, self.key_hints_popup._y = e.x, e.y
-        def do_move(e): self.key_hints_popup.geometry(f"+{e.x_root - self.key_hints_popup._x}+{e.y_root - self.key_hints_popup._y}")
+        tk.Button(buttons_frame, text="✖ Close", 
+                command=self.key_hints_popup.destroy,
+                font=("Helvetica", 14, "bold"), bg="#ff4d4d").pack(side="right", expand=True, padx=5)
         
+        # Drag functionality
+        def start_move(e): 
+            self.key_hints_popup._x = e.x
+            self.key_hints_popup._y = e.y
+        
+        def do_move(e): 
+            self.key_hints_popup.geometry(f"+{e.x_root - self.key_hints_popup._x}+{e.y_root - self.key_hints_popup._y}")
+        
+        title_label.bind("<Button-1>", start_move)
+        title_label.bind("<B1-Motion>", do_move)
         main_frame.bind("<Button-1>", start_move)
         main_frame.bind("<B1-Motion>", do_move)
-        # Also bind title label if it's prominent
-        # title_label.bind("<Button-1>", start_move)
-        # title_label.bind("<B1-Motion>", do_move)
-
-
-        # Center and lift
-        self.key_hints_popup.update_idletasks()
-        popup_width = self.key_hints_popup.winfo_width()
-        popup_height = self.key_hints_popup.winfo_height()
-        screen_width = self.key_hints_popup.winfo_screenwidth()
-        screen_height = self.key_hints_popup.winfo_screenheight()
-        x_coord = (screen_width // 2) - (popup_width // 2)
-        y_coord = (screen_height // 2) - (popup_height // 2)
-        self.key_hints_popup.geometry(f"{popup_width}x{popup_height}+{x_coord}+{y_coord}")
-
+        
+        # Bind escape key
+        self.key_hints_popup.bind("<Escape>", lambda e: self.key_hints_popup.destroy())
+        
+        # Make window visible after everything is ready
+        self.key_hints_popup.attributes("-alpha", 1.0)
         self.key_hints_popup.lift()
-        # self.key_hints_popup.after_idle(self.key_hints_popup.attributes, "-topmost", False) # Reconsider this if it causes issues
-
-    # --- (Rest of your GhostOverlay methods: _trigger_*, toggle_overlay, toggle_player, open_overlay, etc.) ---
-    # --- Make sure they are not altered unless necessary for the key binding changes ---
+        self.key_hints_popup.focus_force()
 
     def _trigger_skip_previous(self):
         if hasattr(self, 'MusicPlayer') and self.playerState:
@@ -732,7 +808,82 @@ class GhostOverlay:
                         self.MusicPlayer.toggle_loop_cycle(self.display_radio)
                     self.MusicPlayer.pause(False) # False to pause
                 self.close_overlay()
+                if self.key_hints_popup:
+                    self.key_hints_popup.destroy()
+                    self.key_hints_popup = None
 
+    ###############################################################################
+
+    def calc_pos(self, x, y, a_x, a_y, b_x, b_y):
+        """Returns True if point (x,y) is inside the rectangle defined by:
+        - a: top-left corner (a_x, a_y)
+        - b: bottom-right corner (b_x, b_y)
+        """
+        return (a_x <= x <= b_x) and (a_y <= y <= b_y)
+
+    def toggle_overlay_clickthrough(self, mode: bool):
+        """Toggle Whether The Mouse Ignores The Display Or Not
+        - True: Disable Mouse Clicking Of The Overlay
+        - False: Enable Mouse Clicking Of The Overlay
+        """
+        hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
+        current_style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        
+        if mode:
+            # Enable click-through
+            new_style = current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+        else:
+            # Disable click-through
+            new_style = current_style & ~ WS_EX_TRANSPARENT
+        
+        ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style)
+
+    def parse_mouse_over_overlay(self):
+        if self.mouseEvents.is_right_mouse_down():
+            # Get current mouse position
+            currentPosition = self.mouseEvents.mouse_pos()
+            # Get window geometry (x, y, width, height)
+            window_x = self.window.winfo_x()
+            window_y = self.window.winfo_y()
+            window_width = self.window.winfo_width()
+            window_height = self.window.winfo_height()
+            #  Calculate rectangle bounds:
+            #  a = top-left (window_x, window_y)
+            #  b = bottom-right (window_x + width, window_y + height)
+            a_x, a_y = window_x, window_y
+            b_x, b_y = window_x + window_width, window_y + window_height
+            # Check if mouse is inside window
+            if self.calc_pos(*currentPosition, a_x, a_y, b_x, b_y):
+                self.clickThroughState = False
+                self.toggle_overlay_clickthrough(self.clickThroughState)
+                if not self._overlay_dragging and self._overlay_start_move:
+                    self._drag_start_x = currentPosition[0]
+                    self._drag_start_y = currentPosition[1]
+                    self._overlay_dragging = True
+                    self._win_start_x = self.window.winfo_x()
+                    self._win_start_y = self.window.winfo_y()
+                    
+                    if self.window and self.window.winfo_exists():
+                        hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) # Get the actual window handle
+                        # Try to bring the window to the foreground and activate it
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                        ctypes.windll.user32.SetActiveWindow(hwnd)
+                        ctypes.windll.user32.SetFocus(hwnd) # Explicitly set focus
+                        ctypes.windll.user32.BringWindowToTop(hwnd) # Ensure it's on top of other windows
+                        
+                        # Just incase that didn't work force right click and left click twice to simulate the window to foreground over context windows
+                        mouse_controller = mouse.Controller()
+                        mouse_controller.press(mouse.Button.right)
+                        mouse_controller.release(mouse.Button.right)
+                        mouse_controller.press(mouse.Button.left)
+                        mouse_controller.release(mouse.Button.left)
+                        mouse_controller.press(mouse.Button.right)
+        else:
+            if not self.clickThroughState and not self._overlay_dragging:
+                self.clickThroughState = True
+                self.toggle_overlay_clickthrough(self.clickThroughState)
+
+    ###############################################################################
 
     def open_overlay(self):
         if self.window and self.window.winfo_exists(): # Already open
@@ -748,18 +899,7 @@ class GhostOverlay:
         transparent_color = 'gray1' # Or another unique color
         self.window.attributes('-transparentcolor', transparent_color) 
         self.window.config(bg=transparent_color) # Set window bg to transparent color
-
-        # Layered window for click-through (if desired and working correctly)
-        # Be cautious with WS_EX_TRANSPARENT as it makes the window non-interactive.
-        # If you need interaction (like dragging), WS_EX_LAYERED is for alpha, not click-through.
-        # The dragging is handled by Tkinter binds, so WS_EX_TRANSPARENT should not be set on the main window.
-        # The current setup uses -transparentcolor which should allow interaction with non-transparent parts.
-        
-        # hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
-        # style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        # ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
-        # ^ This makes the window itself transparent but not necessarily click-through for underlying windows.
-        #   The -transparentcolor attribute is usually sufficient for making parts of the Tkinter window transparent.
+        self.toggle_overlay_clickthrough(self.clickThroughState)
 
         self.canvas = tk.Canvas(self.window, bg=transparent_color, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
@@ -777,11 +917,14 @@ class GhostOverlay:
         self._drag_start_y = 0
         self._win_start_x = 0
         self._win_start_y = 0
+        self._overlay_dragging = False
+        self._overlay_start_move = None
 
         def start_move(event):
             self._drag_start_x = event.x_root
             self._drag_start_y = event.y_root
             if self.window: # Ensure window exists
+                self._overlay_dragging = True
                 self._win_start_x = self.window.winfo_x()
                 self._win_start_y = self.window.winfo_y()
 
@@ -794,8 +937,14 @@ class GhostOverlay:
                 self.window.geometry(f"+{new_x}+{new_y}")
                 self._last_position = (new_x, new_y)
 
-        self.canvas.bind("<Button-1>", start_move)
-        self.canvas.bind("<B1-Motion>", do_move)
+        def do_stop(event):
+            self._overlay_dragging = False
+
+        self._overlay_start_move = start_move
+
+        self.canvas.bind("<Button-3>", start_move)
+        self.canvas.bind("<B3-Motion>", do_move)
+        self.canvas.bind("<ButtonRelease-3>", do_stop)
         # Also allow dragging by the rounded rectangle background if it's a distinct item
         # If the canvas background IS the rounded rectangle, the above is fine.
 
@@ -829,6 +978,7 @@ class GhostOverlay:
             self.window.destroy()
             self.window = None
             self.canvas = None # Clear canvas reference too
+            self.clickThroughState = True # Update clickThroughState
 
     def wrap_text(self, text: str, max_chars_line: int = 30) -> str:
         if not text: return ""
@@ -883,6 +1033,11 @@ class GhostOverlay:
                 main_width = max(main_width, main_font.measure(line))
 
             time_width = time_font.measure(self.player_metric['player_duration'])
+            
+            try:
+                self.parse_mouse_over_overlay()
+            except Exception as E:
+                print("Cannot Toggle Mouse-Over Overlay: {E}")
             
             # Lyrics wrapping and measurement
             display_lyrics_text = ""

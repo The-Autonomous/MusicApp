@@ -1,18 +1,19 @@
+DevMode = True
+
 try:
     from autoDependency import AutoDependencies
 except:
     from .autoDependency import AutoDependencies
 
-AutoDependencies().install()
+if not DevMode:
+    AutoDependencies().install()
 
 try:
     from autoUpdate import AutoUpdater
 except:
     from .autoUpdate import AutoUpdater
 
-DevMode = False
-
-if DevMode == False:
+if not DevMode:
     AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
 
 import tkinter as tk
@@ -36,5 +37,6 @@ def main():
     root.mainloop()
 
 if __name__ == '__main__':
-    Administrator()
+    if not DevMode:
+        Administrator()
     main()

@@ -2,6 +2,7 @@ import os, sys, ctypes
 
 class Administrator:
     def __init__(self, require_admin=True):
+        """When require_admin Is Set To True Will Prompt For UAC."""
         if require_admin and not self.is_admin():
             self.elevate()
 
