@@ -582,126 +582,109 @@ class GhostOverlay:
                 self.key_hints_popup.destroy()
                 self.key_hints_popup = None
             self.show_key_hints()
-
-
+            
     def show_key_hints(self):
         if not self.playerState:
             return
         
-        # Destroy existing popup if it exists
         if self.key_hints_popup:
             self.key_hints_popup.destroy()
+            self.key_hints_popup = None
         
-        # Create the popup window with optimized settings
-        self.key_hints_popup = tk.Toplevel(self.root)
+        self.key_hints_popup = tk.Toplevel(self.root) # Make it child of root
         self.key_hints_popup.overrideredirect(True)
         self.key_hints_popup.configure(bg="#1e1e1e")
-        self.key_hints_popup.attributes("-topmost", True, "-alpha", 0.0)  # Start invisible
-        
-        # Pre-calculate geometry before making visible
-        popup_width = 450  # Fixed width to avoid initial calculations
-        popup_height = 600  # Fixed height (will adjust with content)
-        
-        # Center on screen without waiting for widgets
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x_coord = (screen_width - popup_width) // 2
-        y_coord = (screen_height - popup_height) // 2
-        self.key_hints_popup.geometry(f"{popup_width}x{popup_height}+{x_coord}+{y_coord}")
-        
-        # Main frame with grid layout
+        self.key_hints_popup.attributes("-topmost", True)
+
         main_frame = tk.Frame(self.key_hints_popup, bg="#2e2e2e", bd=2, relief="ridge")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Title label
-        title_label = tk.Label(main_frame, text="✨ Music Player Controls ✨", 
-                            font=("Helvetica", 18, "bold"), bg="#2e2e2e", fg="#00ffd5")
-        title_label.pack(pady=(5,10))
-        
-        # Separator
-        tk.Frame(main_frame, height=2, bg="#444444").pack(fill=tk.X, pady=(0,10))
-        
-        # Create canvas with scrollbar for key hints
-        canvas = tk.Canvas(main_frame, bg="#2e2e2e", highlightthickness=0)
-        scrollbar = tk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg="#2e2e2e")
-        
-        # Configure canvas scrolling
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(
-                scrollregion=canvas.bbox("all"),
-                width=e.width  # Match canvas width to content
-            )
-        )
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack canvas and scrollbar
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Add key actions to scrollable frame
+        main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.key_hints_popup.grid_rowconfigure(0, weight=1)
+        self.key_hints_popup.grid_columnconfigure(0, weight=1)
+
+        title_label = tk.Label(main_frame, text="✨ Music Player Controls ✨", font=("Helvetica", 18, "bold"), bg="#2e2e2e", fg="#00ffd5")
+        title_label.grid(row=0, column=0, columnspan=2, pady=(5,10)) # columnspan for title
+
+        separator = tk.Frame(main_frame, height=2, bg="#444444")
+        separator.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,10))
+
+        self.key_hints_list_frame = tk.Frame(main_frame, bg="#2e2e2e") # Store for status label
+        self.key_hints_list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        main_frame.grid_rowconfigure(2, weight=1)
+
         for i, action in enumerate(self.key_actions):
-            frame = tk.Frame(scrollable_frame, bg="#2e2e2e")
-            frame.pack(fill=tk.X, pady=1)
-            
             keys_display = " + ".join(k.upper() for k in action['required'])
             hint_text = action['hint']
             
-            label = tk.Label(frame, 
-                            text=f"{keys_display:<20} →  {hint_text}",
-                            font=("Consolas", 11), 
-                            bg="#2e2e2e", fg="#ffffff",
-                            anchor="w", justify=tk.LEFT)
-            label.pack(side="left", padx=10, fill=tk.X, expand=True)
-            
+            action_row_frame = tk.Frame(self.key_hints_list_frame, bg="#2e2e2e")
+            action_row_frame.grid(row=i, column=0, sticky="ew", pady=1)
+
+            label_text = f"{keys_display:<20} →  {hint_text}" # Pad keys for alignment
+            tk.Label(action_row_frame, text=label_text, font=("Consolas", 11), bg="#2e2e2e", fg="#ffffff", anchor="w", justify=tk.LEFT) \
+                .pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+
             if action.get('modifiable'):
-                tk.Button(frame, text="⚙️", font=("Arial Unicode MS", 10),
-                        bg="#555555", fg="#ffffff", 
-                        command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
-                        ).pack(side="right", padx=(0,10))
-        
-        # Status label
-        self.modification_status_label = tk.Label(scrollable_frame, 
-                                                text="",
-                                                font=("Helvetica", 10, "italic"),
-                                                fg="yellow", bg="#2e2e2e",
-                                                wraplength=popup_width-40)
-        self.modification_status_label.pack(fill=tk.X, pady=(10,5), padx=10)
-        
-        # Bottom buttons
+                modify_button = tk.Button(
+                    action_row_frame, text="⚙️", font=("Arial Unicode MS", 10), # Gear emoji
+                    bg="#555555", fg="#ffffff", activebackground="#777777", relief="flat",
+                    command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
+                )
+                modify_button.pack(side=tk.RIGHT, padx=(0,10))
+
+        # Status Label for modification instructions
+        self.modification_status_label = tk.Label(
+            self.key_hints_list_frame, text="", font=("Helvetica", 10, "italic"),
+            fg="yellow", bg="#2e2e2e", anchor="w", justify=tk.LEFT, wraplength=380 # Adjust wraplength
+        )
+        self.modification_status_label.grid(row=len(self.key_actions), column=0, sticky="ew", pady=(10,5), padx=10)
+
+
+        # Buttons Frame
         buttons_frame = tk.Frame(main_frame, bg="#2e2e2e")
-        buttons_frame.pack(fill=tk.X, pady=(10,0))
+        buttons_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10,0))
+        buttons_frame.columnconfigure(0, weight=1) # Make buttons expand
+        buttons_frame.columnconfigure(1, weight=1)
+
+
+        reset_btn = tk.Button(
+            buttons_frame, text="Reset Bindings", command=self._confirm_reset_bindings,
+            font=("Helvetica", 12), bg="#ffae42", fg="#000000", # Orange
+            activebackground="#ff8c00", activeforeground="#000000", relief="raised", bd=2, padx=10, pady=5
+        )
+        reset_btn.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,0))
         
-        tk.Button(buttons_frame, text="Reset Bindings", 
-                command=self._confirm_reset_bindings,
-                font=("Helvetica", 12), bg="#ffae42").pack(side="left", expand=True, padx=5)
-        
-        tk.Button(buttons_frame, text="✖ Close", 
-                command=self.key_hints_popup.destroy,
-                font=("Helvetica", 14, "bold"), bg="#ff4d4d").pack(side="right", expand=True, padx=5)
-        
-        # Drag functionality
-        def start_move(e): 
-            self.key_hints_popup._x = e.x
-            self.key_hints_popup._y = e.y
-        
-        def do_move(e): 
-            self.key_hints_popup.geometry(f"+{e.x_root - self.key_hints_popup._x}+{e.y_root - self.key_hints_popup._y}")
-        
-        title_label.bind("<Button-1>", start_move)
-        title_label.bind("<B1-Motion>", do_move)
-        main_frame.bind("<Button-1>", start_move)
-        main_frame.bind("<B1-Motion>", do_move)
-        
-        # Bind escape key
+        close_btn = tk.Button(
+            buttons_frame, text="✖ Close", command=self.key_hints_popup.destroy,
+            font=("Helvetica", 14, "bold"), bg="#ff4d4d", fg="#ffffff",
+            activebackground="#ff1a1a", activeforeground="#ffffff", relief="raised", bd=2, padx=10, pady=5
+        )
+        close_btn.grid(row=0, column=1, sticky="ew", padx=5, pady=(5,0))
+
+
         self.key_hints_popup.bind("<Escape>", lambda e: self.key_hints_popup.destroy())
         
-        # Make window visible after everything is ready
-        self.key_hints_popup.attributes("-alpha", 1.0)
+        # Drag-to-move (bind to main_frame and title for better coverage)
+        def start_move(e): self.key_hints_popup._x, self.key_hints_popup._y = e.x, e.y
+        def do_move(e): self.key_hints_popup.geometry(f"+{e.x_root - self.key_hints_popup._x}+{e.y_root - self.key_hints_popup._y}")
+        
+        main_frame.bind("<Button-1>", start_move)
+        main_frame.bind("<B1-Motion>", do_move)
+        # Also bind title label if it's prominent
+        title_label.bind("<Button-1>", start_move)
+        title_label.bind("<B1-Motion>", do_move)
+
+
+        # Center and lift
+        self.key_hints_popup.update_idletasks()
+        popup_width = self.key_hints_popup.winfo_width()
+        popup_height = self.key_hints_popup.winfo_height()
+        screen_width = self.key_hints_popup.winfo_screenwidth()
+        screen_height = self.key_hints_popup.winfo_screenheight()
+        x_coord = (screen_width // 2) - (popup_width // 2)
+        y_coord = (screen_height // 2) - (popup_height // 2)
+        self.key_hints_popup.geometry(f"{popup_width}x{popup_height}+{x_coord}+{y_coord}")
+
         self.key_hints_popup.lift()
-        self.key_hints_popup.focus_force()
+        self.key_hints_popup.after_idle(self.key_hints_popup.attributes, "-topmost", False) # Reconsider this if it causes issues
 
     def _trigger_skip_previous(self):
         if hasattr(self, 'MusicPlayer') and self.playerState:

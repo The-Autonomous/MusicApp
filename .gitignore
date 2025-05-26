@@ -7,3 +7,4 @@ LOCAL_autoUpdate.py
 *.lnk
 /Spotify Downloader
 /Test
+/backup
