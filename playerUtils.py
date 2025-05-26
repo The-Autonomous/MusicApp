@@ -66,6 +66,8 @@ class MusicOverlayController:
             return lines
         except FileNotFoundError:
             print(f"Playlist file '{file_path}' not found.")
+            with open(absolute_path, 'w', encoding="utf-8") as f:
+                f.write("")
             return []
 
     def _update_text(self, artist: str = '', title: str = ''):
