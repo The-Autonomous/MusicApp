@@ -10,7 +10,10 @@ try:
 except:
     from .autoUpdate import AutoUpdater
 
-AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
+DevMode = False
+
+if DevMode == False:
+    AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
 
 import tkinter as tk
 

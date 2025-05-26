@@ -171,18 +171,29 @@ class MusicPlayer:
                 'artist': 'Unknown Artist',
                 'title': os.path.splitext(os.path.basename(file_path))[0]
             }
- 
-    def pause(self):
-        if self.pause_event.is_set():
+    
+    def pause(self, forcedState: bool = None):
+        # decide: True → unpause; False → pause; None → toggle
+        should_unpause = forcedState if forcedState is not None else self.pause_event.is_set()
+
+        if should_unpause:
+            # unpause
             self.pause_event.clear()
             pygame.mixer.music.unpause()
-            title = self.current_song['title'] if not self.repeat_event.is_set() else f"{self.current_song['title']} *+*" # Handle Pause Edgecase
-            self.set_screen(self.current_song['artist'], title)
+            title = (
+                self.current_song['title']
+                if not self.repeat_event.is_set()
+                else f"{self.current_song['title']} *+*"
+            )
         else:
+            # pause
             self.pause_event.set()
             pygame.mixer.music.pause()
-            self.set_screen(self.current_song['artist'], f"{self.current_song['title']} *=*")
-            
+            title = f"{self.current_song['title']} *=*"
+
+        # update screen in one place
+        self.set_screen(self.current_song['artist'], title)
+
     def repeat(self):
         if self.pause_event.is_set() or self.movement_event.is_set():
             return
