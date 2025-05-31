@@ -1,4 +1,7 @@
-DevMode = True
+import os
+
+DevMode = os.path.exists(".developer_options.json")
+print(f"Executing With Developer Mode: {DevMode}")
 
 try:
     from autoDependency import AutoDependencies
