@@ -69,11 +69,12 @@ class RadioHost:
             else:
                 return jsonify({"code": "error", "message": "Invalid action"}), 400
 
-            currentSong = self.current_data["title"] + ("*+*" if self.MusicPlayer.repeat_event.is_set() else "")
-
             return jsonify({
                 "code": "success",
-                "state": currentSong,
+                "title": self.current_data["title"],
+                "position": round(self.current_data['position'], 2),
+                "paused": self.MusicPlayer.pause_event.is_set(),
+                "repeat": self.MusicPlayer.repeat_event.is_set(),
                 "volume": round(self.MusicPlayer.current_volume, 2)
             })
 
