@@ -225,10 +225,20 @@ class RadioClient:
             audio = MP3(self.temp_song_file)
             self.client_data['radio_duration'][1] = audio.info.length
             pygame.mixer.music.play()
-            timeDilation = (monotonic() - buffer_time_frame)
-            startPositionMath = start_position + timeDilation
-            print(f"Playing song from position: {startPositionMath:.2f}s from dilation {timeDilation:.2f}s")
-            pygame.mixer.music.set_pos(startPositionMath)
+
+            # Wait until music is actually playing before seeking
+            waited = 0
+            while not pygame.mixer.music.get_busy() and waited < 10:
+                sleep(0.01)
+                waited += 0.01
+
+            if pygame.mixer.music.get_busy():
+                timeDilation = (monotonic() - buffer_time_frame)
+                startPositionMath = start_position + timeDilation
+                print(f"Playing song from position: {startPositionMath:.2f}s from dilation {timeDilation:.2f}s")
+                pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
+            else:
+                print("Warning: Music did not start in time, skipping seek.")
             
             if self._paused:
                 pygame.mixer.music.pause()

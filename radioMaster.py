@@ -1,12 +1,14 @@
 import os, socket, psutil, threading, time
-from flask import Flask, send_from_directory, make_response
+from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
 from waitress import serve
 
 class RadioHost:
-    def __init__(self, port=8080):
+    def __init__(self, player, port=8080):
         # Flask app setup
-        self.app = Flask(__name__)
+        self.MusicPlayer = player
+        self.app_pad_site = "app_pad"
+        self.app = Flask(__name__, static_folder='app_pad')
         Compress(self.app)
 
         # Shared state
@@ -26,9 +28,54 @@ class RadioHost:
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
                 f"<location>{self.current_data['position']:.2f}</location>"
+                f"<script>location.href='/{self.app_pad_site}';</script>"
             )
             resp.headers['Cache-Control'] = 'no-store'
             return resp
+
+        @self.app.route(f'/{self.app_pad_site}') # App Pad Loader
+        def app_pad():
+            return self.app.send_static_file('index.html')
+        
+        @self.app.route('/action', methods=['POST'])
+        def handle_action():
+            data = request.get_json()
+            action = data.get('action', '').lower()
+
+            if action == 'pause':
+                self.MusicPlayer.pause()
+                
+            elif action == 'play':
+                self.MusicPlayer.pause(forcedState=True)  # Explicitly unpause
+
+            elif action == 'skip':
+                self.MusicPlayer.skip_next()
+
+            elif action == 'previous':
+                self.MusicPlayer.skip_previous()
+                
+            elif action == 'volume_up':
+                self.MusicPlayer.up_volume()
+                
+            elif action == 'volume_down':
+                self.MusicPlayer.dwn_volume()
+            
+            elif action == 'repeat':
+                self.MusicPlayer.repeat()
+                
+            elif action == 'status':
+                pass  # just return the current state
+
+            else:
+                return jsonify({"code": "error", "message": "Invalid action"}), 400
+
+            currentSong = self.current_data["title"] + ("*+*" if self.MusicPlayer.repeat_event.is_set() else "")
+
+            return jsonify({
+                "code": "success",
+                "state": currentSong,
+                "volume": round(self.MusicPlayer.current_volume, 2)
+            })
 
         @self.app.route('/song')
         def serve_song():

@@ -1,4 +1,4 @@
-import os, sys, ctypes
+import os, sys, ctypes, subprocess
 
 class Administrator:
     def __init__(self, require_admin=True):
@@ -12,7 +12,7 @@ class Administrator:
         except Exception:
             return False
 
-    def elevate(self):
+    def elevate(self, w_o_admin=False):
         # build args
         params = " ".join(f'"{arg}"' for arg in sys.argv)
         # point to pythonw.exe (no console) instead of python.exe
@@ -30,4 +30,19 @@ class Administrator:
             print("⚠️ UAC elevation failed or was cancelled.")
         else:
             # parent just exits; elevated child runs hidden
+            if w_o_admin:
+                self.elevate_w_o_admin()
+            else:
+                os._exit(0)
+            
+    def elevate_w_o_admin(self):
+        params = [sys.executable.replace("python.exe", "pythonw.exe")] + sys.argv
+        # Hide the window (SW_HIDE = 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        try:
+            subprocess.Popen(params, startupinfo=startupinfo)
             os._exit(0)
+        except Exception as e:
+            print(f"Failed to relaunch hidden: {e}")

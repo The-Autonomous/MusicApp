@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <title>Music Control Panel</title>
+        <style>
+            body {
+                margin: 0;
+                padding: 0;
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+                color: #fff;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                min-height: 100vh;
+                overflow: hidden; /* Prevent scrollbar from appearing due to gradient */
+            }
+
+            .container {
+                background: rgba(255, 255, 255, 0.05);
+                backdrop-filter: blur(10px);
+                padding: 2.5rem; /* Increased padding for more breathing room */
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+                text-align: center;
+                width: 90%;
+                max-width: 550px; /* Slightly wider */
+                border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border */
+            }
+
+            h1 {
+                font-size: 1.8rem; /* Larger heading */
+                margin-bottom: 1.2rem;
+                letter-spacing: 1px;
+                text-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+            }
+
+            .song-title {
+                margin-bottom: 1rem;
+                font-size: 1.4rem; /* Larger song title */
+                font-weight: bold;
+                min-height: 1.4em; /* Prevent layout shift if content is short */
+            }
+            
+            .volume-display {
+                margin-bottom: 2rem; /* More space below volume */
+                font-size: 1.1rem;
+                opacity: 0.85;
+            }
+            
+            .paused {
+                color: #f39c12; /* Orange for paused */
+                font-weight: bold;
+            }
+
+            .repeat-active {
+                color: #3498db; /* Blue for repeat */
+                font-weight: bold;
+            }
+            
+            .buttons {
+                display: grid; /* Use CSS Grid for better control */
+                grid-template-columns: repeat(3, 1fr); /* 3 columns for main controls */
+                gap: 1.2rem; /* Increased gap between buttons */
+                justify-content: center;
+                align-items: center;
+            }
+            
+            button {
+                background: #1abc9c;
+                border: none;
+                border-radius: 50px;
+                padding: 1.1rem 0.8rem; /* More vertical padding */
+                font-size: 1.05rem; /* Slightly larger font */
+                color: white;
+                font-weight: bold;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                min-width: 100px;
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2); /* Button shadow */
+                letter-spacing: 0.5px;
+            }
+
+            button:hover {
+                background: #16a085;
+                transform: translateY(-3px); /* Lift effect on hover */
+                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+            }
+
+            /* Specific styling for play/pause button for prominence */
+            button[data-action="pause"], button[data-action="play"] {
+                grid-column: 2; /* Center in the middle column */
+                background: #e74c3c; /* Red for play/pause */
+                font-size: 1.2rem;
+                padding: 1.2rem 1rem;
+            }
+
+            button[data-action="pause"]:hover, button[data-action="play"]:hover {
+                background: #c0392b;
+            }
+
+            /* Make volume and repeat buttons fill full width on smaller screens, stacked */
+            @media (max-width: 600px) {
+                .buttons {
+                    grid-template-columns: 1fr 1fr; /* 2 columns on smaller screens */
+                    gap: 1rem;
+                }
+                button[data-action="pause"], button[data-action="play"] {
+                    grid-column: span 2; /* Make play/pause span two columns */
+                    order: -1; /* Move it to the top */
+                }
+            }
+
+            @media (max-width: 480px) {
+                .buttons {
+                    grid-template-columns: 1fr; /* Single column on very small screens */
+                }
+                button {
+                    padding: 0.9rem;
+                    font-size: 1rem;
+                    width: 100%; /* Full width buttons */
+                }
+                 button[data-action="pause"], button[data-action="play"] {
+                    grid-column: auto;
+                    order: -1;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Now Playing</h1>
+            <div id="song-title" class="song-title">Loading...</div>
+            <div id="volume-display" class="volume-display">Volume: --</div>
+            <div class="buttons">
+                <button onclick="sendAction('previous')">⏮ Previous</button>
+                <button id="play-pause-button" data-action="pause" onclick="sendAction(this.dataset.action)">⏸ Pause</button>
+                <button onclick="sendAction('skip')">⏭ Skip</button>
+                <button onclick="sendAction('volume_down')">🔉 Volume -</button>
+                <button onclick="sendAction('volume_up')">🔊 Volume +</button>
+                <button id="repeat-button" onclick="sendAction('repeat')">🔁 Repeat</button>
+            </div>
+        </div>
+
+        <div id="settings-modal" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.5);justify-content:center;align-items:center;z-index:2000;">
+            <form id="theme-form" style="
+                background: var(--secondary, #203a43);
+                color: var(--text, #fff);
+                padding: 2rem 2.5rem;
+                border-radius: 18px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                min-width: 300px;
+                display: flex;
+                flex-direction: column;
+                gap: 1.1rem;
+                position: relative;
+            ">
+                <h2 style="margin:0 0 1rem 0;">Theme Settings</h2>
+                <label>Primary Color <input type="color" id="theme-primary" /></label>
+                <label>Secondary Color <input type="color" id="theme-secondary" /></label>
+                <label>Accent Color <input type="color" id="theme-accent" /></label>
+                <label>Danger Color <input type="color" id="theme-danger" /></label>
+                <label>Text Color <input type="color" id="theme-text" /></label>
+                <div style="display:flex; gap:0.7rem; margin-top:1rem;">
+                    <button type="submit" style="flex:1; background:var(--accent,#1abc9c);color:var(--text,#fff);border:none;border-radius:8px;padding:0.7rem 0;">Save</button>
+                    <button type="button" onclick="document.getElementById('settings-modal').style.display = 'none';" style="flex:1; background:var(--danger,#e74c3c);color:var(--text,#fff);border:none;border-radius:8px;padding:0.7rem 0;">Cancel</button>
+                </div>
+                <div style="margin-top:2rem;display:flex;align-items:center;gap:0.7rem;">
+                    <input type="checkbox" id="play-on-device" style="transform:scale(1.3);" />
+                    <label for="play-on-device" style="font-size:1.1rem;cursor:pointer;">Play On Device</label>
+                </div>
+            </form>
+        </div>
+
+        <div id="audio-status" style="position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 8px 12px; border-radius: 5px; font-size: 0.9em; z-index: 2001; max-width: 90vw; word-wrap: break-word;">Audio: Initializing...</div>
+
+        <script>
+            // --- Theme Management ---
+            const DEFAULT_THEME = {
+                name: "Dark Gray",
+                primary: "#2c5364",
+                secondary: "#203a43",
+                accent: "#1abc9c",
+                danger: "#e74c3c",
+                text: "#ffffff",
+                background: "linear-gradient(135deg, #0f2027, #203a43, #2c5364)"
+            };
+
+            function getTheme() {
+                const saved = localStorage.getItem('musicapp_theme');
+                try {
+                    if (!saved) return DEFAULT_THEME;
+                    if (typeof saved === "string" && saved.trim().startsWith("{")) {
+                        return JSON.parse(saved);
+                    } else {
+                        localStorage.removeItem('musicapp_theme');
+                        return DEFAULT_THEME;
+                    }
+                } catch (e) {
+                    localStorage.removeItem('musicapp_theme');
+                    return DEFAULT_THEME;
+                }
+            }
+
+            function applyTheme(theme) {
+                document.documentElement.style.setProperty('--primary', theme.primary || DEFAULT_THEME.primary);
+                document.documentElement.style.setProperty('--secondary', theme.secondary || DEFAULT_THEME.secondary);
+                document.documentElement.style.setProperty('--accent', theme.accent || DEFAULT_THEME.accent);
+                document.documentElement.style.setProperty('--danger', theme.danger || DEFAULT_THEME.danger);
+                document.documentElement.style.setProperty('--text', theme.text || DEFAULT_THEME.text);
+                document.body.style.background = theme.background || DEFAULT_THEME.background;
+                document.body.style.color = theme.text || DEFAULT_THEME.text;
+            }
+
+            function saveTheme(theme) {
+                try {
+                    localStorage.setItem('musicapp_theme', JSON.stringify(theme));
+                } catch (e) {
+                    console.error("Error saving theme to localStorage:", e);
+                }
+            }
+            
+            // --- Global Audio Variables ---
+            let audio = null; // Will hold the Audio object
+            let currentSongUrl = null; // Tracks the current URL of the song loaded in the audio element
+            // let isPlayingOnDevice = false; // Not strictly needed with new event handlers
+            let lastLocation = 0; // Last known playback position from the server
+            let lastStatusTimestamp = 0; // Timestamp of the last status update, for calculating elapsed time
+
+            // --- Audio Status Update Function ---
+            function updateAudioStatus(message) {
+                const statusEl = document.getElementById('audio-status');
+                if (statusEl) {
+                    statusEl.textContent = "Audio: " + message;
+                }
+                console.log("Audio Status:", message);
+            }
+
+
+            document.addEventListener('DOMContentLoaded', () => {
+                // Settings Button
+                const btn = document.createElement('button');
+                btn.textContent = '⚙️ Settings';
+                btn.style.position = 'fixed';
+                btn.style.top = '20px';
+                btn.style.right = '30px';
+                btn.style.zIndex = 1000;
+                btn.style.background = 'var(--accent, #1abc9c)';
+                btn.style.color = 'var(--text, #fff)';
+                btn.style.border = 'none';
+                btn.style.outline = 'none';
+                btn.style.borderRadius = '50px';
+                btn.style.padding = '0.7rem 1.2rem';
+                btn.style.fontSize = '1.1rem';
+                btn.style.cursor = 'pointer';
+                btn.onclick = openSettings; // Defined below
+                document.body.appendChild(btn);
+
+                function getThemeWithFallback() {
+                    try {
+                        const saved = localStorage.getItem('musicapp_theme');
+                        if (!saved || saved === "[object Object]") return DEFAULT_THEME;
+                        return JSON.parse(saved);
+                    } catch (e) {
+                        console.error("Error loading theme from localStorage, falling back to default:", e);
+                        return DEFAULT_THEME;
+                    }
+                }
+                
+                function applyThemeOnLoad() {
+                    const theme = getThemeWithFallback();
+                    if (!theme.text) theme.text = DEFAULT_THEME.text;
+                    if (theme.text === "#fff") theme.text = "#ffffff";
+                    applyTheme(theme);
+
+                    document.getElementById('theme-primary').value = theme.primary || DEFAULT_THEME.primary;
+                    document.getElementById('theme-secondary').value = theme.secondary || DEFAULT_THEME.secondary;
+                    document.getElementById('theme-accent').value = theme.accent || DEFAULT_THEME.accent;
+                    document.getElementById('theme-danger').value = theme.danger || DEFAULT_THEME.danger;
+                    document.getElementById('theme-text').value = theme.text && theme.text.startsWith('#') ? (theme.text === "#fff" ? "#ffffff" : theme.text) : (DEFAULT_THEME.text.startsWith('#') ? (DEFAULT_THEME.text === "#fff" ? "#ffffff" : DEFAULT_THEME.text) : '#ffffff');
+                }
+                applyThemeOnLoad();
+                
+                function openSettings() {
+                    const theme = getTheme();
+                    document.getElementById('theme-primary').value = theme.primary || DEFAULT_THEME.primary;
+                    document.getElementById('theme-secondary').value = theme.secondary || DEFAULT_THEME.secondary;
+                    document.getElementById('theme-accent').value = theme.accent || DEFAULT_THEME.accent;
+                    document.getElementById('theme-danger').value = theme.danger || DEFAULT_THEME.danger;
+                    document.getElementById('theme-text').value = theme.text || DEFAULT_THEME.text;
+                    document.getElementById('settings-modal').style.display = 'flex';
+                }
+                window.closeSettings = function() { // Make it globally accessible for the cancel button
+                    document.getElementById('settings-modal').style.display = 'none';
+                }
+
+                function handleThemeSave(e) {
+                    e.preventDefault();
+                    const theme = getTheme(); // Get current theme to update, not overwrite all
+                    theme.primary = document.getElementById('theme-primary').value;
+                    theme.secondary = document.getElementById('theme-secondary').value;
+                    theme.accent = document.getElementById('theme-accent').value;
+                    theme.danger = document.getElementById('theme-danger').value;
+                    theme.text = document.getElementById('theme-text').value;
+                    saveTheme(theme);
+                    applyTheme(theme);
+                    closeSettings();
+                }
+                document.getElementById('theme-form').onsubmit = handleThemeSave;
+                
+                // --- Play On Device Logic ---
+                function getPlayOnDevice() {
+                    return localStorage.getItem('play_on_device') === 'true';
+                }
+                function setPlayOnDevice(val) {
+                    localStorage.setItem('play_on_device', val ? 'true' : 'false');
+                    if (val && audio && audio.src && audio.paused) {
+                        // If enabling and a song is loaded and paused, try to play
+                        audio.play().then(() => updateAudioStatus("Playback resumed on device.")).catch(e => {
+                            updateAudioStatus(`Auto-play failed after enabling device playback: ${e.message}.`);
+                            console.error("Auto-play failed:", e);
+                        });
+                    } else if (!val && audio && !audio.paused) { // If disabling, pause audio
+                        audio.pause();
+                        updateAudioStatus("Playback on device stopped (disabled via checkbox).");
+                    }
+                }
+
+                const playOnDeviceCheckbox = document.getElementById('play-on-device');
+                playOnDeviceCheckbox.checked = getPlayOnDevice();
+                playOnDeviceCheckbox.onchange = function() {
+                    setPlayOnDevice(this.checked);
+                };
+
+                // --- Audio Sync Logic ---
+                async function fetchSongUrl() {
+                    // This should ideally fetch the actual dynamic song URL if it changes.
+                    // For now, it's hardcoded as per original.
+                    return "/song"; 
+                }
+
+                async function fetchLocation() {
+                    try {
+                        const res = await fetch('/'); // Fetches the main HTML page
+                        const html = await res.text();
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(html, 'text/html');
+                        const locTag = doc.querySelector('location'); // Assumes a <location>SOME_NUMBER</location> tag
+                        if (locTag && locTag.textContent) {
+                            const parsedLocation = parseFloat(locTag.textContent);
+                            if (!isNaN(parsedLocation)) {
+                                return parsedLocation;
+                            } else {
+                                console.warn("fetchLocation: Parsed location is NaN. Original text:", locTag.textContent);
+                                return 0; // Default to 0 if parsing fails
+                            }
+                        }
+                        // console.warn("fetchLocation: <location> tag not found or empty."); // Can be noisy
+                        return 0; // Default to 0 if tag not found
+                    } catch (error) {
+                        console.error("Error fetching or parsing location:", error);
+                        updateAudioStatus("Error fetching playback location.");
+                        return 0; // Default to 0 on error
+                    }
+                }
+                
+                async function syncAudio(stateString, volume, locationFromServer, repeat) {
+                    const playOnDeviceEnabled = getPlayOnDevice();
+
+                    if (!playOnDeviceEnabled) {
+                        if (audio && !audio.paused) {
+                            audio.pause();
+                            // updateAudioStatus("Playback on device stopped (disabled)."); // Handled by checkbox change or onpause
+                        }
+                        return;
+                    }
+
+                    // 1. Ensure audio element exists
+                    if (!audio) {
+                        audio = new Audio();
+                        audio.style.display = "none"; 
+                        audio.preload = "auto"; 
+                        document.body.appendChild(audio);
+                        updateAudioStatus("Audio element created.");
+
+                        audio.onended = function() {
+                            updateAudioStatus("Song ended.");
+                            if (audio.loop) { 
+                                audio.currentTime = 0;
+                                audio.play().then(() => updateAudioStatus("Looping song."))
+                                            .catch(e => updateAudioStatus(`Loop play failed: ${e.message}`));
+                            }
+                        };
+                        audio.onerror = function() { // 'e' event is not always useful here, audio.error is better
+                            updateAudioStatus(`Error loading/playing audio: ${audio.error?.message || 'Unknown error'}`);
+                            console.error("Audio Element Error:", audio.error);
+                        };
+                        audio.onpause = function() {
+                            if (getPlayOnDevice()) updateAudioStatus("Paused."); // Only show if meant to be playing on device
+                        };
+                        audio.onplaying = function() {
+                            if (getPlayOnDevice()) updateAudioStatus("Playing.");
+                        };
+                        audio.onloadeddata = function() {
+                            updateAudioStatus("Audio data loaded.");
+                            // After data is loaded, re-evaluate playback state if needed
+                            // This is important if play was attempted before data was ready
+                            const isRemotePaused = typeof stateString === 'string' && (stateString.includes('***[]*Paused') || stateString.includes('*=*'));
+                            if (!isRemotePaused && audio.paused) {
+                                 updateAudioStatus("Data loaded, attempting to play...");
+                                 audio.play().catch(error => {
+                                     updateAudioStatus(`Play after load failed: ${error.message}`);
+                                 });
+                            }
+                        };
+                        audio.onstalled = function() { updateAudioStatus("Playback stalled (network issue?)."); };
+                        audio.onsuspend = function() { updateAudioStatus("Audio loading suspended by browser."); };
+                        audio.onvolumechange = function() {
+                            // Optional: updateAudioStatus(`Volume changed to ${(audio.volume * 100).toFixed(0)}%`);
+                        };
+                    }
+
+                    // 2. Check and set song source
+                    const songUrlToPlay = await fetchSongUrl();
+                    if (currentSongUrl !== songUrlToPlay) {
+                        updateAudioStatus(`New song source: ${songUrlToPlay}. Loading...`);
+                        audio.src = songUrlToPlay + "?t=" + Date.now(); // Cache bust
+                        currentSongUrl = songUrlToPlay;
+                        lastLocation = 0; // Reset location for new song
+                        lastStatusTimestamp = performance.now(); // Reset timestamp
+                        audio.load(); 
+                    }
+
+                    // 3. Sync properties (volume, loop)
+                    // Ensure volume is between 0 and 1
+                    audio.volume = typeof volume === "number" ? Math.max(0, Math.min(1, volume)) : 1.0;
+                    audio.loop = !!repeat;
+
+                    // 4. Sync play/pause state and currentTime
+                    const isRemotePaused = typeof stateString === 'string' && (stateString.includes('***[]*Paused') || stateString.includes('*=*'));
+
+                    let targetTime = locationFromServer || 0;
+                    if (lastStatusTimestamp && !isRemotePaused && audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+                        const now = performance.now();
+                        const elapsedSinceLastSync = (now - (lastStatusTimestamp || now)) / 1000;
+                        targetTime += elapsedSinceLastSync;
+                    }
+                    
+                    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) { // Check if duration is available
+                        if (isFinite(targetTime) && targetTime >= 0 && targetTime < audio.duration) {
+                            if (Math.abs(audio.currentTime - targetTime) > 1.0) { // Seek if diff > 1s
+                                // updateAudioStatus(`Seeking to ${targetTime.toFixed(2)}s.`);
+                                audio.currentTime = targetTime;
+                            }
+                        } else if (isFinite(targetTime) && targetTime >= audio.duration && audio.duration > 0) {
+                            // updateAudioStatus(`Target ${targetTime.toFixed(2)}s beyond duration ${audio.duration.toFixed(2)}s.`);
+                            if (Math.abs(audio.currentTime - audio.duration) > 0.1 && !audio.ended) {
+                                 audio.currentTime = audio.duration - 0.01; // Seek to very end
+                            }
+                        }
+                    }
+
+                    if (isRemotePaused) {
+                        if (!audio.paused) {
+                            audio.pause();
+                        }
+                    } else { // Should play
+                        if (audio.paused) {
+                            if (audio.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA) { // HAVE_ENOUGH_DATA (4)
+                                // updateAudioStatus("Attempting to play based on remote state...");
+                                audio.play()
+                                    .catch(error => {
+                                        updateAudioStatus(`Play failed: ${error.message}. User interaction may be needed.`);
+                                        console.error("Error playing audio:", error);
+                                    });
+                            } else if (audio.readyState > 0) { // It's loading or has some data
+                                 updateAudioStatus("Waiting for enough audio data to play...");
+                            } else if (audio.networkState === HTMLMediaElement.NETWORK_NO_SOURCE && audio.src) {
+                                updateAudioStatus("Error: No source or invalid source for audio.");
+                            }
+                        }
+                    }
+                    
+                    if (!isRemotePaused) {
+                        lastStatusTimestamp = performance.now();
+                    }
+                    lastLocation = locationFromServer; // Store the base location from server
+                }
+
+
+                // --- CSS Variables for Theme ---
+                const style = document.createElement('style');
+                style.innerHTML = [
+                    'body {',
+                    'background: var(--background, linear-gradient(135deg, #0f2027, #203a43, #2c5364));',
+                    'color: var(--text, #fff);',
+                    '}',
+                    '.container {',
+                    'background: rgba(255,255,255,0.05);',
+                    'border: 1px solid rgba(255,255,255,0.1);',
+                    'color: var(--text, #fff);',
+                    '}',
+                    'button {',
+                    'background: var(--accent, #1abc9c);',
+                    'color: var(--text, #fff);',
+                    '}',
+                    'button[data-action="pause"], button[data-action="play"] {',
+                    'background: var(--danger, #e74c3c);',
+                    'color: var(--text, #fff);',
+                    '}',
+                    'button[data-action="pause"]:hover, button[data-action="play"]:hover {',
+                    'background: #c0392b;', // Keep specific hover for play/pause
+                    '}',
+                    '#audio-status { background: var(--secondary); color: var(--text); }' // Theme the audio status
+                ].join('\n');
+                document.head.appendChild(style);
+
+                // --- Existing App Logic ---
+                class TitleCleaner {
+                    constructor(rules = null) {
+                        this._splitPattern = /(?: - |\(|\||\[)/;
+                        this._defaults = [
+                            ["***[]*Paused", " -[Paused]-"],
+                            ["*=*", " -[Paused]-"],
+                            ["*+*", " -[Repeat]-"]
+                        ];
+                        this.rules = rules || this._defaults;
+                    }
+                    clean(raw) {
+                        let suffix = '';
+                        let core = raw;
+                        for (const [oldSuffix, _] of this.rules) {
+                            if (raw.endsWith(oldSuffix)) {
+                                suffix = oldSuffix;
+                                core = raw.slice(0, raw.length - suffix.length).trim();
+                                break;
+                            }
+                        }
+                        let artist = '';
+                        let track = core;
+                        let separator = '![]!'; // Custom separator
+                        let separatorIndex = core.indexOf(separator);
+                        if (separatorIndex !== -1) {
+                            artist = core.slice(0, separatorIndex).trim();
+                            track = core.slice(separatorIndex + separator.length).trim();
+                        } else {
+                            separator = ' - '; // Default separator
+                            separatorIndex = core.indexOf(separator);
+                            if (separatorIndex !== -1) {
+                                artist = core.slice(0, separatorIndex).trim();
+                                track = core.slice(separatorIndex + separator.length).trim();
+                            }
+                        }
+                        // Remove bracketed text unless it contains "Play On Device"
+                        let main = track.replace(/([\[\(][^\]\)]*[\]\)])/g, function(match) {
+                            return match.includes("Play On Device") ? match : "";
+                        }).trim();
+                        if (artist && main.startsWith(artist)) {
+                            main = main.slice(artist.length).replace(/^[-:\s]+/, '').trim();
+                        }
+                        let cleaned = artist ? (artist + ' - ' + main) : main;
+                        let result = cleaned + suffix;
+                        result = result.replace(/\*\+\*/g, ''); // Remove repeat marker if present
+                        for (const [oldRule, newRule] of this.rules) {
+                            let safeOldRule = oldRule.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            result = result.replace(new RegExp(safeOldRule, 'g'), newRule);
+                        }
+                        return result.trim();
+                    }
+                }
+
+                const cleaner = new TitleCleaner();
+
+                async function sendAction(action) {
+                    try {
+                        if (action === 'pause' || action === 'play') {
+                            const playPauseButton = document.getElementById('play-pause-button');
+                            if (action === 'pause') {
+                                playPauseButton.dataset.action = 'play';
+                                playPauseButton.textContent = '▶ Play';
+                            } else {
+                                playPauseButton.dataset.action = 'pause';
+                                playPauseButton.textContent = '⏸ Pause';
+                            }
+                        }
+                        const response = await fetch('/action', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ action })
+                        });
+                        const result = await response.json();
+                        if (result.code === 'success') {
+                            // updateSongState will be called, which then calls syncAudio
+                            window.updateSongState(result.state, result.volume);
+                        } else {
+                            console.error('Action failed:', result.message);
+                            document.getElementById('song-title').textContent = 'Error: ' + result.message;
+                            updateAudioStatus(`Action '${action}' failed: ${result.message}`);
+                        }
+                    } catch (error) {
+                        console.error('Error sending action:', error);
+                        document.getElementById('song-title').textContent = 'Error communicating with server.';
+                        updateAudioStatus(`Error sending action '${action}': ${error.message}`);
+                    }
+                }
+                window.sendAction = sendAction; // Make globally accessible for buttons
+
+                async function pollStatus() {
+                    try {
+                        const res = await fetch('/action', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ action: 'status' })
+                        });
+                        const data = await res.json();
+                        if (data.code === 'success') {
+                            window.updateSongState(data.state, data.volume);
+                        } else {
+                            console.error('Status poll failed:', data.message);
+                           // document.getElementById('song-title').textContent = 'Error: ' + data.message; // Avoid overwriting title too much
+                           updateAudioStatus(`Status poll failed: ${data.message}`);
+                        }
+                    } catch (error) {
+                        console.error('Error polling status:', error);
+                       // document.getElementById('song-title').textContent = 'Error communicating with server.';
+                       updateAudioStatus(`Error polling status: ${error.message}`);
+                    }
+                }
+
+                // Original updateSongState, now globally available for patching
+                window.updateSongState = function(stateString, volume) {
+                    const songEl = document.getElementById('song-title');
+                    const volEl = document.getElementById('volume-display');
+                    const playPauseButton = document.getElementById('play-pause-button');
+                    const repeatButton = document.getElementById('repeat-button');
+
+                    let display = `🎵 ${cleaner.clean(stateString)}`;
+                    songEl.classList.remove('paused', 'repeat-active');
+                    if (repeatButton) repeatButton.classList.remove('repeat-active');
+                    
+                    const isPaused = typeof stateString === 'string' && (stateString.includes('***[]*Paused') || stateString.includes('*=*'));
+                    const isRepeat = typeof stateString === 'string' && stateString.includes('*+*');
+
+                    if (isPaused) {
+                        songEl.classList.add('paused');
+                        playPauseButton.dataset.action = 'play';
+                        playPauseButton.textContent = '▶ Play';
+                    } else {
+                        playPauseButton.dataset.action = 'pause';
+                        playPauseButton.textContent = '⏸ Pause';
+                    }
+                    if (isRepeat) {
+                        songEl.classList.add('repeat-active');
+                        if (repeatButton) repeatButton.classList.add('repeat-active');
+                        if (!display.includes('[Repeat]')) { // Ensure [Repeat] is shown at the end
+                            display = display.replace(/\s*$/, '') + ' [Repeat]';
+                        }
+                    } else {
+                        // Remove any [Repeat] text
+                        display = display.replace(/\s*\[Repeat\]/, '');
+                    }
+                    songEl.innerHTML = display; // Use innerHTML if display might contain entities, textContent otherwise
+                    volEl.textContent = "Volume: " + (volume * 100).toFixed(0) + "%";
+                }
+
+                // Patch updateSongState to call syncAudio
+                const origUpdateSongState = window.updateSongState;
+                window.updateSongState = async function(stateString, volume) {
+                    origUpdateSongState.call(this, stateString, volume); // Call original first to update UI
+                    
+                    const repeat = stateString.includes('*+*');
+                    const location = await fetchLocation(); // Fetch current location from server idea
+                    
+                    // Call the new syncAudio. It will handle 'playOnDevice' check internally.
+                    syncAudio(stateString, volume, location, repeat);
+                };
+                
+                // Initial poll and interval
+                pollStatus(); // Initial poll
+                setInterval(pollStatus, 1000); // Changed polling to 1 second to be less aggressive
+            });
+        </script>
+    </body>
+</html>

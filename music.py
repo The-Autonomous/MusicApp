@@ -1,5 +1,5 @@
-import os, time, random, platform, pygame, ast, requests
-from threading import Event, Thread
+import os, time, random, platform, pygame, ast, requests, json
+from threading import Event, Thread, Lock
 from mutagen.mp3 import MP3
 from mutagen import File
 from pathlib import Path
@@ -19,10 +19,10 @@ except:
     from .radioClient import RadioClient
     from .radioMaster import RadioHost
 
-##########################
+#####################################################################################################
 
 class SmartShuffler:
-    def __init__(self, cache, history_size=50, artist_spacing=2):
+    def __init__(self, cache=[], history_size=50, artist_spacing=2):
         self.cache = list(cache)
         self.history_size = history_size
         self.artist_spacing = artist_spacing
@@ -52,14 +52,6 @@ class SmartShuffler:
         """
         self.replay_queue.insert(0, song)
 
-    def inject_song(self, song, position=0):
-        """
-        Injects a song directly into the upcoming queue at the specified position.
-        Position 0 means it will be played next (unless a replay is queued).
-        """
-        if song not in self.upcoming:
-            self.upcoming.insert(position, song)
-
     def get_unique_song(self):
         if self.replay_queue:
             return self.replay_queue.pop(0)
@@ -81,7 +73,11 @@ class SmartShuffler:
         # fallback
         return random.choice(self.cache) if self.cache else None
 
+#####################################################################################################
+
 class MusicPlayer:
+    SAVE_STATE_FILE = ".musicapp_state.json"
+    
     def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips):
         pygame.mixer.init()
 
@@ -91,6 +87,7 @@ class MusicPlayer:
         self.repeat_event = Event()
         self.movement_event = Event()
         self.current_player_mode = Event()  # False = MusicPlayer, True = RadioPlayer
+        self.save_playback_lock = Lock()
 
         # UI callbacks
         self.set_screen = set_screen
@@ -103,25 +100,169 @@ class MusicPlayer:
         self.lyricHandler = lyricHandler()
 
         # Cache & Shuffler
-        self.cache = []
+        self.shuffler = SmartShuffler()
         self.initialize_cache(directories)
-        self.shuffler = SmartShuffler(self.cache)
+        self.load_playback_state()
 
         # Playback state
         self.current_song = None
         self.song_elapsed_seconds = 0.0
-        self.history = []
         self.forward_stack = []
-        self.replay_queue = []
         self.current_index = -1
         self.current_volume = 0.1
+        self.navigating_history = False
 
         # Radio system
         self.full_radio_ip_list = []
         self.current_radio_ip = "0.0.0.0"
         self.radio_client = RadioClient(ip=self.current_radio_ip)
-        self.radio_master = RadioHost()
+        self.radio_master = RadioHost(self)
         self.radio_scanner = SimpleRadioScan()
+
+#####################################################################################################
+
+    def get_search_term(self, search_string: str):
+        """
+        Search for songs in cache based on the search string.
+        Returns a list of tuples (display_name, path) sorted by relevance.
+        Limits results to 50 for performance.
+        """
+        search_string = search_string.lower().strip()
+        if not search_string:
+            return []
+
+        results = []
+        seen_paths = set()
+        MAX_RESULTS = 50
+
+        # Helper to add result if not already seen
+        def add_result(song, score=0):
+            if song['path'] not in seen_paths:
+                seen_paths.add(song['path'])
+                display = f"{song['artist']} - {song['title']}"
+                results.append((display, song['path'], score))
+                return True
+            return False
+
+        # 1. Direct title matches (highest priority)
+        for song in self.shuffler.cache:
+            if search_string in song['title'].lower():
+                if add_result(song, 100):
+                    if len(results) >= MAX_RESULTS:
+                        break
+
+        if len(results) >= MAX_RESULTS:
+            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+
+        # 2. Artist + Title matches
+        for song in self.shuffler.cache:
+            combined = f"{song['artist']} {song['title']}".lower()
+            if search_string in combined:
+                if add_result(song, 75):
+                    if len(results) >= MAX_RESULTS:
+                        break
+
+        if len(results) >= MAX_RESULTS:
+            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+
+        # 3. Artist matches
+        for song in self.shuffler.cache:
+            if search_string in song['artist'].lower():
+                if add_result(song, 50):
+                    if len(results) >= MAX_RESULTS:
+                        break
+
+        if len(results) >= MAX_RESULTS:
+            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+
+        # 4. Path matches
+        for song in self.shuffler.cache:
+            if search_string in os.path.basename(song['path']).lower():
+                if add_result(song, 25):
+                    if len(results) >= MAX_RESULTS:
+                        break
+
+        if not results:
+            # 5. Fuzzy matches (only if no other results)
+            # Simple character-based similarity
+            search_chars = set(search_string)
+            for song in self.shuffler.cache:
+                title_chars = set(song['title'].lower())
+                artist_chars = set(song['artist'].lower())
+                if len(search_chars & (title_chars | artist_chars)) >= len(search_chars) * 0.7:
+                    if add_result(song, 10):
+                        if len(results) >= MAX_RESULTS:
+                            break
+
+        # Sort by score and return just the display and path
+        return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+
+    def play_song(self, path_or_song):
+        """
+        Play a song either from a path string or a song dictionary.
+        """
+        # Convert path to song dict if needed
+        if isinstance(path_or_song, str):
+            song = next((s for s in self.shuffler.cache if s['path'] == path_or_song), None)
+            if not song:
+                print(f"Song not found in cache: {path_or_song}")
+                return
+        else:
+            song = path_or_song
+
+        # Check if it's already playing
+        if self.current_song and self.current_song['path'] == song['path']:
+            return  # Already playing this song
+
+        # Queue the song and skip to it
+        self._queue_song(song)
+
+#####################################################################################################
+
+    def save_playback_state(self):
+        """Save the current song path and elapsed time to a file."""
+        if self.current_song:
+            state = {
+                "path": self.current_song["path"],
+                "elapsed": self.song_elapsed_seconds
+            }
+            try:
+                with self.save_playback_lock:
+                    if self.current_song["path"] == state['path']:
+                        with open(self.SAVE_STATE_FILE, "w") as f:
+                            json.dump(state, f)
+            except Exception as e:
+                print(f"Failed to save playback state: {e}")
+
+    def load_playback_state(self):
+        try:
+            self.resume_pending = True
+            with open(self.SAVE_STATE_FILE, "r") as f:
+                state = json.load(f)
+            path = state.get("path")
+            elapsed = state.get("elapsed", 0)
+            
+            if path and os.path.exists(path):
+                # Find the song dict in cache
+                song = next((s for s in self.shuffler.cache if s["path"] == path), None)
+                if not song:
+                    metadata = self.get_metadata(path)
+                    song = {
+                        'path': path,
+                        'artist': metadata.get('artist', 'Unknown Artist'),
+                        'title': metadata.get('title', os.path.splitext(os.path.basename(path))[0])
+                    }
+                    self.shuffler.cache.append(song)
+                    self.shuffler._refill_upcoming()
+                
+                self.current_song = song
+                self._resume_position = float(elapsed)  # Store in a separate variable
+                self.shuffler.enqueue_replay(song)
+                return True
+        except Exception as e:
+            print(f"Failed to load playback state: {e}")
+            self.resume_pending = False
+        return False
 
     def initialize_cache(self, directories):
         supported_extensions = ('.mp3', '.wav', '.ogg', '.flac')
@@ -141,23 +282,29 @@ class MusicPlayer:
                         
                         if file.lower().endswith(supported_extensions):
                             metadata = self.get_metadata(full_path)
-                            self.cache.append({
+                            self.shuffler.cache.append({
                                 'path': full_path,
                                 'artist': metadata.get('artist', 'Unknown Artist'),
                                 'title': metadata.get('title', os.path.splitext(file)[0])
                             })
-                            
+        # Refill upcoming queue after cache is populated
+        self.shuffler._refill_upcoming()
+
+#####################################################################################################
+
     def ytDownload(self, url, possibleDirectories):
         returnedPaths = self.ytHandle.parseUrl(url, possibleDirectories)
         for path in returnedPaths:
             filename = os.path.basename(path)
             metadata = self.get_metadata(path)
-            self.cache.append({
+            self.shuffler.cache.append({
                 'path': path,
                 'artist': metadata.get('artist', 'Unknown Artist'),
                 'title': metadata.get('title', os.path.splitext(filename)[0])
             })
         print(f"⏬ Download Completed: {url}")
+
+#####################################################################################################
 
     def get_metadata(self, file_path):
         try:
@@ -171,6 +318,8 @@ class MusicPlayer:
                 'artist': 'Unknown Artist',
                 'title': os.path.splitext(os.path.basename(file_path))[0]
             }
+
+#####################################################################################################
     
     def pause(self, forcedState: bool = None):
         # decide: True → unpause; False → pause; None → toggle
@@ -217,25 +366,46 @@ class MusicPlayer:
             self.repeat_event.set()
         self.cachedRepeatValue = False
         self.movement_event.clear()
-
+        
     def skip_next(self):
         if self.before_move() == False:
             return
         if self.forward_stack:
-            next_song = self.forward_stack.pop()
+            self.navigating_history = True
             self.current_index += 1
-            self._queue_song(next_song)
+            next_path = self.forward_stack.pop()
+            next_song = next((s for s in self.shuffler.cache if s['path'] == next_path), None)
+            if next_song:
+                self._queue_song(next_song)
+            self.navigating_history = False
         else:
             self._clear_for_new_track()
+            new_song = self.get_unique_song()
+            if new_song:
+                self.shuffler.history = self.shuffler.history[:self.current_index+1]
+                self.shuffler.history.append(new_song['path'])
+                self.current_index += 1
+                self.forward_stack.clear()
+                self._queue_song(new_song)
         self.after_move()
 
     def skip_previous(self):
         if self.before_move() == False:
             return
         if self.current_index > 0:
-            self.forward_stack.append(self.history[self.current_index])
+            self.navigating_history = True
+            self.forward_stack.append(self.shuffler.history[self.current_index])
             self.current_index -= 1
-            self._queue_song(self.history[self.current_index])
+            prev_path = self.shuffler.history[self.current_index]
+            prev_song = next((s for s in self.shuffler.cache if s['path'] == prev_path), None)
+            if prev_song:
+                self._queue_song(prev_song)
+            self.navigating_history = False
+        else:
+            prev_path = self.shuffler.history[self.current_index]
+            prev_song = next((s for s in self.shuffler.cache if s['path'] == prev_path), None)
+            if prev_song:
+                self._queue_song(prev_song)
         self.after_move()
             
     def set_volume(self, direction: int = 0):
@@ -250,15 +420,15 @@ class MusicPlayer:
     def dwn_volume(self):
         self.set_volume(-0.05)
 
+#####################################################################################################
 
     def _clear_for_new_track(self):
         self.skip_flag.set()
         pygame.mixer.music.stop()
         self.forward_stack = []
-        self.replay_queue = []  # Clear queue for new selection
-        if self.current_index < len(self.history) - 1:
-            self.history = self.history[:self.current_index+1]
-
+        self.shuffler.replay_queue = []  # Clear queue for new selection
+        if self.current_index < len(self.shuffler.history) - 1:
+            self.shuffler.history = self.shuffler.history[:self.current_index+1]
     
     def _queue_song(self, song):
         self.skip_flag.set()
@@ -269,6 +439,8 @@ class MusicPlayer:
         # Delegate to SmartShuffler
         return self.shuffler.get_unique_song()
 
+#####################################################################################################
+
     def resetRadio(self):
         try:
             self.radio_client.stopListening()
@@ -276,6 +448,33 @@ class MusicPlayer:
             pass
         del self.radio_client
         self.radio_client = RadioClient(ip=self.current_radio_ip)
+        
+    def load_radio_ips(self, seconds_to_scan: int = 60):
+        """
+        Every seconds_to_scan (Default 60) Scan The Full List Of Available Radios
+        Run Only In A Seperate Daemon Thread
+        """
+        def handle_callback_ip(ip, title, location):
+            if not ip in self.full_radio_ip_list and not ip.__contains__("0.0.0.0"):
+                self.full_radio_ip_list.append(ip)
+                if self.current_radio_ip == "0.0.0.0":
+                    self.current_radio_ip = ip
+                self.set_ips(self.full_radio_ip_list)
+        
+        while True:
+            self.radio_scanner.scan_all(handle_callback_ip)
+            time.sleep(seconds_to_scan)
+
+    def set_radio_ip(self, new_ip):
+        if new_ip in self.full_radio_ip_list:
+            self.toggle_loop_cycle()
+            self.current_radio_ip = new_ip
+            self.toggle_loop_cycle()
+            return True
+        else:
+            return False
+
+#####################################################################################################
 
     def core_handler(self):
         Thread(target=self.core_player_loop, daemon=True).start()
@@ -316,31 +515,6 @@ class MusicPlayer:
                         print("Error In Loading Music In Radio. Retrying")
                         if not didReset:
                             return self.toggle_loop_cycle(CycleType)
-            
-    def load_radio_ips(self, seconds_to_scan: int = 60):
-        """
-        Every seconds_to_scan (Default 60) Scan The Full List Of Available Radios
-        Run Only In A Seperate Daemon Thread
-        """
-        def handle_callback_ip(ip, title, location):
-            if not ip in self.full_radio_ip_list and not ip.__contains__("0.0.0.0"):
-                self.full_radio_ip_list.append(ip)
-                if self.current_radio_ip == "0.0.0.0":
-                    self.current_radio_ip = ip
-                self.set_ips(self.full_radio_ip_list)
-        
-        while True:
-            self.radio_scanner.scan_all(handle_callback_ip)
-            time.sleep(seconds_to_scan)
-
-    def set_radio_ip(self, new_ip):
-        if new_ip in self.full_radio_ip_list:
-            self.toggle_loop_cycle()
-            self.current_radio_ip = new_ip
-            self.toggle_loop_cycle()
-            return True
-        else:
-            return False
 
     def core_radio_loop(self):
         def lyric_callback(unformatted_return_lyrics: str, return_dilation, local_song_id):
@@ -372,8 +546,7 @@ class MusicPlayer:
                                 break
                             time.sleep(0.1)
                         self.set_lyrics(True, lyric_pair[1])
-                else:
-                    self.set_lyrics(False)
+                self.set_lyrics(False)
             except Exception as E:
                 print(f"Radio Lyric Callback Error With Data: {unformatted_return_lyrics} And Dilation {return_dilation:.2f}s And Error {E}")
                 
@@ -408,18 +581,31 @@ class MusicPlayer:
         prev_song = None
         while True:
             self.skip_flag.clear()
-            song = self.get_unique_song() if not self.repeat_event.is_set() or prev_song is None else prev_song
+            if self.skip_flag.is_set() or not self.repeat_event.is_set() or prev_song is None:
+                song = self.get_unique_song()
+            else:
+                song = prev_song
             prev_song = song
             if not song:
                 time.sleep(0.5)
                 continue
 
             # history and played lists maintained in shuffler, so skip duplicates here
+            if not self.navigating_history:
+                # Only append if we're not navigating history (i.e., playing a new song)
+                # Truncate history if we've gone back and are now playing a new song
+                self.shuffler.history = self.shuffler.history[:self.current_index+1]
+                if not self.shuffler.history or self.shuffler.history[-1] != song['path']:
+                    self.shuffler.history.append(song['path'])
+                    self.current_index = len(self.shuffler.history) - 1
+            else:
+                # Navigating history: do NOT append, just ensure current_index is correct
+                pass
+            
             self.current_song = song
-            self.current_song_id = str(song['title']) + str(time.time()) # Create A Unique Song Idea For Lyrics To Track
+            self.current_song_id = str(song['title']) + str(time.time()) # Create A Unique Song ID For Lyrics To Track
             title = song['title']
             self.set_screen(song['artist'], title)
-            self.song_elapsed_seconds = 0.0
             self.current_song_lyrics = ""
             
             current_rotation_count, max_current_rotation = 0, 5 # Count How Many Rotations Of Loop Have Occured Before Syncing The Radio Host With The Internal Media Player
@@ -451,11 +637,35 @@ class MusicPlayer:
             try:
                 pygame.mixer.music.load(song['path'])
                 pygame.mixer.music.set_volume(self.current_volume)
-                pygame.mixer.music.play()
+                
+                # Simplified resume logic - if we're resuming and this is the correct song
+                # In core_player_loop, replace the resume block with:
+                if getattr(self, "resume_pending", False) and self.current_song and self.current_song['path'] == song['path']:
+                    start_pos = getattr(self, '_resume_position', 0.0)  # Use stored position
+                    pygame.mixer.music.play()
+                    
+                    try:
+                        pygame.mixer.music.set_pos(start_pos)
+                    except Exception as e:
+                        try:
+                            pygame.mixer.music.play(start=start_pos)
+                            print(f"Used alternative method to start at {start_pos:.2f}s")
+                        except Exception as e:
+                            print(f"Alternative method also failed: {e}")
+                    
+                    start_time = time.time() - start_pos
+                    self.resume_pending = False
+                    delattr(self, '_resume_position')  # Clean up
+                else:
+                    start_pos = 0.0
+                    pygame.mixer.music.play()
+                    start_time = time.time()
+
                 audio = MP3(song['path'])
                 total_duration = audio.info.length
-
-                start_time = time.time()
+                
+                # Ensure start_time reflects our position
+                start_time = time.time() - start_pos
                 paused_duration = 0
                 
                 if current_rotation_count == 0:
@@ -468,6 +678,7 @@ class MusicPlayer:
                         
                 current_rotation_count = (current_rotation_count + 1) % max_current_rotation # Add One Else Loop Back
                 
+                last_save_time = 0
                 while time.time() - start_time - paused_duration < total_duration:
                     if self.skip_flag.is_set(): break
                     if self.pause_event.is_set():
@@ -486,6 +697,9 @@ class MusicPlayer:
                         pygame.mixer.music.unpause()
                     self.song_elapsed_seconds = time.time() - start_time - paused_duration
                     self.set_duration(self.song_elapsed_seconds, total_duration)
+                    if time.time() - last_save_time > 1:
+                        self.save_playback_state()
+                        last_save_time = time.time()
                     time.sleep(0.1)
 
             except Exception as e:
@@ -495,7 +709,10 @@ class MusicPlayer:
             finally:
                 pygame.mixer.music.stop()
                 self.current_song = None
-                            
+                self.song_elapsed_seconds = 0.0
+
+#####################################################################################################
+
 def get_auto_directories(candidate_urls=[]):
     """Automatically detects existing GTAV Enhanced User Music directories"""
     valid_dirs = candidate_urls
