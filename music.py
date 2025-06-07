@@ -709,7 +709,7 @@ class MusicPlayer:
                         self.radio_master.initSong(
                             title = fullTitle,
                             mp3_song_file_path = song['path'],
-                            current_pymixer = AudioPlayer, # FUTURE FIX
+                            current_mixer = AudioPlayer, # FUTURE FIX
                             current_song_lyrics = self.current_song_lyrics
                         )
                             
@@ -722,7 +722,7 @@ class MusicPlayer:
                             self.radio_master.initSong(
                                 title = f"{fullTitle}***[]*Paused",
                                 mp3_song_file_path = song['path'],
-                                current_pymixer = AudioPlayer, # FUTURE FIX
+                                current_mixer = AudioPlayer, # FUTURE FIX
                                 current_song_lyrics = self.current_song_lyrics
                             )
                             pause_start = time.time()

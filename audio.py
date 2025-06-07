@@ -129,6 +129,10 @@ class AudioPlayerRoot:
         """Pre-buffers an audio file without starting playback."""
         self._start_playback_session(filepath, start_pos=0.0, play_immediately=False)
 
+    def unload(self):
+        """Alias for the stop() method. Stops playback and cleans up all resources."""
+        self.stop()
+
     def play(self, filepath=None, start_pos=0.0):
         """Plays a file directly, or resumes a pre-loaded/paused file."""
         if filepath:
@@ -224,7 +228,18 @@ class AudioPlayerRoot:
                     '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
                     '-ar', str(self.samplerate), '-ac', str(self.channels), 'pipe:1'
                 ]
-                process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # --- FIX: Prevent console window from showing up on Windows ---
+                creation_flags = 0
+                if platform.system() == 'Windows':
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+
+                process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=creation_flags
+                )
                 
                 bytes_per_frame = 4 * self.channels # float32 is 4 bytes
                 chunk_size_bytes = self.chunk_size * bytes_per_frame

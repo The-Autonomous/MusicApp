@@ -109,7 +109,7 @@ class RadioHost:
         self._server_thread.start()
         print(f"[RadioHost] Serving on http://{host}:{port}")
 
-    def initSong(self, title, mp3_song_file_path, current_pymixer, current_song_lyrics=""):
+    def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
         """Call whenever you load a new track."""
         # Stop old position thread
         if self._pos_thread and self._pos_thread.is_alive():
@@ -121,7 +121,7 @@ class RadioHost:
             'title': title,
             'mp3_path': mp3_song_file_path,
             'lyrics': current_song_lyrics,
-            'mixer': current_pymixer,
+            'mixer': current_mixer,
             'position': 0.0
         })
 
@@ -184,7 +184,7 @@ if __name__ == '__main__':
     host.initSong(
         title="Example Song",
         mp3_song_file_path=os.path.abspath("example.mp3"),
-        current_pymixer=mixer,
+        current_mixer=mixer,
         current_song_lyrics="These are the lyrics..."
     )
 

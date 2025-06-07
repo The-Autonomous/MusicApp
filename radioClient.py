@@ -111,18 +111,18 @@ class RadioClient:
                 is_paused = data['title'].endswith("***[]*Paused")
 
                 if is_paused and not self._paused:
-                    pygame.mixer.music.pause()
+                    self.AudioPlayer.pause() # pygame.mixer.music.pause()
                     self._pause_time = time()
                     self._paused = True
                 elif not is_paused and self._paused:
-                    pygame.mixer.music.unpause()
+                    self.AudioPlayer.unpause() # pygame.mixer.music.unpause()
                     self._pause_time = None
                     self._paused = False
                 self._repeat = data['title'].endswith(" *+*")
 
                 if data['title'] != self.client_data['radio_text'] and not self._repeat:
                     self._handle_song_change(data, self._start_download_offset)
-                elif pygame.mixer.music.get_busy() or self._paused:
+                elif self.AudioPlayer.get_busy() or self._paused: # pygame.mixer.music.get_busy() or self._paused:
                     try:
                         # Replacing get_pos with manual time tracking
                         if self._start_time is not None:
@@ -142,8 +142,8 @@ class RadioClient:
                         else:
                             self.client_data['radio_duration'][0] = client_pos
 
-                    except pygame.error as e:
-                        print(f"Pygame error getting position: {e}")
+                    except Exception as e:
+                        print(f"Error getting position: {e}")
 
             except Exception as e:
                 print(f"Error in update loop: {str(e)}")
@@ -202,7 +202,7 @@ class RadioClient:
     def _play_song(self, song_url, lyric_url, start_position, buffer_time_frame):
         try:
             print(f"Downloading song: {song_url}, {lyric_url}")
-            pygame.mixer.music.unload()
+            self.AudioPlayer.unload() # pygame.mixer.music.unload()
             if not self._channel_changed:
                 self.static_noise.set_volume(0.01)
                 self.static_noise.play(loops=-1)
@@ -227,26 +227,26 @@ class RadioClient:
                 self.static_noise.stop()
             audio = MP3(self.temp_song_file)
             self.client_data['radio_duration'][1] = audio.info.length
-            pygame.mixer.music.load(self.temp_song_file)
-            pygame.mixer.music.play()
+            self.AudioPlayer.load(self.temp_song_file) # pygame.mixer.music.load(self.temp_song_file)
+            self.AudioPlayer.play() # pygame.mixer.music.play()
             
             # Wait until music is actually playing before seeking
             waited = 0
-            while not pygame.mixer.music.get_busy() and waited < 10:
+            while not self.AudioPlayer.get_busy() and waited < 10: # not pygame.mixer.music.get_busy() and waited < 10:
                 sleep(0.01)
-                pygame.mixer.music.play()
+                self.AudioPlayer.play() # pygame.mixer.music.play()
                 waited += 0.01
 
-            if pygame.mixer.music.get_busy():
+            if self.AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
                 print(f"Playing song from position: {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
                 try:
                     self._start_offset = start_position + (monotonic() - buffer_time_frame)
-                    pygame.mixer.music.play(start=start_position + (monotonic() - buffer_time_frame))
+                    self.AudioPlayer.play(start=start_position + (monotonic() - buffer_time_frame)) # pygame.mixer.music.play(start=start_position + (monotonic() - buffer_time_frame))
                     print(f"Used play(start=...) to start at {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
                 except TypeError:
-                    pygame.mixer.music.play()
+                    self.AudioPlayer.play() # pygame.mixer.music.play()
                     try:
-                        pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
+                        self.AudioPlayer.set_pos(start_position + (monotonic() - buffer_time_frame)) # pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
                         print(f"Used set_pos({float(start_position + (monotonic() - buffer_time_frame)):.2f}) after play()")
                     except Exception as e:
                         print(f"set_pos failed: {e}")
@@ -254,7 +254,7 @@ class RadioClient:
                 print("Warning: Music did not start in time, skipping seek.")
             
             if self._paused:
-                pygame.mixer.music.pause()
+                self.AudioPlayer.pause() # pygame.mixer.music.pause()
 
             # Set accurate timer values
             self._start_time = time()
@@ -263,29 +263,24 @@ class RadioClient:
         except requests.exceptions.RequestException as e:
             print(f"Song download error: {str(e)}")
             self.stopListening()
-        except pygame.error as e:
-            print(f"Pygame playback error: {str(e)}")
-            self.stopListening()
         except Exception as e:
             print(f"General playback error: {str(e)}")
             self.stopListening()
 
     def _update_playback_position(self, new_position):
         try:
-            if pygame.mixer.music.get_busy():
+            if self.AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
                 if new_position < 0:
                     print(f"Skipping seek to invalid position: {new_position:.1f}s")
                     return
 
-                pygame.mixer.music.set_pos(new_position)
+                self.AudioPlayer.set_pos(new_position) # pygame.mixer.music.set_pos(new_position)
                 self._start_time = time()
                 self._start_offset = new_position
                 print(f"Jumped to position: {new_position:.1f}s")
                 self._handled = False
             else:
                 print("Skipping position update: Music not busy.")
-        except pygame.error as e:
-            print(f"Pygame position update error (set_pos): {str(e)}")
         except Exception as e:
             print(f"General position update error: {str(e)}")
 
