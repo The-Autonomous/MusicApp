@@ -1,10 +1,5 @@
 import re, threading, os
 from typing import List, Optional, Tuple
-
-try:
-    from music import MusicPlayer, get_auto_directories
-except ImportError:
-    from .music import MusicPlayer, get_auto_directories
     
 class TitleCleaner:
     """Clean raw track titles into a consistent 'Artist - Title' format, including dynamic suffix mapping."""
@@ -131,6 +126,10 @@ class TitleCleaner:
 class MusicOverlayController:
     """Tie MusicPlayer updates to GhostOverlay in a clean, thread-safe way."""
     def __init__(self, overlay):
+        try:
+            from music import MusicPlayer, get_auto_directories
+        except ImportError:
+            from .music import MusicPlayer, get_auto_directories
         self.overlay = overlay
         self.cleaner = TitleCleaner()
         self.player = MusicPlayer(

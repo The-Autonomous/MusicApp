@@ -1,8 +1,6 @@
-import subprocess
-import sys
-import time
+import subprocess, sys, time, importlib, os, zipfile
+from urllib.request import urlopen
 from importlib.util import find_spec
-import importlib # For invalidate_caches
 
 # --- tqdm installation ---
 # It's good to see output if this initial critical dependency fails
@@ -25,7 +23,6 @@ except ImportError:
         print(f"❌ Critical Error: 'tqdm' was reportedly installed but still cannot be imported.")
         sys.exit(1)
 
-
 class AutoDependencies:
     def __init__(self):
         """
@@ -43,7 +40,6 @@ class AutoDependencies:
 
         self.packages = {
             "requests": "requests",
-            "pygame": "pygame",
             "sounddevice": "sounddevice",
             "soundfile": "soundfile",
             "pydub": "pydub",
@@ -78,7 +74,46 @@ class AutoDependencies:
             print(f"\n📋 Missing packages that will be targeted for installation: {', '.join(self.missing_pkgs_to_install)}")
         else:
             print("👍 All listed Python dependencies appear to be met based on initial check.")
+            self.ensure_ffmpeg() # Ensure ffmpeg is available before proceeding
+            print("🎉 All dependencies are satisfied! No installation needed.")
 
+
+    def ensure_ffmpeg(self):
+        try:
+            subprocess.run(['ffprobe', '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("✅ [FFMPEG/FFPROBE] Found in PATH. Ffmpeg is available.")
+            return
+        except FileNotFoundError:
+            print("[FFMPEG/FFPROBE] Not found. Attempting to install...")
+
+        ffmpeg_dir = os.path.join(os.path.dirname(__file__), 'ffmpeg-bin')
+        os.makedirs(ffmpeg_dir, exist_ok=True)
+        zip_url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+        zip_path = os.path.join(ffmpeg_dir, 'ffmpeg.zip')
+
+        try:
+            with urlopen(zip_url) as resp, open(zip_path, 'wb') as out_file:
+                out_file.write(resp.read())
+
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for member in zip_ref.namelist():
+                    if 'bin/ffmpeg.exe' in member or 'bin/ffprobe.exe' in member:
+                        zip_ref.extract(member, ffmpeg_dir)
+
+            os.remove(zip_path)
+
+            for root, _, files in os.walk(ffmpeg_dir):
+                if 'ffmpeg.exe' in files:
+                    bin_path = os.path.abspath(root)
+                    os.environ['PATH'] = bin_path + os.pathsep + os.environ['PATH']
+                    subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return
+
+            raise FileNotFoundError("Failed to find ffmpeg.exe after extraction.")
+
+        except Exception as e:
+            print(f"[FFMPEG] Installation failed: {e}. Please install ffmpeg manually and add it to your PATH.")
+            raise SystemExit(1)
 
     def install(self):
         if not self.missing_pkgs_to_install:
@@ -156,7 +191,6 @@ class AutoDependencies:
             print(f"    If issues persist, please manually check their installation in your Python environment:")
             print(f"    Interpreter: {sys.executable}")
             print(f"    You can try: {sys.executable} -m pip install <package_name>")
-
 
 if __name__ == "__main__":
     print("--- Starting Dependency Check ---")

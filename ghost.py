@@ -14,11 +14,30 @@ try:
 except ImportError:
     from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
-
+    
 # Windows API constants
 WS_EX_LAYERED = 0x00080000
-WS_EX_TRANSPARENT = 0x00000020 # Not currently used after change
+WS_EX_TRANSPARENT = 0x00000020
 GWL_EXSTYLE = -20
+WS_EX_NOACTIVATE = 0x08000000 # Prevents window from stealing focus
+
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_TOPMOST    = 0x00000008
+
+# Add these SetWindowPos constants:
+# SetWindowPos constants
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOACTIVATE = 0x0010 # Do not activate the window (critical for games)
+SWP_ASYNCWINDOWPOS = 0x4000 # Places the window on the queue to be set
+
+# Add these Window handles for SetWindowPos:
+# Window handles for SetWindowPos
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+
+# Layered Window Attributes constants (already there, but for context)
+LWA_ALPHA = 0x00000002 # Use this flag with SetLayeredWindowAttributes for alpha transparency
 
 ### Utilities ###
 
@@ -109,33 +128,6 @@ def kill_all_python_processes(include_current: bool = True):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
-
-def create_rounded_rectangle(self, x1, y1, x2, y2, radius=25, **kwargs):
-    points = [
-        x1+radius, y1,
-        x1+radius, y1,
-        x2-radius, y1,
-        x2-radius, y1,
-        x2, y1,
-        x2, y1+radius,
-        x2, y1+radius,
-        x2, y2-radius,
-        x2, y2-radius,
-        x2, y2,
-        x2-radius, y2,
-        x2-radius, y2,
-        x1+radius, y2,
-        x1+radius, y2,
-        x1, y2,
-        x1, y2-radius,
-        x1, y2-radius,
-        x1, y1+radius,
-        x1, y1+radius,
-        x1, y1
-    ]
-
-    return self.create_polygon(points, **kwargs, smooth=True)
-
 class RoundedCanvas(tk.Canvas):
     minimum_steps = 10  # lower values give pixelated corners
 
@@ -158,8 +150,6 @@ class RoundedCanvas(tk.Canvas):
         for cos_r, sin_r in cos_sin_r:
             points.append((x0 - cos_r, y0 - sin_r))
         return self.create_polygon(points, fill=color)
-
-tk.Canvas.create_rounded_rectangle = create_rounded_rectangle
 
 class MouseTracker:
     def __init__(self):
@@ -230,11 +220,9 @@ class GhostOverlay:
         self.player_metric = {'player_text':'','player_duration':'', 'player_lyrics':''}
         self.radio_metric = {'current_ip':'0.0.0.0', 'availability':[]}
         self.bg_color = '#000000'
-        self.corner_radius = 15
-        self.padding = 15
-        self.last_toggle_state = False
-        self.readyForKeys = False
-        self.playerState = True
+        self.last_toggle_state = False # Last toggle state for debouncing
+        self.readyForKeys = False # True If Keys Are Ready False If Not
+        self.playerState = True # True If Player Is On False If Player Is Off
 
         self.is_listening_for_modification = False
         self.action_id_being_modified = None
@@ -244,8 +232,6 @@ class GhostOverlay:
         self._load_custom_bindings()
         self._rebuild_key_maps() # Initial build
         self.hidden_keys = { # Handle Headphone Keys
-            #'media_volume_down': self._trigger_volume_dwn,    # Removed Causes Multifunctionality Issues
-            #'media_volume_up': self._trigger_volume_up,       # Removed Causes Multifunctionality Issues
             'media_play_pause': self._trigger_pause,
             'media_next': self._trigger_skip_next,
             'media_previous': self._trigger_skip_previous,
@@ -265,6 +251,8 @@ class GhostOverlay:
         
         Thread(target=self.background_key_loop, daemon=True).start() # Start background key loop (Allows GTA V Or Other Games To Run Keypresses Without Blocking)
         Thread(target=self.handle_overlay_draggability, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
+        Thread(target=self.keep_overlay_on_top, daemon=True).start() # Keep Overlay On Top (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
+        self.root.after(0, self.display_overlay) # Start the overlay display process
 
 #####################################################################################################
 
@@ -831,6 +819,7 @@ class GhostOverlay:
     def show_search_overlay(self):
         # Close existing search overlay if open
         self.show_key_hints(force_state=False)  # Close key hints if open
+        
         if hasattr(self, 'search_overlay'):
             self.close_search_overlay(self._was_main_overlay_open_before_search)
             del self.search_overlay  # Clean up the old overlay
@@ -1113,7 +1102,7 @@ class GhostOverlay:
             self.search_overlay = None
             if restore_main_overlay:
                 self.open_overlay()
-
+            
 #####################################################################################################
 
     def _trigger_skip_previous(self):
@@ -1217,6 +1206,9 @@ class GhostOverlay:
             "Reboot Overlay",
             "Are you sure you want to reboot the Music Player?\nThis will restart the everything and you may lose the song you are actively listening to!"
         ):
+            if hasattr(self, 'MusicPlayer'):
+                self.MusicPlayer.pause(True) # True to pause
+            kill_all_python_processes(False) # False to not kill the main process
             Administrator.elevate(True)
 
 #####################################################################################################
@@ -1347,6 +1339,23 @@ class GhostOverlay:
             return f"{line1}\n{line2}" if line2 else line1 # Avoid trailing newline if line2 is empty
         
         return "\n".join(lines)
+    
+#####################################################################################################
+
+    def display_overlay(self):
+        while not hasattr(self, 'MusicPlayer'):
+            sleep(0.1)
+        self.root.after(0, self.open_overlay)
+
+    def keep_overlay_on_top(self):
+        """Keep the overlay window on top of all other windows."""
+        if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+            self.window.attributes('-topmost', True)
+        if self.key_hints_popup and self.key_hints_popup.winfo_exists() and self.key_hints_popup.state() != 'withdrawn':
+            self.key_hints_popup.attributes('-topmost', True)
+        if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists() and self.search_overlay.state() != 'withdrawn':
+            self.search_overlay.attributes('-topmost', True)
+        self.root.after_idle(lambda: self.root.after(1, self.keep_overlay_on_top))
 
 #####################################################################################################
 
@@ -1398,7 +1407,7 @@ class GhostOverlay:
             x, y = self._last_position
             self.window.geometry(f"+{x}+{y}")
         else:
-            self.root.after(50, self.center_window) # Delay centering slightly for dimensions to finalize
+            self.root.after(15, self.center_window) # Delay centering slightly for dimensions to finalize
 
         # Drag-to-move handlers
         self._drag_start_x = 0
@@ -1455,6 +1464,8 @@ class GhostOverlay:
         
         try:
             self.canvas.delete("all")
+            self.overlay_corner_radius = 15
+            self.overlay_text_padding = 15
             main_font = font.Font(family='Arial', size=14, weight='bold')
             time_font = font.Font(family='Arial', size=12)
             lyrics_font = font.Font(family='Arial', size=11, weight='normal', slant='italic') # Adjusted lyrics font
@@ -1485,7 +1496,7 @@ class GhostOverlay:
                     lyrics_width = max(lyrics_width, lyrics_font.measure(line))
 
 
-            total_width = max(main_width, time_width, lyrics_width) + 2 * self.padding
+            total_width = max(main_width, time_width, lyrics_width) + 2 * self.overlay_text_padding
             
             main_text_line_height = main_font.metrics("linespace")
             time_text_line_height = time_font.metrics("linespace")
@@ -1495,34 +1506,27 @@ class GhostOverlay:
             height_for_time = time_text_line_height
             height_for_lyrics = 0
             if num_lyrics_lines > 0:
-                 height_for_lyrics = (lyrics_text_line_height * num_lyrics_lines) + (self.padding / 2 if num_lyrics_lines >0 else 0)
+                 height_for_lyrics = (lyrics_text_line_height * num_lyrics_lines) + (self.overlay_text_padding / 2 if num_lyrics_lines >0 else 0)
 
 
-            total_height = height_for_main_text + height_for_time + height_for_lyrics + (2 * self.padding)
-            if num_player_text_lines > 1 : total_height += self.padding /2 # Extra padding for multiline title
-            if num_lyrics_lines > 0: total_height += self.padding /2 # Extra padding before/after lyrics
-
+            total_height = height_for_main_text + height_for_time + height_for_lyrics + (2 * self.overlay_text_padding)
+            if num_player_text_lines > 1 : total_height += self.overlay_text_padding /2 # Extra overlay_text_padding for multiline title
+            if num_lyrics_lines > 0: total_height += self.overlay_text_padding /2 # Extra overlay_text_padding before/after lyrics
 
             self.canvas.create_rounded_box(
                 0, 0, total_width, total_height,
-                radius=self.corner_radius,
+                radius=self.overlay_corner_radius,
                 color=self.bg_color
             )
 
-            current_y = self.padding
+            current_y = self.overlay_text_padding
 
-            # Main text (potentially multiline)
-            # Shadow (optional, can be heavy for multiline)
-            # self.canvas.create_text(
-            #    total_width/2 +1, current_y +1, text=wrapped_player_text, fill='#000000',
-            #    font=main_font, anchor=tk.N, justify=tk.CENTER
-            # )
             self.canvas.create_text(
                 total_width/2, current_y,
                 text=wrapped_player_text, fill='#FFFFFF',
                 font=main_font, anchor=tk.N, justify=tk.CENTER # Anchor N for top alignment
             )
-            current_y += height_for_main_text + (self.padding / (2 if num_player_text_lines > 1 else 1) )
+            current_y += height_for_main_text + (self.overlay_text_padding / (2 if num_player_text_lines > 1 else 1) )
 
 
             # Time text
@@ -1531,7 +1535,7 @@ class GhostOverlay:
                 text=self.player_metric['player_duration'], fill='#AAAAAA',
                 font=time_font, anchor=tk.N, justify=tk.CENTER
             )
-            current_y += height_for_time + (self.padding /2 if num_lyrics_lines > 0 else 0)
+            current_y += height_for_time + (self.overlay_text_padding /2 if num_lyrics_lines > 0 else 0)
 
 
             # Lyrics text (if active and visible)

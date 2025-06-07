@@ -5,6 +5,10 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
         <title>Music Control Panel</title>
         <style>
+            *, *::before, *::after {
+                box-sizing: border-box;
+            }
+
             body {
                 margin: 0;
                 padding: 0;
@@ -16,7 +20,7 @@
                 align-items: center;
                 justify-content: center;
                 min-height: 100vh;
-                overflow: hidden; /* Prevent scrollbar from appearing due to gradient */
+                overflow-x: hidden; /* Prevent scrollbar from appearing due to gradient */
             }
 
             .container {
@@ -28,7 +32,19 @@
                 text-align: center;
                 width: 90%;
                 max-width: 550px; /* Slightly wider */
-                border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border */
+                border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border */   
+                position: relative; /* Essential for positioning children relative to the container */
+                overflow: visible; /* Allow content to overflow if needed, or adjust padding */
+            }
+
+            @media (max-width: 600px) {
+                .container {
+                    border-radius: 0;
+                    height: 100%;
+                    width: 100%;
+                    top: 0;
+                    left: 0;
+                }
             }
 
             h1 {
@@ -128,12 +144,102 @@
                     order: -1;
                 }
             }
+
+            /* Styles for the Search Modal */
+            .modal { 
+                position: fixed; 
+                top:0; 
+                left:0; 
+                width:100%; 
+                height:100%;
+                background: rgba(0,0,0,0.5); 
+                display:flex; 
+                align-items:center;
+                justify-content:center; 
+                z-index: 2000; /* Ensure it's above other elements */
+            }
+            .hidden { 
+                display:none; 
+            }
+            .modal-content { 
+                background:#23272e; 
+                padding:20px; 
+                border-radius:12px; 
+                width:90%; /* Responsive width */
+                max-width:400px; /* Max width for larger screens */
+                color:#e0e0e0; 
+                font-family:"Segoe UI", Tahoma, Geneva, Verdana, sans-serif; 
+                position: relative; /* For the close button positioning */
+            }
+            .modal-content h2 {
+                margin-top: 0;
+                color: #00ffd5; /* Accent color for heading */
+            }
+            .modal-content input { 
+                width: calc(100% - 16px); /* Account for padding */
+                padding:8px; 
+                margin:8px 0; 
+                border-radius:6px; 
+                border:1px solid #444; /* Subtle border */
+                background: #333; /* Darker input background */
+                color: #e0e0e0;
+            }
+            .modal-content button { 
+                padding:10px 15px; /* Slightly larger buttons */
+                border:none; 
+                border-radius:6px;
+                background:#00ffd5; /* Accent color for button */
+                color:#23272e; 
+                cursor:pointer; 
+                font-weight: bold;
+                transition: background 0.3s ease;
+            }
+            .modal-content button:hover {
+                background: #00e6bf; /* Slightly darker on hover */
+            }
+            .modal-content ul { 
+                list-style:none; 
+                padding:0; 
+                max-height:200px; 
+                overflow-y:auto; 
+                border: 1px solid #555; /* Border for results list */
+                border-radius: 6px;
+                margin-top: 15px;
+            }
+            .modal-content li { 
+                padding:10px; /* More padding for list items */
+                border-bottom:1px solid #444; 
+                cursor:pointer; 
+                text-align: left; /* Align text to left */
+            }
+            .modal-content li:last-child {
+                border-bottom: none; /* No border on last item */
+            }
+            .modal-content li:hover { 
+                background:#2c313a; 
+            }
+            .close { 
+                position: absolute; /* Position relative to modal-content */
+                top: 10px;
+                right: 15px;
+                cursor:pointer; 
+                font-size:24px; /* Larger close button */
+                color: #aaa;
+            }
+            .close:hover {
+                color: #fff;
+            }
+
+            @media (max-width: 600px) {
+                #spacing-element {
+                    height: 5em; /* Reduced spacing on smaller screens */
+                }
+            }
         </style>
     </head>
     <body>
         <div class="container">
-            <br>
-            <br>
+            <div id="spacing-element" style="width: 100%;"></div>
             <h1>Now Playing</h1>
             <div id="song-title" class="song-title">Loading...</div>
             <div id="volume-display" class="volume-display">Volume: --</div>
@@ -171,6 +277,7 @@
                 <div style="display:flex; gap:0.7rem; margin-top:1rem;">
                     <button type="submit" style="flex:1; background:var(--accent,#1abc9c);color:var(--text,#fff);border:none;border-radius:8px;padding:0.7rem 0;">Save</button>
                     <button type="button" onclick="document.getElementById('settings-modal').style.display = 'none';" style="flex:1; background:var(--danger,#e74c3c);color:var(--text,#fff);border:none;border-radius:8px;padding:0.7rem 0;">Cancel</button>
+                    <button type="button" id="resetThemeButton" style="flex:1; background:#6c757d; color:var(--text,#fff); border:none; border-radius:8px; padding:0.7rem 0;">Reset to Default</button>
                 </div>
                 <div style="margin-top:2rem;display:flex;align-items:center;gap:0.7rem;">
                     <input type="checkbox" id="play-on-device" style="transform:scale(1.3);" />
@@ -181,16 +288,32 @@
 
         <div id="audio-status" style="position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 8px 12px; border-radius: 5px; font-size: 0.9em; z-index: 2001; max-width: 90vw; word-wrap: break-word;">Audio: Initializing...</div>
 
+        <button id="openSettingsButton" onclick="openSettings()" style="position: fixed; top: 20px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">⚙️ Theme Settings</button>
+
+        <button id="openSearchButton" style="position: fixed; top: 70px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">🔍 Search Song</button>
+
+
+        <div id="searchModal" class="modal hidden">
+            <div class="modal-content">
+                <span class="close" id="closeSearch">&times;</span>
+                <h2>Search for a Song</h2>
+                <input type="text" id="searchQuery" placeholder="Enter song name...">
+                <button id="searchButton">Search</button>
+                <ul id="searchResults"></ul>
+            </div>
+        </div>
+
+
         <script>
             // --- Theme Management ---
             const DEFAULT_THEME = {
-                name: "Dark Gray",
-                primary: "#2c5364",
-                secondary: "#203a43",
-                accent: "#1abc9c",
-                danger: "#e74c3c",
-                text: "#ffffff",
-                background: "linear-gradient(135deg, #0f2027, #203a43, #2c5364)"
+                name: "Cool Dark Mode",
+                primary: "#1A2B34",
+                secondary: "#101C24",
+                accent: "#AbAb00",
+                danger: "#EF5350",
+                text: "#E0E0E0",
+                background: "linear-gradient(135deg, #0D1B2A, #1B263B, #0F1D2F)"
             };
 
             function getTheme() {
@@ -271,24 +394,6 @@
             }
 
             document.addEventListener('DOMContentLoaded', () => {
-                // Settings Button
-                const btn = document.createElement('button');
-                btn.textContent = '⚙️ Settings';
-                btn.style.position = 'fixed';
-                btn.style.top = '20px';
-                btn.style.right = '30px';
-                btn.style.zIndex = 1000;
-                btn.style.background = 'var(--accent, #1abc9c)';
-                btn.style.color = 'var(--text, #fff)';
-                btn.style.border = 'none';
-                btn.style.outline = 'none';
-                btn.style.borderRadius = '50px';
-                btn.style.padding = '0.7rem 1.2rem';
-                btn.style.fontSize = '1.1rem';
-                btn.style.cursor = 'pointer';
-                btn.onclick = openSettings;
-                document.body.appendChild(btn);
-
                 function getThemeWithFallback() {
                     try {
                         const saved = localStorage.getItem('musicapp_theme');
@@ -314,7 +419,8 @@
                 }
                 applyThemeOnLoad();
 
-                function openSettings() {
+                // Make openSettings available globally for onclick in HTML
+                window.openSettings = function() {
                     const theme = getTheme();
                     document.getElementById('theme-primary').value = theme.primary || DEFAULT_THEME.primary;
                     document.getElementById('theme-secondary').value = theme.secondary || DEFAULT_THEME.secondary;
@@ -340,6 +446,26 @@
                     closeSettings();
                 }
                 document.getElementById('theme-form').onsubmit = handleThemeSave;
+
+                // --- Reset to Default Theme Functionality ---
+                window.resetToDefaultTheme = function() {
+                    saveTheme(DEFAULT_THEME); // Save the default theme to local storage
+                    applyTheme(DEFAULT_THEME); // Apply it instantly to the page
+
+                    // Update the color inputs in the modal to reflect the default values
+                    document.getElementById('theme-primary').value = DEFAULT_THEME.primary;
+                    document.getElementById('theme-secondary').value = DEFAULT_THEME.secondary;
+                    document.getElementById('theme-accent').value = DEFAULT_THEME.accent;
+                    document.getElementById('theme-danger').value = DEFAULT_THEME.danger;
+                    document.getElementById('theme-text').value = DEFAULT_THEME.text;
+
+                    closeSettings(); // Close the modal after resetting
+                    // Optional: You could add a small alert or temporary message for user feedback
+                    // alert('Theme reset to default!'); 
+                }
+
+                // Attach event listener for the new reset button
+                document.getElementById('resetThemeButton').addEventListener('click', window.resetToDefaultTheme);
 
                 // --- Play On Device Logic ---
                 function getPlayOnDevice() {
@@ -435,84 +561,154 @@
                     }
                 }
 
-                // --- CSS Variables for Theme ---
-                const style = document.createElement('style');
-                style.innerHTML = [
-                    'body {',
-                    'background: var(--background, linear-gradient(135deg, #0f2027, #203a43, #2c5364));',
-                    'color: var(--text, #fff);',
-                    '}',
-                    '.container {',
-                    'background: rgba(255,255,255,0.05);',
-                    'border: 1px solid rgba(255,255,255,0.1);',
-                    'color: var(--text, #fff);',
-                    '}',
-                    'button {',
-                    'background: var(--accent, #1abc9c);',
-                    'color: var(--text, #fff);',
-                    '}',
-                    'button[data-action="pause"], button[data-action="play"] {',
-                    'background: var(--danger, #e74c3c);',
-                    'color: var(--text, #fff);',
-                    '}',
-                    'button[data-action="pause"]:hover, button[data-action="play"]:hover {',
-                    'background: #c0392b;',
-                    '}',
-                    '#audio-status { background: var(--secondary); color: var(--text); }'
-                ].join('\n');
-                document.head.appendChild(style);
+                // --- CSS Variables for Theme (already defined in style block at top, no need to inject dynamically) ---
+                // The dynamic style injection for CSS variables was for a previous version of the code
+                // where the theme variables were not applied directly to body/documentElement in the initial CSS.
+                // Since they are now, this dynamic injection is redundant.
+                // const style = document.createElement('style');
+                // style.innerHTML = [ /* ... content ... */ ].join('\n');
+                // document.head.appendChild(style);
 
                 // --- Existing App Logic ---
+                // --- TitleCleaner Class (REWRITTEN TO MATCH PYTHON LOGIC) ---
                 class TitleCleaner {
+                    // Regex pattern for splitting track titles.
+                    _splitPattern = /(?: - |\(|\||\[)/;
+
+                    // Default search and replace rules for cleaning.
+                    // Each rule is [old_pattern, new_replacement]
+                    _defaults = [
+                        ["***[]*Paused", " -[Paused]-"],
+                        ["*=*", " -[Paused]-"],
+                        ["*+*", " -[Repeat]-"]
+                    ];
+
                     constructor(rules = null) {
-                        this._splitPattern = /(?: - |\(|\||\[)/;
-                        this._defaults = [
-                            ["***[]*Paused", " -[Paused]-"],
-                            ["*=*", " -[Paused]-"],
-                            ["*+*", " -[Repeat]-"]
-                        ];
                         this.rules = rules || this._defaults;
                     }
-                    clean(raw) {
-                        let suffix = '';
-                        let core = raw;
-                        for (const [oldSuffix, _] of this.rules) {
-                            if (raw.endsWith(oldSuffix)) {
-                                suffix = oldSuffix;
-                                core = raw.slice(0, raw.length - suffix.length).trim();
-                                break;
+
+                    /**
+                    * Cleans a raw song title string to extract and format artist and track.
+                    * Handles various formats including:
+                    * - Artist - Track
+                    * - Track Only
+                    * - Artist - Track - Artist (where start and end artists are the same)
+                    * - Context - Artist - Track (attempts to identify actual artist and track)
+                    * - Strips suffixes and applies general string replacements.
+                    * @param {string} raw The raw song title string.
+                    * @returns {string} The cleaned song title.
+                    */
+                    clean(raw, rmode = false) {
+                        if (typeof raw !== 'string') {
+                            return ""; // Return empty string for non-string input
+                        }
+
+                        let coreText = raw.trim();
+                        let suffixToStrip = "";
+
+                        // 1. Detect and strip suffix based on rules.
+                        // Finds the first rule where rawText ends with the rule's old_pattern.
+                        for (const [oldPattern, _] of this.rules) {
+                            if (coreText.endsWith(oldPattern)) {
+                                suffixToStrip = oldPattern;
+                                break; // Found the first matching suffix as per original logic
                             }
                         }
-                        let artist = '';
-                        let track = core;
-                        let separator = '![]!'; // Custom separator
-                        let separatorIndex = core.indexOf(separator);
-                        if (separatorIndex !== -1) {
-                            artist = core.slice(0, separatorIndex).trim();
-                            track = core.slice(separatorIndex + separator.length).trim();
-                        } else {
-                            separator = ' - '; // Default separator
-                            separatorIndex = core.indexOf(separator);
-                            if (separatorIndex !== -1) {
-                                artist = core.slice(0, separatorIndex).trim();
-                                track = core.slice(separatorIndex + separator.length).trim();
+
+                        if (suffixToStrip) {
+                            // Slice to remove the suffix from coreText
+                            coreText = coreText.slice(0, -suffixToStrip.length).trim();
+                        }
+
+                        // 2. Determine Artist and Track from the `coreText`
+                        let finalArtist = "";
+                        let finalTrack = "";
+
+                        // Split `coreText` by " - " delimiter, filter out empty parts
+                        const splitPattern = rmode ? ' - ' : '![]!';
+                        const parts = coreText.split(splitPattern).map(p => p.trim()).filter(p => p);
+
+                        if (!parts.length) {
+                            // coreText was empty or became empty after stripping suffix
+                            // finalArtist and finalTrack remain empty
+                        } else if (parts.length === 1) {
+                            // Only one segment, assume it's the track
+                            finalTrack = parts[0];
+                        } else if (parts.length === 2) {
+                            // Standard "Artist - Track"
+                            finalArtist = parts[0];
+                            finalTrack = parts[1];
+                        } else if (parts.length > 2) {
+                            // More than two parts, e.g., "A - B - C", "A - B - C - D"
+                            // Case 1: "Artist - Title - Artist" (ends are the same, case-insensitive)
+                            if (parts[0].toLowerCase() === parts[parts.length - 1].toLowerCase()) {
+                                finalArtist = parts[0];
+                                finalTrack = parts.slice(1, -1).join(' - '); // Join all middle parts as track
+                            }
+                            // Case 2: Specifically three parts "X - Y - Z" where X != Z
+                            // Assumes "Context - Actual Artist - Actual Track"
+                            else if (parts.length === 3) {
+                                finalArtist = parts[1]; // Y is the artist
+                                finalTrack = parts[2];  // Z is the track
+                            } else {
+                                // Fallback for len(parts) > 3 and not (A - ... - A)
+                                // Default to: first part is artist, rest is track
+                                finalArtist = parts[0];
+                                finalTrack = parts.slice(1).join(' - ');
                             }
                         }
-                        // Remove bracketed text unless it contains "Play On Device"
-                        let main = track.replace(/([\[\(][^\]\)]*[\]\)])/g, function(match) {
-                            return match.includes("Play On Device") ? match : "";
-                        }).trim();
-                        if (artist && main.startsWith(artist)) {
-                            main = main.slice(artist.length).replace(/^[-:\s]+/, '').trim();
+
+                        // 3. Isolate main track title from `finalTrack` using `_splitPattern`
+                        // This pattern is intended to remove things like "(feat. XYZ)", "[Remix]", etc.
+                        // from the end or middle of the track title.
+                        let mainTitle = "";
+                        if (finalTrack) {
+                            // `split` with limit 1 gets the content before the first match.
+                            // [0] ensures we get the part before the separator.
+                            const mainTitleCandidate = finalTrack.split(this._splitPattern, 1)[0].trim();
+                            
+                            if (!mainTitleCandidate && finalTrack) {
+                                // This happens if finalTrack itself is or starts with the pattern,
+                                // e.g., track is "(Interlude)" and pattern matches it.
+                                // In such cases, the finalTrack (as is) should be the mainTitle.
+                                mainTitle = finalTrack;
+                            } else {
+                                mainTitle = mainTitleCandidate;
+                            }
                         }
-                        let cleaned = artist ? (artist + ' - ' + main) : main;
-                        let result = cleaned + suffix;
-                        result = result.replace(/\*\+\*/g, ''); // Remove repeat marker if present
-                        for (const [oldRule, newRule] of this.rules) {
-                            let safeOldRule = oldRule.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                            result = result.replace(new RegExp(safeOldRule, 'g'), newRule);
+
+                        // 4. Construct the cleaned core string (artist - title)
+                        const cleanedCoreParts = [];
+                        if (finalArtist.trim()) {
+                            cleanedCoreParts.push(finalArtist.trim());
                         }
-                        return result.trim();
+                        if (mainTitle.trim()) {
+                            cleanedCoreParts.push(mainTitle.trim());
+                        }
+                        
+                        let cleanedIntermediateResult = cleanedCoreParts.join(" - ");
+
+                        // 5. Reattach the original suffix
+                        let resultWithSuffix = cleanedIntermediateResult;
+                        if (cleanedIntermediateResult || suffixToStrip) { // Only add suffix if there's core content or a suffix existed
+                            resultWithSuffix = `${cleanedIntermediateResult}${suffixToStrip}`;
+                        }
+                        if (!cleanedIntermediateResult && !suffixToStrip) { // Both were empty
+                            resultWithSuffix = "";
+                        }
+
+
+                        // 6. Apply all general replacement rules from `self.rules`
+                        // Ensure oldPattern is escaped for RegExp if it contains special characters
+                        let finalCleanedStr = resultWithSuffix;
+                        for (const [oldPattern, newReplacement] of this.rules) {
+                            // Escape special characters in oldPattern for use in RegExp constructor
+                            const safeOldPattern = oldPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            // Use global flag 'g' to replace all occurrences, mimicking Python's str.replace
+                            finalCleanedStr = finalCleanedStr.replace(new RegExp(safeOldPattern, 'g'), newReplacement);
+                        }
+                        
+                        return finalCleanedStr.trim(); // Final strip for good measure
                     }
                 }
 
@@ -640,6 +836,85 @@
                 // Initial poll and interval
                 pollStatus();
                 setInterval(pollStatus, 1000);
+
+                // --- Search Functionality Scripts ---
+                const openSearchButton = document.getElementById('openSearchButton');
+                const searchModal = document.getElementById('searchModal');
+                const closeSearchButton = document.getElementById('closeSearch');
+                const searchQueryInput = document.getElementById('searchQuery');
+                const searchButton = document.getElementById('searchButton');
+                const searchResultsList = document.getElementById('searchResults');
+
+                openSearchButton.addEventListener('click', () => {
+                    searchModal.classList.remove('hidden');
+                    searchQueryInput.focus(); // Focus on the input when modal opens
+                });
+
+                closeSearchButton.addEventListener('click', () => {
+                    searchModal.classList.add('hidden');
+                    searchResultsList.innerHTML = ''; // Clear results when closing
+                    searchQueryInput.value = ''; // Clear search query
+                });
+
+                // Close modal if clicked outside modal-content (optional, but good UX)
+                searchModal.addEventListener('click', (e) => {
+                    if (e.target === searchModal) {
+                        searchModal.classList.add('hidden');
+                        searchResultsList.innerHTML = '';
+                        searchQueryInput.value = '';
+                    }
+                });
+
+                searchButton.addEventListener('click', () => {
+                    const query = searchQueryInput.value.trim();
+                    if (!query) {
+                        searchResultsList.innerHTML = '<li>Please enter a search query.</li>';
+                        return;
+                    }
+
+                    searchResultsList.innerHTML = '<li>Searching...</li>'; // Indicate loading
+
+                    fetch('/search', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query })
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        console.log('Search results:', data);
+                        searchResultsList.innerHTML = ''; // Clear previous loading/results
+                        if (data.results && data.results.length) {
+                            data.results.forEach(item => {
+                                const li = document.createElement('li');
+                                li.textContent = cleaner.clean(item.title || '', true);
+                                li.addEventListener('click', () => {
+                                    // Play selected song
+                                    fetch('/action', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ action: 'play_search', path: item.path })
+                                    }).then(() => {
+                                        searchModal.classList.add('hidden'); // Close modal on song selection
+                                        searchResultsList.innerHTML = ''; // Clear results
+                                        searchQueryInput.value = ''; // Clear query
+                                    }).catch(error => {
+                                        console.error('Error playing searched song:', error);
+                                        searchResultsList.innerHTML = `<li>Error playing song: ${error.message}</li>`;
+                                    });
+                                });
+                                searchResultsList.appendChild(li);
+                            });
+                        } else {
+                            const li = document.createElement('li');
+                            li.textContent = 'No results found.';
+                            searchResultsList.appendChild(li);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error performing search:', error);
+                        searchResultsList.innerHTML = `<li>Error searching: ${error.message}</li>`;
+                    });
+                });
             });
         </script>
     </body>

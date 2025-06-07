@@ -16,18 +16,24 @@ class RadioHost:
             'title': '',
             'mp3_path': '',
             'lyrics': '',
-            'position': 0.0,
             'mixer': None
         }
-        self._pos_thread = None
-        self._pos_thread_stop = threading.Event()
+
+        def get_pos():
+            """Get current song position."""
+            try:
+                mix = self.current_data['mixer']
+                return mix.get_pos() if mix else 0
+            except Exception:
+                print("Error getting position from mixer")
+                return 0
 
         # Routes
         @self.app.route('/')
         def index():
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
-                f"<location>{self.current_data['position']:.2f}</location>"
+                f"<location>{get_pos()}</location>"
                 f"<script>location.href='/{self.app_pad_site}';</script>"
             )
             resp.headers['Cache-Control'] = 'no-store'
@@ -36,6 +42,19 @@ class RadioHost:
         @self.app.route(f'/{self.app_pad_site}') # App Pad Loader
         def app_pad():
             return self.app.send_static_file('index.html')
+        
+        @self.app.route('/search', methods=['POST'])
+        def handle_search():
+            data = request.get_json() or {}
+            query = data.get('query', '').strip()
+            if not query:
+                return jsonify({ 'code': 'error', 'message': 'Empty search query' }), 400
+
+            # Perform search via your MusicPlayer helper
+            raw_results = self.MusicPlayer.get_search_term(query)
+            # raw_results is list of (title, path)
+            results = [{ 'title': title, 'path': path } for title, path in raw_results]
+            return jsonify({ 'code': 'success', 'results': results })
         
         @self.app.route('/action', methods=['POST'])
         def handle_action():
@@ -63,6 +82,12 @@ class RadioHost:
             elif action == 'repeat':
                 self.MusicPlayer.repeat()
                 
+            elif action == 'play_search':
+                path = data.get('path')
+                if not path:
+                    return jsonify({ 'code': 'error', 'message': 'No path provided' }), 400
+                self.MusicPlayer.play_song(path)
+                
             elif action == 'status':
                 pass  # just return the current state
 
@@ -72,7 +97,7 @@ class RadioHost:
             return jsonify({
                 "code": "success",
                 "title": self.current_data["title"],
-                "position": round(self.current_data['position'], 2),
+                "position": round(get_pos(), 2),
                 "paused": self.MusicPlayer.pause_event.is_set(),
                 "repeat": self.MusicPlayer.repeat_event.is_set(),
                 "volume": round(self.MusicPlayer.current_volume, 2)
@@ -111,36 +136,13 @@ class RadioHost:
 
     def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
         """Call whenever you load a new track."""
-        # Stop old position thread
-        if self._pos_thread and self._pos_thread.is_alive():
-            self._pos_thread_stop.set()
-            self._pos_thread.join()
-
         # Update data
         self.current_data.update({
             'title': title,
             'mp3_path': mp3_song_file_path,
             'lyrics': current_song_lyrics,
-            'mixer': current_mixer,
-            'position': 0.0
+            'mixer': current_mixer
         })
-
-        # Start new position-updater thread
-        self._pos_thread_stop.clear()
-        self._pos_thread = threading.Thread(target=self._update_position_loop, daemon=True)
-        self._pos_thread.start()
-
-    def _update_position_loop(self):
-        """Background loop: polls mixer.get_pos() and stores it."""
-        mix = self.current_data['mixer']
-        while mix and not self._pos_thread_stop.is_set():
-            try:
-                # pygame.mixer returns ms
-                self.current_data['position'] = mix.get_pos()
-                print(self.current_data['position'], end='\r')
-            except Exception:
-                pass
-            time.sleep(0.2)  # adjust frequency as needed
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -174,17 +176,60 @@ class RadioHost:
 if __name__ == '__main__':
     # This block is only if you run radio_host.py directly.
     # Replace these stubs with your actual pygame mixer and file paths:
-    import pygame
-    pygame.mixer.init()
-    mixer = pygame.mixer.music
-    pygame.mixer.music.load("example.mp3")
-    pygame.mixer.music.play()
 
-    host = RadioHost(port=8080)
+    try:
+        from audio import AudioPlayer
+    except ImportError:
+        from .audio import AudioPlayer
+
+    class MusicPlayer:
+        def __init__(self, directories=None, set_screen=None, set_duration=None, set_lyrics=None, set_ips=None):
+            self.directories = directories or []
+            self.set_screen = set_screen
+            self.set_duration = set_duration
+            self.set_lyrics = set_lyrics
+            self.set_ips = set_ips
+            self.pause_event = threading.Event()
+            self.repeat_event = threading.Event()
+            self.current_volume = 1.0
+        
+        def pause(self, forcedState=False):
+            # Dummy implementation for example
+            print("MusicPlayer pause called", forcedState)
+            
+        def skip_next(self):
+            # Dummy implementation for example
+            print("MusicPlayer skip_next called")
+            
+        def skip_previous(self):
+            # Dummy implementation for example
+            print("MusicPlayer skip_previous called")
+            
+        def up_volume(self):
+            # Dummy implementation for example
+            print("MusicPlayer up_volume called")
+            
+        def dwn_volume(self):
+            # Dummy implementation for example
+            print("MusicPlayer dwn_volume called")
+            
+        def repeat(self):
+            # Dummy implementation for example
+            print("MusicPlayer repeat called")
+            
+        def play_song(self, path):
+            # Dummy implementation for example
+            print(f"MusicPlayer play_song called with path: {path}")
+            
+        def get_search_term(self, query):
+            # Dummy implementation for example
+            return [("Example Song", "example.mp3")]
+
+    host = RadioHost(player=MusicPlayer(), port=8080)
     host.initSong(
         title="Example Song",
         mp3_song_file_path=os.path.abspath("example.mp3"),
-        current_mixer=mixer,
+        current_mixer=AudioPlayer, # Audio mixer instance
         current_song_lyrics="These are the lyrics..."
     )
 

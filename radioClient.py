@@ -1,4 +1,4 @@
-import requests, pygame, re, os
+import requests, re, os
 from threading import Thread, Event, Timer, Lock
 import numpy as np
 from mutagen.mp3 import MP3
@@ -12,7 +12,6 @@ class RadioClient:
         self._repeat = False
         self._pause_time = None
         self._channel_changed = False
-        self._can_have_pygame = Lock()
         self.AudioPlayer = audio_player
         self._ip = ip
         self._callback = None
@@ -24,44 +23,38 @@ class RadioClient:
         self._start_offset = 0.0
         self.static_noise = self.generate_static()
 
-    def generate_static(self, duration_ms=500):
+    def generate_static(self, duration_ms: int = 500) -> np.ndarray:
         """
-        Generate white-noise static matching the currently initialized mixer settings.
+        Generate white-noise static matching the AudioPlayer's settings.
         Will produce mono or stereo noise automatically, never mismatching channel count.
+        
+        Args:
+            duration_ms (int): Duration of the static noise in milliseconds.
+        
+        Returns:
+            np.ndarray: A NumPy array containing the generated static audio data (float, -1.0 to 1.0).
         """
         
-        ### NEEDS TO WORK WITH self.AudioPlayer ###
+        # Ensure AudioPlayer is initialized and has samplerate and channels
+        if not self.AudioPlayer or not self.AudioPlayer.samplerate:
+            print("⚠️ AudioPlayer not initialized or samplerate not set. Cannot generate static.")
+            return np.array([]) # Return empty array if player not ready
+
+        samplerate = self.AudioPlayer.samplerate
+        channels = self.AudioPlayer.channels
         
-        # 1) Make sure mixer is init’d; if not, init with defaults
-        init = pygame.mixer.get_init()
-        if init is None:
-            pygame.mixer.init()  
-            init = pygame.mixer.get_init()
-        
-        freq, size, channels = init    # e.g. (44100, -16, 2)
-        bits = abs(size)               # 16
-        max_amp = 2**(bits - 1) - 1    # 32767 for 16-bit
-        
-        # 2) Compute sample count from the mixer’s actual sample rate
-        num_samples = int(freq * (duration_ms / 1000.0))
-        
-        # 3) Generate mono float32 noise
-        mono = np.random.uniform(-1.0, 1.0, size=num_samples).astype(np.float32)
-        
-        # 4) Duplicate into the correct # of channels (underfit if channels>2 by reusing mono)
+        # Calculate number of frames for the desired duration
+        num_frames = int(samplerate * (duration_ms / 1000.0))
+
+        # Generate white noise (random samples between -1.0 and 1.0)
+        # Reshape for stereo if channels > 1
         if channels == 1:
-            data = mono
+            static_data = np.random.uniform(-0.5, 0.5, size=num_frames).astype(np.float32)
         else:
-            # for stereo (2) or more, tile the mono across channels
-            data = np.tile(mono[:, None], (1, channels))
+            static_data = np.random.uniform(-0.5, 0.5, size=(num_frames, channels)).astype(np.float32)
         
-        # 5) Scale to integer PCM range and appropriate dtype
-        dtype = np.int16 if bits > 8 else np.int8
-        pcm = (data * max_amp).astype(dtype)
-        
-        # 6) Wrap in a Sound and apply volume
-        sound = pygame.sndarray.make_sound(pcm)
-        return sound
+        print(f"Generated {duration_ms}ms of static noise (Samplerate: {samplerate}, Channels: {channels}, Frames: {num_frames}).")
+        return self.AudioPlayer.load_static_sound(static_data, self.AudioPlayer.samplerate, self.AudioPlayer.channels)
 
     def listenTo(self, ip, lyric_callback = None):
         self._ip = ip
@@ -85,15 +78,7 @@ class RadioClient:
                 return False
 
     def stopListening(self):
-        with self._can_have_pygame:
-            self._running.clear()
-            #if self.remTmpFile():
-            #    return
-            #else:
-            #    pygame.mixer.music.stop()
-            #    pygame.mixer.music.unload()
-            #    self.remTmpFile()
-            #    return
+        self._running.clear()
 
     def _update_loop(self):
         while self._running.is_set():
@@ -202,7 +187,7 @@ class RadioClient:
     def _play_song(self, song_url, lyric_url, start_position, buffer_time_frame):
         try:
             print(f"Downloading song: {song_url}, {lyric_url}")
-            self.AudioPlayer.unload() # pygame.mixer.music.unload()
+            self.AudioPlayer.stop() # pygame.mixer.music.unload()
             if not self._channel_changed:
                 self.static_noise.set_volume(0.01)
                 self.static_noise.play(loops=-1)
