@@ -5,7 +5,7 @@ from mutagen.mp3 import MP3
 from time import time, sleep, monotonic
 
 class RadioClient:
-    def __init__(self, ip: str = ""):
+    def __init__(self, audio_player, ip: str = ""):
         self.client_data = {'radio_text': '', 'radio_duration': [0, 0]}
         self._running = Event()
         self._paused = False
@@ -13,6 +13,7 @@ class RadioClient:
         self._pause_time = None
         self._channel_changed = False
         self._can_have_pygame = Lock()
+        self.AudioPlayer = audio_player
         self._ip = ip
         self._callback = None
         self._handled = False
@@ -28,6 +29,9 @@ class RadioClient:
         Generate white-noise static matching the currently initialized mixer settings.
         Will produce mono or stereo noise automatically, never mismatching channel count.
         """
+        
+        ### NEEDS TO WORK WITH self.AudioPlayer ###
+        
         # 1) Make sure mixer is init’d; if not, init with defaults
         init = pygame.mixer.get_init()
         if init is None:
@@ -104,14 +108,14 @@ class RadioClient:
                 server_pos = data['location']
                 pause_dilation = 0
                 
-                if data['title'].endswith("***[]*Paused"):
+                is_paused = data['title'].endswith("***[]*Paused")
+
+                if is_paused and not self._paused:
                     pygame.mixer.music.pause()
-                    if not self._pause_time:
-                        self._pause_time = time()
-                    pause_dilation = time() - self._pause_time
+                    self._pause_time = time()
                     self._paused = True
-                elif self._paused:
-                    pygame.mixer.unpause()
+                elif not is_paused and self._paused:
+                    pygame.mixer.music.unpause()
                     self._pause_time = None
                     self._paused = False
                 self._repeat = data['title'].endswith(" *+*")
@@ -221,22 +225,31 @@ class RadioClient:
             if not self._channel_changed:
                 self._channel_changed = True
                 self.static_noise.stop()
-            pygame.mixer.music.load(self.temp_song_file)
             audio = MP3(self.temp_song_file)
             self.client_data['radio_duration'][1] = audio.info.length
+            pygame.mixer.music.load(self.temp_song_file)
             pygame.mixer.music.play()
-
+            
             # Wait until music is actually playing before seeking
             waited = 0
             while not pygame.mixer.music.get_busy() and waited < 10:
                 sleep(0.01)
+                pygame.mixer.music.play()
                 waited += 0.01
 
             if pygame.mixer.music.get_busy():
-                timeDilation = (monotonic() - buffer_time_frame)
-                startPositionMath = start_position + timeDilation
-                print(f"Playing song from position: {startPositionMath:.2f}s from dilation {timeDilation:.2f}s")
-                pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
+                print(f"Playing song from position: {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
+                try:
+                    self._start_offset = start_position + (monotonic() - buffer_time_frame)
+                    pygame.mixer.music.play(start=start_position + (monotonic() - buffer_time_frame))
+                    print(f"Used play(start=...) to start at {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
+                except TypeError:
+                    pygame.mixer.music.play()
+                    try:
+                        pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
+                        print(f"Used set_pos({float(start_position + (monotonic() - buffer_time_frame)):.2f}) after play()")
+                    except Exception as e:
+                        print(f"set_pos failed: {e}")
             else:
                 print("Warning: Music did not start in time, skipping seek.")
             
@@ -245,7 +258,6 @@ class RadioClient:
 
             # Set accurate timer values
             self._start_time = time()
-            self._start_offset = startPositionMath
             Thread(target=self._callback, args=(lyric_url, self._start_offset, self.client_data['radio_text'],), daemon=True).start()
 
         except requests.exceptions.RequestException as e:

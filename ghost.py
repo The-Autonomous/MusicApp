@@ -4,6 +4,8 @@ from tkinter import font, messagebox # Added messagebox
 from threading import Lock, RLock, Thread # Added RLock for SettingsHandler
 from pynput import keyboard, mouse
 from time import monotonic, sleep
+from math import cos, pi, sin
+from typing import Iterator
 import json # Added json
 
 try:
@@ -106,18 +108,56 @@ def kill_all_python_processes(include_current: bool = True):
                     proc.wait(timeout=1) # Wait after kill as well
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-                
+
+
 def create_rounded_rectangle(self, x1, y1, x2, y2, radius=25, **kwargs):
-    points = []
-    points.extend([x1 + radius, y1, x2 - radius, y1])
-    points.extend([x2 - radius/2, y1, x2, y1, x2, y1 + radius/2])
-    points.extend([x2, y1 + radius, x2, y2 - radius])
-    points.extend([x2, y2 - radius/2, x2, y2, x2 - radius/2, y2])
-    points.extend([x2 - radius, y2, x1 + radius, y2])
-    points.extend([x1 + radius/2, y2, x1, y2, x1, y2 - radius/2])
-    points.extend([x1, y2 - radius, x1, y1 + radius])
-    points.extend([x1, y1 + radius/2, x1, y1, x1 + radius/2, y1])
-    return self.create_polygon(*points, smooth=True, **kwargs)
+    points = [
+        x1+radius, y1,
+        x1+radius, y1,
+        x2-radius, y1,
+        x2-radius, y1,
+        x2, y1,
+        x2, y1+radius,
+        x2, y1+radius,
+        x2, y2-radius,
+        x2, y2-radius,
+        x2, y2,
+        x2-radius, y2,
+        x2-radius, y2,
+        x1+radius, y2,
+        x1+radius, y2,
+        x1, y2,
+        x1, y2-radius,
+        x1, y2-radius,
+        x1, y1+radius,
+        x1, y1+radius,
+        x1, y1
+    ]
+
+    return self.create_polygon(points, **kwargs, smooth=True)
+
+class RoundedCanvas(tk.Canvas):
+    minimum_steps = 10  # lower values give pixelated corners
+
+    @staticmethod
+    def get_cos_sin(radius: int) -> Iterator[tuple[float, float]]:
+        steps = max(radius, RoundedCanvas.minimum_steps)
+        for i in range(steps + 1):
+            angle = pi * (i / steps) * 0.5
+            yield (cos(angle) - 1) * radius, (sin(angle) - 1) * radius
+
+    def create_rounded_box(self, x0: int, y0: int, x1: int, y1: int, radius: int, color: str) -> int:
+        points = []
+        cos_sin_r = tuple(self.get_cos_sin(radius))
+        for cos_r, sin_r in cos_sin_r:
+            points.append((x1 + sin_r, y0 - cos_r))
+        for cos_r, sin_r in cos_sin_r:
+            points.append((x1 + cos_r, y1 + sin_r))
+        for cos_r, sin_r in cos_sin_r:
+            points.append((x0 - sin_r, y1 + cos_r))
+        for cos_r, sin_r in cos_sin_r:
+            points.append((x0 - cos_r, y0 - sin_r))
+        return self.create_polygon(points, fill=color)
 
 tk.Canvas.create_rounded_rectangle = create_rounded_rectangle
 
@@ -203,34 +243,33 @@ class GhostOverlay:
         self._define_default_key_actions()
         self._load_custom_bindings()
         self._rebuild_key_maps() # Initial build
+        self.hidden_keys = { # Handle Headphone Keys
+            #'media_volume_down': self._trigger_volume_dwn,    # Removed Causes Multifunctionality Issues
+            #'media_volume_up': self._trigger_volume_up,       # Removed Causes Multifunctionality Issues
+            'media_play_pause': self._trigger_pause,
+            'media_next': self._trigger_skip_next,
+            'media_previous': self._trigger_skip_previous,
+        }
         
-        self.VK_CODE = {'alt': 0x12}
-            
+        self.current_listener_key = monotonic() # Initialize current listener key for debounce
+        
         self.listener = keyboard.Listener(
-            on_press=self._handle_key_press,
-            on_release=self._handle_key_release
+            on_press = lambda key: self._handle_key_press(key, self.current_listener_key),
+            on_release = lambda key: self._handle_key_release(key, self.current_listener_key)
         )
         self.listener.start()
-        self.check_keyboard()
         self.readyForKeys = True
         self._reset_all_keys_pressed()
         
         self.TitleCleaner = TitleCleaner()
         
+        Thread(target=self.background_key_loop, daemon=True).start() # Start background key loop (Allows GTA V Or Other Games To Run Keypresses Without Blocking)
         Thread(target=self.handle_overlay_draggability, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
 
 #####################################################################################################
 
     def _define_default_key_actions(self):
         self.key_actions = [
-            {
-                'id': 'toggle_overlay',
-                'required': ['alt', 'shift'],
-                'forbidden': ['ALL'],
-                'action': self.toggle_overlay,
-                'hint': "Show / Hide Music Player",
-                'modifiable': False # Core function, specific modifiers
-            },
             {
                 'id': 'skip_previous',
                 'required': ['alt', '-'],
@@ -281,13 +320,6 @@ class GhostOverlay:
                 'modifiable': True
             },
             {
-                'id': 'show_hints',
-                'required': ['alt', 'right alt'],
-                'action': self.show_key_hints,
-                'hint': "Show This Controls Window", # Clarified hint
-                'modifiable': False # Specific, important for help
-            },
-            {
                 'id': 'radio_enable_toggle',
                 'required': ['alt', 'a'],
                 'action': self._trigger_radio_toggle,
@@ -309,11 +341,26 @@ class GhostOverlay:
                 'modifiable': True
             },
             {
+                'id': 'toggle_overlay',
+                'required': ['alt', 'shift'],
+                'forbidden': ['ALL'],
+                'action': self.toggle_overlay,
+                'hint': "Show / Hide Music Player",
+                'modifiable': False # Core function, specific modifiers
+            },
+            {
                 'id': 'player_on_off',
                 'required': ['right alt', 'right shift'],
                 'action': self.toggle_player,
                 'hint': "Turn Music Player On / Off", # Clarified hint
                 'modifiable': False # Specific, important
+            },
+            {
+                'id': 'show_hints',
+                'required': ['alt', 'right alt'],
+                'action': self.show_key_hints,
+                'hint': "Show This Controls Window", # Clarified hint
+                'modifiable': False # Specific, important for help
             },
             {
                 'id': 'player_restart',
@@ -365,17 +412,19 @@ class GhostOverlay:
                 ]
             elif 'forbidden' in act:
                  act['forbidden'] = [key.lower() for key in act['forbidden']]
-
-    def check_keyboard(self):
-        self.root.after(100, self.check_keyboard) # Original interval
         
-    def _handle_key_press(self, key):
-        #print(f"Key pressed: {key}")  # Debugging output
-        if not self.readyForKeys:
+    def _handle_key_press(self, key, state=None):
+        if not self.readyForKeys or not state == self.current_listener_key:
             return
 
         name = self._normalize_key(key)
         if not name: return # Unrecognized key
+        
+        # --- Hidden key detection ---
+        if name in getattr(self, 'hidden_keys', {}):
+            action = self.hidden_keys[name]
+            if callable(action):
+                action()
 
         if self.is_listening_for_modification:
             if name == 'escape':
@@ -399,9 +448,9 @@ class GhostOverlay:
             self.keys_pressed[name] = True
             self._check_toggle()
 
-    def _handle_key_release(self, key):
+    def _handle_key_release(self, key, state=None):
+        if not state == self.current_listener_key: return
         name = self._normalize_key(key)
-        #print(f"Key released: {name}")  # Debugging output
         if not name: return
 
         if name in self.keys_pressed:
@@ -460,7 +509,7 @@ class GhostOverlay:
             if required_met and forbidden_met:
                 action_func = action.get('action')
                 if callable(action_func):
-                    action_func()
+                    self.root.after(0, action_func)
                     self.last_toggle_state = True # Prevent immediate re-trigger
                     # Optional: More selective reset of keys_pressed if needed
                     # For example, keep 'alt' pressed but clear the action-specific key:
@@ -473,6 +522,23 @@ class GhostOverlay:
         for k in self.keys_pressed:
             self.keys_pressed[k] = False
         self.last_toggle_state = False
+        
+    def background_key_loop(self, time_dilation: float = 60):
+        """Continuously reboots listeners for key presses that might get overshadowed."""
+        while True:
+            sleep(time_dilation)
+            self.current_listener_key = monotonic()
+            old_listener = self.listener
+            # Stop and join the old listener before starting a new one
+            if old_listener and old_listener.running:
+                old_listener.stop()
+                old_listener.join(timeout=2)
+            self.listener = keyboard.Listener(
+                on_press=lambda key: self._handle_key_press(key, self.current_listener_key),
+                on_release=lambda key: self._handle_key_release(key, self.current_listener_key)
+            )
+            self.listener.start()
+            self._reset_all_keys_pressed()
 
 #####################################################################################################
 
@@ -576,7 +642,12 @@ class GhostOverlay:
                 self.key_hints_popup = None
             self.show_key_hints()
             
-    def show_key_hints(self):
+    def show_key_hints(self, force_state: bool = None):
+        """ Show a popup with all key hints and their actions. 
+        If force_state is True, it will always show the popup.
+        If force_state is False, it will close the popup if it's already open.
+        If force_state is None, it will toggle the popup visibility.
+        """
         # Toggle if already open
         def close_popup(event=None):
             if self.key_hints_popup:
@@ -585,8 +656,11 @@ class GhostOverlay:
                 except Exception:
                     pass
                 self.key_hints_popup = None
-                
-        if self.key_hints_popup and self.key_hints_popup.winfo_exists():
+        
+        if force_state == False:
+            close_popup()
+            return
+        elif self.key_hints_popup and self.key_hints_popup.winfo_exists() and force_state is not True:
             close_popup()
             return
 
@@ -756,13 +830,10 @@ class GhostOverlay:
 
     def show_search_overlay(self):
         # Close existing search overlay if open
-        if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
-            self.search_overlay.destroy()
-            self.search_overlay = None
-            if hasattr(self, '_was_overlay_open_before_search') and self._was_overlay_open_before_search:
-                self.open_overlay()
-                del self._was_overlay_open_before_search
-            return
+        self.show_key_hints(force_state=False)  # Close key hints if open
+        if hasattr(self, 'search_overlay'):
+            self.close_search_overlay(self._was_main_overlay_open_before_search)
+            del self.search_overlay  # Clean up the old overlay
 
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
         if self._was_main_overlay_open_before_search:
@@ -775,7 +846,7 @@ class GhostOverlay:
         FG_TEXT = "#e0e0e0"
         FG_PLACEHOLDER = "#888"
         ACCENT = "#00ffd5"
-        BORDER = "#444"
+        BORDER = "#AAA"
         ENTRY_RADIUS = 18
         OVERLAY_RADIUS = 28
         LIST_RADIUS = 18
@@ -791,11 +862,11 @@ class GhostOverlay:
         self.search_overlay.attributes("-topmost", True)
 
         # --- Rounded Canvas for Overlay Background (fully rounded) ---
-        overlay_canvas = tk.Canvas(self.search_overlay, bg=BG_WINDOW, highlightthickness=0, bd=0)
+        overlay_canvas = RoundedCanvas(self.search_overlay, bg=BG_WINDOW, highlightthickness=0, bd=0)
         overlay_canvas.pack(fill="both", expand=True)
         width, height = 440, 360
-        overlay_canvas.create_rounded_rectangle(
-            0, 0, width, height, radius=OVERLAY_RADIUS, fill=BG_FRAME, outline=BORDER, width=0
+        overlay_canvas.create_rounded_box(
+            0, 0, width, height, radius=OVERLAY_RADIUS, color=BG_FRAME
         )
 
         # --- Main Frame (on top of canvas) ---
@@ -810,14 +881,14 @@ class GhostOverlay:
         search_bar_frame.pack(fill="x", pady=(28, 0), padx=PAD_X)
 
         # --- Search Entry with Fully Rounded Background ---
-        entry_canvas = tk.Canvas(search_bar_frame, height=36, bg=BG_FRAME, highlightthickness=0, bd=0)
+        entry_canvas = RoundedCanvas(search_bar_frame, height=36, bg=BG_FRAME, highlightthickness=0, bd=0)
         entry_canvas.pack(fill="x", expand=True, side="left")
         entry_canvas.update_idletasks()
         entry_w = search_bar_frame.winfo_reqwidth() or 320
         entry_h = 36
         entry_canvas.config(width=entry_w, height=entry_h)
-        entry_canvas.create_rounded_rectangle(
-            0, 0, entry_w, entry_h, radius=ENTRY_RADIUS, fill=BG_SEARCH, outline=ACCENT, width=2
+        entry_canvas.create_rounded_box(
+            0, 0, entry_w, entry_h, radius=ENTRY_RADIUS, color=BG_SEARCH
         )
 
         # --- Entry Widget (on top of rounded canvas) ---
@@ -863,13 +934,13 @@ class GhostOverlay:
 
         # Calculate list_h to fill the remaining space, accounting for paddings and search bar height
         list_h = height - (2 * PAD_X) - entry_h - 18  # PAD_X top, PAD_X bottom, entry_h, padding between search/results, bottom padding
-        list_canvas = tk.Canvas(results_frame, height=list_h, bg=BG_FRAME, highlightthickness=0, bd=0)
+        list_canvas = RoundedCanvas(results_frame, height=list_h, bg=BG_FRAME, highlightthickness=0, bd=0)
         list_canvas.pack(fill="both", expand=True, side="left")
         list_canvas.update_idletasks()
         list_w = results_frame.winfo_reqwidth() or (width - 2*PAD_X)
         list_canvas.config(width=list_w, height=list_h)
-        list_canvas.create_rounded_rectangle(
-            0, 0, list_w, list_h, radius=LIST_RADIUS, fill=BG_SEARCH, outline=ACCENT, width=2
+        list_canvas.create_rounded_box(
+            0, 0, list_w, list_h, radius=LIST_RADIUS, color=BG_SEARCH
         )
 
         # --- Listbox Widget (on top of rounded canvas) ---
@@ -988,8 +1059,20 @@ class GhostOverlay:
         self.search_overlay.geometry(f"{width}x{height}+{x}+{y}")
         self.search_overlay.deiconify()
         self.search_overlay.grab_set()
-        search_entry.focus_set()
-        results_list.focus_set()
+        self.search_overlay.lift()
+        self.search_overlay.focus_force()
+        
+        def focus_entry_with_click():
+            self.search_overlay.update_idletasks()
+            x = search_entry.winfo_rootx() + search_entry.winfo_width() // 2
+            y = search_entry.winfo_rooty() + search_entry.winfo_height() // 2
+            mouse_controller = mouse.Controller()
+            mouse_controller.position = (x, y)
+            mouse_controller.press(mouse.Button.left)
+            mouse_controller.release(mouse.Button.left)
+            search_entry.focus_set()
+        
+        self.search_overlay.after_idle(focus_entry_with_click)
 
         # --- Make overlay draggable by clicking anywhere on overlay_canvas or main_frame ---
         def start_move(event):
@@ -1004,6 +1087,25 @@ class GhostOverlay:
         main_frame.bind("<Button-1>", start_move)
         main_frame.bind("<B1-Motion>", do_move)
 
+        def check_mouse_outside_overlay():
+            if self.search_overlay and self.search_overlay.winfo_exists():
+                x1 = self.search_overlay.winfo_rootx()
+                y1 = self.search_overlay.winfo_rooty()
+                x2 = x1 + self.search_overlay.winfo_width()
+                y2 = y1 + self.search_overlay.winfo_height()
+                margin = 50
+                mx = self.search_overlay.winfo_pointerx()
+                my = self.search_overlay.winfo_pointery()
+                if (mx < x1 - margin or mx > x2 + margin or
+                    my < y1 - margin or my > y2 + margin):
+                    self.close_search_overlay(self._was_main_overlay_open_before_search)
+                else:
+                    # Check again after a short delay
+                    self.search_overlay.after(100, check_mouse_outside_overlay)
+
+        # Start the polling loop after the overlay is shown
+        self.search_overlay.after(100, check_mouse_outside_overlay)
+
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
             self.search_overlay.grab_release() # Release grab before destroying
@@ -1015,15 +1117,15 @@ class GhostOverlay:
 #####################################################################################################
 
     def _trigger_skip_previous(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
             self.MusicPlayer.skip_previous()
 
     def _trigger_skip_next(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
             self.MusicPlayer.skip_next()
 
     def _trigger_pause(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
             self.MusicPlayer.pause() # Assuming pause toggles
             
     def _trigger_volume_up(self):
@@ -1035,7 +1137,7 @@ class GhostOverlay:
             self.MusicPlayer.dwn_volume()
             
     def _trigger_repeat(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
             self.MusicPlayer.repeat()
             
     def _trigger_lyrics_toggle(self):
@@ -1061,16 +1163,6 @@ class GhostOverlay:
             if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]: # Debounce scan attempts
                 self.triggerDebounce[0] = monotonic()
                 print("Scanning for radio station...")
-                # The logic for set_radio_channel and MusicPlayer.set_radio_ip should handle actual scanning
-                # This is just the trigger.
-                # Example:
-                # self.set_radio_channel() # Gets next IP from available list
-                # success = self.MusicPlayer.set_radio_ip(self.radio_metric['current_ip'])
-                # if not success and atmpt < max_loop:
-                #     self.root.after(100, lambda: self._trigger_radio_station(atmpt + 1, max_loop)) # Retry after delay
-                # if self.window:
-                #     self.root.after(0, self.update_display)
-                # For now, direct call as in original:
                 self.set_radio_channel()
                 if hasattr(self.MusicPlayer, 'set_radio_ip'):
                     if not self.MusicPlayer.set_radio_ip(self.radio_metric['current_ip']):
@@ -1276,6 +1368,12 @@ class GhostOverlay:
         self._last_position = (x, 20)
 
     def open_overlay(self):
+        if hasattr(self, 'search_overlay'):
+            self.close_search_overlay(self._was_main_overlay_open_before_search)
+            try:
+                del self.search_overlay
+            except AttributeError:
+                pass
         if self.window and self.window.winfo_exists(): # Already open
             self.window.lift()
             return
@@ -1291,7 +1389,7 @@ class GhostOverlay:
         self.window.config(bg=transparent_color) # Set window bg to transparent color
         self.toggle_overlay_clickthrough(self.clickThroughState)
 
-        self.canvas = tk.Canvas(self.window, bg=transparent_color, highlightthickness=0)
+        self.canvas = RoundedCanvas(self.window, bg=transparent_color, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
         self.update_display() # Initial draw
@@ -1405,12 +1503,10 @@ class GhostOverlay:
             if num_lyrics_lines > 0: total_height += self.padding /2 # Extra padding before/after lyrics
 
 
-            self.canvas.create_rounded_rectangle(
+            self.canvas.create_rounded_box(
                 0, 0, total_width, total_height,
                 radius=self.corner_radius,
-                fill=self.bg_color, # The actual background of your content
-                outline='#777777', # Optional outline for the content box
-                width=1
+                color=self.bg_color
             )
 
             current_y = self.padding

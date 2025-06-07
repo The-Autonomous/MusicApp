@@ -12,12 +12,18 @@ try:
     from radioIpScanner import SimpleRadioScan
     from radioClient import RadioClient
     from radioMaster import RadioHost
+    from audio import AudioPlayer
 except:
     from .ytHandle import ytHandle
     from .lyricMaster import lyricHandler
     from .radioIpScanner import SimpleRadioScan
     from .radioClient import RadioClient
     from .radioMaster import RadioHost
+    from .audio import AudioPlayer
+
+#####################################################################################################
+
+save_playback_lock = Lock()  # Lock for saving playback state
 
 #####################################################################################################
 
@@ -79,7 +85,7 @@ class MusicPlayer:
     SAVE_STATE_FILE = ".musicapp_state.json"
     
     def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips):
-        pygame.mixer.init()
+        #pygame.mixer.init()
 
         # Playback control events
         self.skip_flag = Event()
@@ -87,7 +93,6 @@ class MusicPlayer:
         self.repeat_event = Event()
         self.movement_event = Event()
         self.current_player_mode = Event()  # False = MusicPlayer, True = RadioPlayer
-        self.save_playback_lock = Lock()
 
         # UI callbacks
         self.set_screen = set_screen
@@ -115,7 +120,7 @@ class MusicPlayer:
         # Radio system
         self.full_radio_ip_list = []
         self.current_radio_ip = "0.0.0.0"
-        self.radio_client = RadioClient(ip=self.current_radio_ip)
+        self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
         self.radio_master = RadioHost(self)
         self.radio_scanner = SimpleRadioScan()
 
@@ -221,13 +226,16 @@ class MusicPlayer:
 
     def save_playback_state(self):
         """Save the current song path and elapsed time to a file."""
+        global save_playback_lock
         if self.current_song:
             state = {
                 "path": self.current_song["path"],
-                "elapsed": self.song_elapsed_seconds
+                "elapsed": self.song_elapsed_seconds,
+                "paused": self.pause_event.is_set(),
+                "repeat": self.repeat_event.is_set()
             }
             try:
-                with self.save_playback_lock:
+                with save_playback_lock:
                     if self.current_song["path"] == state['path']:
                         with open(self.SAVE_STATE_FILE, "w") as f:
                             json.dump(state, f)
@@ -235,30 +243,47 @@ class MusicPlayer:
                 print(f"Failed to save playback state: {e}")
 
     def load_playback_state(self):
+        global save_playback_lock
         try:
             self.resume_pending = True
-            with open(self.SAVE_STATE_FILE, "r") as f:
-                state = json.load(f)
-            path = state.get("path")
-            elapsed = state.get("elapsed", 0)
-            
-            if path and os.path.exists(path):
-                # Find the song dict in cache
-                song = next((s for s in self.shuffler.cache if s["path"] == path), None)
-                if not song:
-                    metadata = self.get_metadata(path)
-                    song = {
-                        'path': path,
-                        'artist': metadata.get('artist', 'Unknown Artist'),
-                        'title': metadata.get('title', os.path.splitext(os.path.basename(path))[0])
-                    }
-                    self.shuffler.cache.append(song)
-                    self.shuffler._refill_upcoming()
+            with save_playback_lock:
+                with open(self.SAVE_STATE_FILE, "r") as f:
+                    state = json.load(f)
+                path = state.get("path")
+                elapsed = state.get("elapsed", 0)
+                paused = state.get("paused", False)
+                repeat = state.get("repeat", False)
                 
-                self.current_song = song
-                self._resume_position = float(elapsed)  # Store in a separate variable
-                self.shuffler.enqueue_replay(song)
-                return True
+                if path and os.path.exists(path):
+                    # Find the song dict in cache
+                    song = next((s for s in self.shuffler.cache if s["path"] == path), None)
+                    if not song:
+                        metadata = self.get_metadata(path)
+                        song = {
+                            'path': path,
+                            'artist': metadata.get('artist', 'Unknown Artist'),
+                            'title': metadata.get('title', os.path.splitext(os.path.basename(path))[0])
+                        }
+                        self.shuffler.cache.append(song)
+                        self.shuffler._refill_upcoming()
+                    
+                    self.current_song = song
+                    self._resume_position = float(elapsed)
+                    self.shuffler.enqueue_replay(song)
+
+                    # Restore repeat state
+                    if repeat:
+                        self.repeat_event.set()
+                    else:
+                        self.repeat_event.clear()
+
+                    # Restore pause state
+                    Thread(target=self.pause_after_mixer_ready, args=(paused,)).start()
+
+                    # Update UI to reflect restored state
+                    self.set_screen(self.current_song['artist'], self.get_display_title())
+
+                    return True
         except Exception as e:
             print(f"Failed to load playback state: {e}")
             self.resume_pending = False
@@ -322,36 +347,24 @@ class MusicPlayer:
 #####################################################################################################
     
     def pause(self, forcedState: bool = None):
-        # decide: True → unpause; False → pause; None → toggle
         should_unpause = forcedState if forcedState is not None else self.pause_event.is_set()
-
         if should_unpause:
-            # unpause
             self.pause_event.clear()
-            pygame.mixer.music.unpause()
-            title = (
-                self.current_song['title']
-                if not self.repeat_event.is_set()
-                else f"{self.current_song['title']} *+*"
-            )
+            AudioPlayer.unpause() # pygame.mixer.music.unpause()
         else:
-            # pause
             self.pause_event.set()
-            pygame.mixer.music.pause()
-            title = f"{self.current_song['title']} *=*"
+            AudioPlayer.pause() # pygame.mixer.music.pause()
+        self.set_screen(self.current_song['artist'], self.get_display_title())
 
-        # update screen in one place
-        self.set_screen(self.current_song['artist'], title)
-
-    def repeat(self):
+    def repeat(self, forcedState: bool = None):
+        should_repeat = forcedState if forcedState is not None else self.repeat_event.is_set()
         if self.pause_event.is_set() or self.movement_event.is_set():
             return
-        if self.repeat_event.is_set():
+        if should_repeat:
             self.repeat_event.clear()
-            self.set_screen(self.current_song['artist'], self.current_song['title'])
         else:
             self.repeat_event.set()
-            self.set_screen(self.current_song['artist'], f"{self.current_song['title']} *+*")
+        self.set_screen(self.current_song['artist'], self.get_display_title())
 
     def before_move(self):
         if self.movement_event.is_set():
@@ -411,7 +424,7 @@ class MusicPlayer:
     def set_volume(self, direction: int = 0):
         """Set volume between 0.0 (silent) and 1.0 (full volume)"""
         self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
-        pygame.mixer.music.set_volume(self.current_volume)
+        AudioPlayer.set_volume(self.current_volume) # pygame.mixer.music.set_volume(self.current_volume)
         print(f"🔊 {self.current_volume}")
         
     def up_volume(self):
@@ -422,9 +435,36 @@ class MusicPlayer:
 
 #####################################################################################################
 
+    def get_display_title(self, specific_song=None):
+        """Return the current song title with repeat and pause markers as needed."""
+        if not specific_song: specific_song = self.current_song
+        if not specific_song:
+            return ""
+        title = specific_song['title']
+        if self.repeat_event.is_set():
+            title += " *+*"
+        if self.pause_event.is_set():
+            title += " *=*"
+        return title
+
+    def pause_after_mixer_ready(self, paused):
+        self.hold_thread_until_mixer()
+        time.sleep(0.1)  # Ensure mixer is ready
+        self.pause(not paused)
+
+    def hold_thread_until_mixer(self):
+        """
+        Wait until pygame mixer is ready and playing music.
+        """
+        while not AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
+            time.sleep(0.01)
+        return True
+
+#####################################################################################################
+
     def _clear_for_new_track(self):
         self.skip_flag.set()
-        pygame.mixer.music.stop()
+        AudioPlayer.stop() # pygame.mixer.music.stop()
         self.forward_stack = []
         self.shuffler.replay_queue = []  # Clear queue for new selection
         if self.current_index < len(self.shuffler.history) - 1:
@@ -432,7 +472,7 @@ class MusicPlayer:
     
     def _queue_song(self, song):
         self.skip_flag.set()
-        pygame.mixer.music.stop()
+        AudioPlayer.stop() # pygame.mixer.music.stop()
         self.shuffler.enqueue_replay(song)
 
     def get_unique_song(self):
@@ -447,7 +487,7 @@ class MusicPlayer:
         except:
             pass
         del self.radio_client
-        self.radio_client = RadioClient(ip=self.current_radio_ip)
+        self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
         
     def load_radio_ips(self, seconds_to_scan: int = 60):
         """
@@ -497,20 +537,22 @@ class MusicPlayer:
         else:
             with self.radio_client._can_have_pygame:
                 try:
-                    pygame.mixer.music.stop()
-                    pygame.mixer.music.unload()
+                    AudioPlayer.stop() # pygame.mixer.music.stop()
+                    AudioPlayer.unload() # pygame.mixer.music.unload()
                 except:
                     print("Couldn't Wait For Pygame Mixer. Continue...")
-                pygame.mixer.music.load(self.current_song['path'])
-                self.pause()
-                #pygame.mixer.music.set_volume(self.current_volume) I dont think this is necessary
+                AudioPlayer.load(self.current_song['path']) # pygame.mixer.music.load(self.current_song['path'])
+                if pauseType:
+                    self.pause()
+                else:
+                    AudioPlayer.play() # pygame.mixer.music.play()
                 try:
-                    pygame.mixer.music.set_pos(self.song_elapsed_seconds)
+                    AudioPlayer.set_pos(self.song_elapsed_seconds) # pygame.mixer.music.set_pos(self.song_elapsed_seconds)
                 except:
                     try:
-                        pygame.mixer.music.play()
-                        pygame.mixer.music.set_pos(self.song_elapsed_seconds)
-                        pygame.mixer.music.unpause()
+                        AudioPlayer.play() # pygame.mixer.music.play()
+                        AudioPlayer.set_pos(self.song_elapsed_seconds) # pygame.mixer.music.set_pos(self.song_elapsed_seconds)
+                        AudioPlayer.unpause() # pygame.mixer.music.unpause()
                     except:
                         print("Error In Loading Music In Radio. Retrying")
                         if not didReset:
@@ -541,7 +583,7 @@ class MusicPlayer:
                         if not self.current_player_mode.is_set():
                             self.set_lyrics(False)
                             break
-                        while pygame.mixer.music.get_pos()/1000 + return_dilation < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
+                        while AudioPlayer.get_pos()/1000 + return_dilation < lyric_pair[0]: # pygame.mixer.music.get_pos()/1000 + return_dilation < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
                             if not self.current_player_mode.is_set() or not local_song_id == self.current_radio_id:
                                 break
                             time.sleep(0.1)
@@ -580,136 +622,139 @@ class MusicPlayer:
     def core_player_loop(self):
         prev_song = None
         while True:
-            self.skip_flag.clear()
-            if self.skip_flag.is_set() or not self.repeat_event.is_set() or prev_song is None:
-                song = self.get_unique_song()
-            else:
-                song = prev_song
-            prev_song = song
-            if not song:
-                time.sleep(0.5)
-                continue
-
-            # history and played lists maintained in shuffler, so skip duplicates here
-            if not self.navigating_history:
-                # Only append if we're not navigating history (i.e., playing a new song)
-                # Truncate history if we've gone back and are now playing a new song
-                self.shuffler.history = self.shuffler.history[:self.current_index+1]
-                if not self.shuffler.history or self.shuffler.history[-1] != song['path']:
-                    self.shuffler.history.append(song['path'])
-                    self.current_index = len(self.shuffler.history) - 1
-            else:
-                # Navigating history: do NOT append, just ensure current_index is correct
-                pass
-            
-            self.current_song = song
-            self.current_song_id = str(song['title']) + str(time.time()) # Create A Unique Song ID For Lyrics To Track
-            title = song['title']
-            self.set_screen(song['artist'], title)
-            self.current_song_lyrics = ""
-            
-            current_rotation_count, max_current_rotation = 0, 5 # Count How Many Rotations Of Loop Have Occured Before Syncing The Radio Host With The Internal Media Player
-            
-            fullTitle = f"{song['artist']}![]!{title}"
-            
-            def lyric_callback(return_lyrics, local_song_id):
-                if not local_song_id == self.current_song_id:
-                    return
-                self.current_song_lyrics = return_lyrics
-                if len(return_lyrics) > 0:
-                    self.set_lyrics(True, "🎵")
-                    for lyric_pair in return_lyrics:
-                        if not local_song_id == self.current_song_id:
-                            self.set_lyrics(False)
-                            break
-                        while self.song_elapsed_seconds < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
-                            if not local_song_id == self.current_song_id:
-                                break
-                            time.sleep(0.1)
-                        self.set_lyrics(True, lyric_pair[1])
-                else:
-                    self.set_lyrics(False)
-                    
-            # lyric thread
-            Thread(target=self.lyricHandler.request,
-                   args=(song['artist'], song['title'], lyric_callback, self.current_song_id)).start()
-
             try:
-                pygame.mixer.music.load(song['path'])
-                pygame.mixer.music.set_volume(self.current_volume)
-                
-                # Simplified resume logic - if we're resuming and this is the correct song
-                # In core_player_loop, replace the resume block with:
-                if getattr(self, "resume_pending", False) and self.current_song and self.current_song['path'] == song['path']:
-                    start_pos = getattr(self, '_resume_position', 0.0)  # Use stored position
-                    pygame.mixer.music.play()
-                    
-                    try:
-                        pygame.mixer.music.set_pos(start_pos)
-                    except Exception as e:
-                        try:
-                            pygame.mixer.music.play(start=start_pos)
-                            print(f"Used alternative method to start at {start_pos:.2f}s")
-                        except Exception as e:
-                            print(f"Alternative method also failed: {e}")
-                    
-                    start_time = time.time() - start_pos
-                    self.resume_pending = False
-                    delattr(self, '_resume_position')  # Clean up
+                self.skip_flag.clear()
+                if self.shuffler.replay_queue:
+                    song = self.get_unique_song()
+                elif self.skip_flag.is_set() or not self.repeat_event.is_set() or prev_song is None:
+                    song = self.get_unique_song()
                 else:
-                    start_pos = 0.0
-                    pygame.mixer.music.play()
-                    start_time = time.time()
+                    song = prev_song
+                prev_song = song
+                if not song:
+                    time.sleep(0.5)
+                    continue
 
-                audio = MP3(song['path'])
-                total_duration = audio.info.length
-                
-                # Ensure start_time reflects our position
-                start_time = time.time() - start_pos
-                paused_duration = 0
-                
-                if current_rotation_count == 0:
-                    self.radio_master.initSong(
-                        title = fullTitle,
-                        mp3_song_file_path = song['path'],
-                        current_pymixer = pygame.mixer.music,
-                        current_song_lyrics=self.current_song_lyrics
-                    )
+                # history and played lists maintained in shuffler, so skip duplicates here
+                if not self.navigating_history:
+                    self.shuffler.history = self.shuffler.history[:self.current_index+1]
+                    if not self.shuffler.history or self.shuffler.history[-1] != song['path']:
+                        self.shuffler.history.append(song['path'])
+                        self.current_index = len(self.shuffler.history) - 1
+
+                self.current_song = song
+                self.current_song_id = str(song['title']) + str(time.time())
+                self.set_screen(song['artist'], self.get_display_title())
+                self.current_song_lyrics = ""
+
+                current_rotation_count, max_current_rotation = 0, 5
+                fullTitle = f"{song['artist']}![]!{song['title']}"
+
+                def lyric_callback(return_lyrics, local_song_id):
+                    if not local_song_id == self.current_song_id:
+                        return
+                    self.current_song_lyrics = return_lyrics
+                    if len(return_lyrics) > 0:
+                        self.set_lyrics(True, "🎵")
+                        for lyric_pair in return_lyrics:
+                            if not local_song_id == self.current_song_id:
+                                self.set_lyrics(False)
+                                break
+                            while self.song_elapsed_seconds < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
+                                if not local_song_id == self.current_song_id:
+                                    break
+                                time.sleep(0.1)
+                            self.set_lyrics(True, lyric_pair[1])
+                    else:
+                        self.set_lyrics(False)
+
+                # lyric thread
+                Thread(target=self.lyricHandler.request,
+                       args=(song['artist'], song['title'], lyric_callback, self.current_song_id)).start()
+
+                try:
+                    AudioPlayer.load(song['path']) # pygame.mixer.music.load(song['path'])
+                    AudioPlayer.set_volume(self.current_volume) # pygame.mixer.music.set_volume(self.current_volume)
+                    
+                    # Simplified resume logic - if we're resuming and this is the correct song
+                    # In core_player_loop, replace the resume block with:
+                    if getattr(self, "resume_pending", False) and self.current_song and self.current_song['path'] == song['path']:
+                        start_pos = getattr(self, '_resume_position', 0.0)
+                        AudioPlayer.play() # pygame.mixer.music.play()
+                        try:
+                            AudioPlayer.set_pos(start_pos) # pygame.mixer.music.set_pos(start_pos)
+                        except Exception as e:
+                            try:
+                                AudioPlayer.play(start=start_pos) # pygame.mixer.music.play(start=start_pos)
+                                print(f"Used alternative method to start at {start_pos:.2f}s")
+                            except Exception as e:
+                                print(f"Alternative method also failed: {e}")
                         
-                current_rotation_count = (current_rotation_count + 1) % max_current_rotation # Add One Else Loop Back
-                
-                last_save_time = 0
-                while time.time() - start_time - paused_duration < total_duration:
-                    if self.skip_flag.is_set(): break
-                    if self.pause_event.is_set():
+                        self.resume_pending = False
+                        if hasattr(self, '_resume_position'):
+                            del self._resume_position
+                    else:
+                        start_pos = 0.0
+                        AudioPlayer.play() # pygame.mixer.music.play()
+                        start_time = time.time()
+
+                    audio = MP3(song['path'])
+                    total_duration = audio.info.length
+                    
+                    # Ensure start_time reflects our position
+                    start_time = time.time() - start_pos
+                    paused_duration = 0
+                    
+                    if current_rotation_count == 0:
                         self.radio_master.initSong(
-                            title = f"{fullTitle}***[]*Paused",
+                            title = fullTitle,
                             mp3_song_file_path = song['path'],
-                            current_pymixer = pygame.mixer.music,
-                            current_song_lyrics=self.current_song_lyrics
+                            current_pymixer = AudioPlayer, # FUTURE FIX
+                            current_song_lyrics = self.current_song_lyrics
                         )
-                        pause_start = time.time()
-                        pygame.mixer.music.pause()
-                        while self.pause_event.is_set():
-                            if self.skip_flag.is_set(): break
-                            time.sleep(0.1)
-                        paused_duration += time.time() - pause_start
-                        pygame.mixer.music.unpause()
-                    self.song_elapsed_seconds = time.time() - start_time - paused_duration
-                    self.set_duration(self.song_elapsed_seconds, total_duration)
-                    if time.time() - last_save_time > 1:
-                        self.save_playback_state()
-                        last_save_time = time.time()
-                    time.sleep(0.1)
+                            
+                    current_rotation_count = (current_rotation_count + 1) % max_current_rotation # Add One Else Loop Back
+                    
+                    last_save_time = 0
+                    while time.time() - start_time - paused_duration < total_duration:
+                        if self.skip_flag.is_set(): break
+                        if self.pause_event.is_set():
+                            self.radio_master.initSong(
+                                title = f"{fullTitle}***[]*Paused",
+                                mp3_song_file_path = song['path'],
+                                current_pymixer = AudioPlayer, # FUTURE FIX
+                                current_song_lyrics = self.current_song_lyrics
+                            )
+                            pause_start = time.time()
+                            AudioPlayer.pause() # pygame.mixer.music.pause()
+                            self.save_playback_state()
+                            while self.pause_event.is_set():
+                                if self.skip_flag.is_set(): break
+                                time.sleep(0.1)
+                            paused_duration += time.time() - pause_start
+                            AudioPlayer.unpause() # pygame.mixer.music.unpause()
+                        self.song_elapsed_seconds = time.time() - start_time - paused_duration
+                        self.set_duration(self.song_elapsed_seconds, total_duration)
+                        self.set_screen(song['artist'], self.get_display_title())
+                        if time.time() - last_save_time > 1:
+                            self.save_playback_state()
+                            last_save_time = time.time()
+                        time.sleep(0.1)
+
+                except Exception as e:
+                    self.set_screen("Error", song['title'])
+                    print(e)
+                    time.sleep(1)
+                finally:
+                    AudioPlayer.stop() # pygame.mixer.music.stop()
+                    self.current_song = None
+                    self.song_elapsed_seconds = 0.0
 
             except Exception as e:
-                self.set_screen("Error", song['title'])
-                print(e)
+                print(f"[core_player_loop] Unhandled exception: {e}")
+                import traceback
+                traceback.print_exc()
                 time.sleep(1)
-            finally:
-                pygame.mixer.music.stop()
-                self.current_song = None
-                self.song_elapsed_seconds = 0.0
 
 #####################################################################################################
 

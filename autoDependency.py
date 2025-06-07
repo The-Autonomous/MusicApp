@@ -44,6 +44,9 @@ class AutoDependencies:
         self.packages = {
             "requests": "requests",
             "pygame": "pygame",
+            "sounddevice": "sounddevice",
+            "soundfile": "soundfile",
+            "pydub": "pydub",
             "mutagen": "mutagen",
             "yt-dlp": "yt_dlp", # pip install yt-dlp, import yt_dlp
             "Flask": "flask",    # pip install Flask, import flask
