@@ -583,7 +583,7 @@ class MusicPlayer:
                         if not self.current_player_mode.is_set():
                             self.set_lyrics(False)
                             break
-                        while AudioPlayer.get_pos()/1000 + return_dilation < lyric_pair[0]: # pygame.mixer.music.get_pos()/1000 + return_dilation < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
+                        while AudioPlayer.get_pos() + return_dilation < lyric_pair[0]: # pygame.mixer.music.get_pos()/1000 + return_dilation < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
                             if not self.current_player_mode.is_set() or not local_song_id == self.current_radio_id:
                                 break
                             time.sleep(0.1)

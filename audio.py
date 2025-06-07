@@ -71,7 +71,27 @@ class AudioPlayerRoot:
 
     def _get_audio_info(self, filepath):
         cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filepath]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='ignore')
+        
+        # --- START OF MODIFICATION ---
+        creationflags = 0
+        startupinfo = None
+        if platform.system() == 'Windows':
+            creationflags = subprocess.CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE # Add this line
+        
+        result = subprocess.run(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True, 
+            encoding='utf-8', 
+            errors='ignore',
+            creationflags=creationflags, # Add this
+            startupinfo=startupinfo      # Add this
+        )
+
         if result.returncode != 0:
             raise RuntimeError(f"ffprobe error: {result.stderr}")
         info = json.loads(result.stdout)
@@ -160,12 +180,15 @@ class AudioPlayerRoot:
                     '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
                     '-ar', str(self.samplerate), '-ac', str(self.channels), 'pipe:1'
                 ]
+                
+                # --- START OF MODIFICATION ---
                 creationflags = 0
                 startupinfo = None
                 if platform.system() == 'Windows':
                     creationflags = subprocess.CREATE_NO_WINDOW
                     startupinfo = subprocess.STARTUPINFO()
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE # Add this line
 
                 process = subprocess.Popen(
                     ffmpeg_cmd,

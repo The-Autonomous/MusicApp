@@ -136,8 +136,8 @@ class RadioHost:
         while mix and not self._pos_thread_stop.is_set():
             try:
                 # pygame.mixer returns ms
-                ms = mix.get_pos()
-                self.current_data['position'] = ms / 1000.0 if ms >= 0 else 0.0
+                self.current_data['position'] = mix.get_pos()
+                print(self.current_data['position'], end='\r')
             except Exception:
                 pass
             time.sleep(0.2)  # adjust frequency as needed
