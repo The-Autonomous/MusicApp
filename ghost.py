@@ -251,7 +251,7 @@ class GhostOverlay:
         
         Thread(target=self.background_key_loop, daemon=True).start() # Start background key loop (Allows GTA V Or Other Games To Run Keypresses Without Blocking)
         Thread(target=self.handle_overlay_draggability, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
-        Thread(target=self.keep_overlay_on_top, daemon=True).start() # Keep Overlay On Top (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
+        Thread(target=lambda: self.keep_overlay_on_top_loop, daemon=True).start() # Keep Overlay On Top (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
         self.root.after(0, self.display_overlay) # Start the overlay display process
 
 #####################################################################################################
@@ -497,7 +497,11 @@ class GhostOverlay:
             if required_met and forbidden_met:
                 action_func = action.get('action')
                 if callable(action_func):
-                    self.root.after(0, action_func)
+                    try:
+                        self.root.after(0, action_func)
+                    except Exception as e:
+                        sleep(2) # Wait for 2 seconds before retrying (Not ideal, but prevents immediate re-trigger)
+                        self.root.after(0, action_func) # Retry after a short delay
                     self.last_toggle_state = True # Prevent immediate re-trigger
                     # Optional: More selective reset of keys_pressed if needed
                     # For example, keep 'alt' pressed but clear the action-specific key:
@@ -1347,6 +1351,11 @@ class GhostOverlay:
             sleep(0.1)
         self.root.after(0, self.open_overlay)
 
+
+    def keep_overlay_on_top_loop(self):
+        self.keep_overlay_on_top()  # your actual function
+        self.root.after(1, self.keep_overlay_on_top_loop)  # schedule again after 1 ms
+
     def keep_overlay_on_top(self):
         """Keep the overlay window on top of all other windows."""
         if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
@@ -1355,7 +1364,6 @@ class GhostOverlay:
             self.key_hints_popup.attributes('-topmost', True)
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists() and self.search_overlay.state() != 'withdrawn':
             self.search_overlay.attributes('-topmost', True)
-        self.root.after_idle(lambda: self.root.after(1, self.keep_overlay_on_top))
 
 #####################################################################################################
 

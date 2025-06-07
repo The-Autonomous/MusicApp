@@ -4,7 +4,7 @@ import sounddevice as sd
 import soundfile as sf
 from threading import Event, Thread, Lock
 from collections import deque
-from time import sleep
+from time import sleep, monotonic
 
 class AudioPlayerRoot:
     def __init__(self, buffer_size_seconds=10):
@@ -14,6 +14,8 @@ class AudioPlayerRoot:
         self.chunk_size = 1024
         #self.root_reading_thread = Lock()
         self.filepath = None
+        
+        self.actual_start_monotonic = None
 
         self.paused = Event()
         self.stop_event = Event()
@@ -77,7 +79,7 @@ class AudioPlayerRoot:
         else:
             print('No file loaded to play.')
 
-    def _start_playback_session(self, filepath, start_pos, play_immediately):
+    def _start_playback_session(self, filepath, start_pos, play_immediately, buffertime=None, radio_mode=False):
         self.stop() # Ensure previous session is stopped and cleaned up
 
         self.filepath = filepath
@@ -91,14 +93,19 @@ class AudioPlayerRoot:
             self.stop() # Clean up if info gathering fails
             return
 
-        self.position_frames = int(start_pos * self.samplerate)
+        final_math = start_pos
+        if radio_mode:
+            solved_monotonic = monotonic()
+            final_math += (solved_monotonic + 1 - buffertime)
+        
+        self.position_frames = int((final_math) * self.samplerate)
         self.buffer.clear() # Clear buffer for new session
 
         self.stop_event.clear() # Clear stop event for new session
         self.paused.set()       # Start paused until buffer is ready or explicit play is called
 
         # Start playback thread (which will start reader thread)
-        self._playback_thread = Thread(target=self._run_stream, daemon=True)
+        self._playback_thread = Thread(target=self._run_stream, args=(radio_mode,), daemon=True)
         self._playback_thread.start()
 
         # Wait for reader thread to initialize and start filling
@@ -107,18 +114,35 @@ class AudioPlayerRoot:
 
         # Crucial addition for quick seeks to prevent underruns
         # Wait for a minimum buffer fill before allowing playback to truly start
-        min_buffer_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.2) # Wait for 20% of buffer
-        if min_buffer_chunks < 2: min_buffer_chunks = 2 # Ensure at least 2 chunks
-        while len(self.buffer) < min_buffer_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
-            sd.sleep(10) # Small sleep to avoid busy-waiting
-
+        if not radio_mode:
+            min_buffer_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.2) # Wait for 20% of buffer
+            if min_buffer_chunks < 2: min_buffer_chunks = 2 # Ensure at least 2 chunks
+            while len(self.buffer) < min_buffer_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
+                sd.sleep(10) # Small sleep to avoid busy-waiting
+            
         if play_immediately:
             self.unpause() # This will truly start the audio stream output
         else:
             self.pause() # Keep paused as requested by load
         Thread(target=self.set_movement, args=(False,), daemon=True).start() # Reset movement state on stop
+        if radio_mode:
+            return solved_monotonic
 
-    def _run_stream(self):
+    def radio_play(self, filepath=None, start_pos=0.0, buffer_time=None):
+        """Special method for radio playback, similar to play but with different handling."""
+        if filepath:
+            return self._start_playback_session(filepath, start_pos=start_pos, play_immediately=True, buffertime=buffer_time, radio_mode=True)
+        elif self.filepath:
+            if self.paused.is_set():
+                self.unpause()
+            else: # If already playing or paused with no new file, restart from start_pos
+                return self._start_playback_session(self.filepath, start_pos=start_pos, play_immediately=True, buffertime=buffer_time, radio_mode=True)
+        else:
+            print('No file loaded to play.')
+        print("Something went wrong with returning from radio_play. No start_offset was returned.")
+        return 0.0
+
+    def _run_stream(self, radio_mode=False):
         # This thread's main job is to manage the audio output stream
         # and ensure the reader thread is running.
 
@@ -129,10 +153,11 @@ class AudioPlayerRoot:
 
             # Wait for some initial buffer to be filled before starting the stream
             # This helps prevent initial underruns, especially on fresh starts or seeks.
-            initial_buffer_wait_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.1) # 10% of buffer
-            if initial_buffer_wait_chunks < 2: initial_buffer_wait_chunks = 2
-            while len(self.buffer) < initial_buffer_wait_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
-                sd.sleep(20) # A bit longer sleep for initial fill
+            if not radio_mode:
+                initial_buffer_wait_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.1) # 10% of buffer
+                if initial_buffer_wait_chunks < 2: initial_buffer_wait_chunks = 2
+                while len(self.buffer) < initial_buffer_wait_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
+                    sd.sleep(20) # A bit longer sleep for initial fill
 
             if self.stop_event.is_set():
                 return
@@ -248,9 +273,13 @@ class AudioPlayerRoot:
                 outdata[len(chunk):] = 0
             self.position_frames += frames
         except IndexError:
-            outdata.fill(0)
-            self.stop_event.set() # This will stop the stream, ensuring clean exit
-            raise sd.CallbackStop # Signal SoundDevice to stop the stream
+            try:
+                chunk = self.buffer.popleft()
+            except IndexError:
+                outdata.fill(0)
+                if not self.stop_event.is_set():
+                    print("Buffer underrun. Waiting for refill...")
+                return  # don’t kill the stream immediately
 
     def stop(self):
         if self.get_movement():
@@ -290,7 +319,10 @@ class AudioPlayerRoot:
         If `do_sleep` is False, it will not sleep, allowing immediate state change.
         This method is thread-safe and can be called from any thread.
         """
-        self.stop_active = active or not self.stop_active # Default to False if None
+        if active is not None:
+            self.stop_active = active
+        else:
+            self.stop_active = self.stop_active # Default to False if None
         if do_sleep:
             sleep(0.1)
 

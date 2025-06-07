@@ -6,7 +6,7 @@ from time import time, sleep, monotonic
 
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
-        self.client_data = {'radio_text': '', 'radio_duration': [0, 0]}
+        self.client_data = {'radio_text': '', 'radio_duration': [0, 0]} # [current position, [current song position, current song duration]]
         self._running = Event()
         self._paused = False
         self._repeat = False
@@ -21,7 +21,10 @@ class RadioClient:
         self.temp_song_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache.mp3")
         self._start_time = None
         self._start_offset = 0.0
+        self._total_pause_duration = 0.0
+        self._pause_start_time = None
         self.static_noise = self.generate_static()
+
 
     def generate_static(self, duration_ms: int = 500) -> np.ndarray:
         """
@@ -91,27 +94,41 @@ class RadioClient:
                     continue
 
                 server_pos = data['location']
-                pause_dilation = 0
-                
+
                 is_paused = data['title'].endswith("***[]*Paused")
 
                 if is_paused and not self._paused:
                     self.AudioPlayer.pause() # pygame.mixer.music.pause()
-                    self._pause_time = time()
+                    self._pause_time = time() # This was already here for some reason, we'll use a new one
+                    self._pause_start_time = time() # <<< NEW: Mark the start of this pause
                     self._paused = True
                 elif not is_paused and self._paused:
                     self.AudioPlayer.unpause() # pygame.mixer.music.unpause()
+                    # <<< NEW: Accumulate pause duration when unpausing
+                    if self._pause_start_time is not None:
+                        self._total_pause_duration += (time() - self._pause_start_time)
+                    self._pause_start_time = None # Reset pause start time
                     self._pause_time = None
                     self._paused = False
                 self._repeat = data['title'].endswith(" *+*")
 
                 if data['title'] != self.client_data['radio_text'] and not self._repeat:
+                    # When a new song starts, reset the pause duration
+                    self._total_pause_duration = 0.0 # <<< NEW: Reset for new song
+                    self._pause_start_time = None # Ensure this is also reset
                     self._handle_song_change(data, self._start_download_offset)
                 elif self.AudioPlayer.get_busy() or self._paused: # pygame.mixer.music.get_busy() or self._paused:
                     try:
                         # Replacing get_pos with manual time tracking
                         if self._start_time is not None:
-                            client_pos = self._start_offset + (time() - self._start_time) - pause_dilation
+                            # <<< MODIFIED: Subtract total_pause_duration
+                            # If currently paused, add the duration of the current pause to the total
+                            current_effective_pause_duration = self._total_pause_duration
+                            if self._paused and self._pause_start_time is not None:
+                                current_effective_pause_duration += (time() - self._pause_start_time)
+
+                            client_pos = self._start_offset + (time() - self._start_time) - current_effective_pause_duration
+                            print(client_pos)
                         else:
                             client_pos = 0.0
 
@@ -120,7 +137,8 @@ class RadioClient:
                             Timer(5.0, self._update_playback_position, args=(0,)).start()
                             continue
 
-                        if client_pos >= 0 and abs(server_pos - client_pos) > self.sync_threshold and not self._repeat and not self._paused:
+                        duration = self.client_data['radio_duration'][1]
+                        if duration - self.sync_threshold - 1 >= client_pos and client_pos >= 0 and abs(server_pos - client_pos) > self.sync_threshold and not self._repeat and not self._paused:
                             print(f"Sync Triggered: Server={server_pos:.1f}s, Client={client_pos:.1f}s, Diff={abs(server_pos - client_pos):.1f}s")
                             self._update_playback_position(server_pos)
                             self.client_data['radio_duration'][0] = server_pos
@@ -219,22 +237,14 @@ class RadioClient:
             waited = 0
             while not self.AudioPlayer.get_busy() and waited < 10: # not pygame.mixer.music.get_busy() and waited < 10:
                 sleep(0.01)
-                self.AudioPlayer.play() # pygame.mixer.music.play()
                 waited += 0.01
 
             if self.AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
-                print(f"Playing song from position: {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
                 try:
-                    self._start_offset = start_position + (monotonic() - buffer_time_frame)
-                    self.AudioPlayer.play(start=start_position + (monotonic() - buffer_time_frame)) # pygame.mixer.music.play(start=start_position + (monotonic() - buffer_time_frame))
-                    print(f"Used play(start=...) to start at {float(start_position + (monotonic() - buffer_time_frame)):.2f}s")
-                except TypeError:
-                    self.AudioPlayer.play() # pygame.mixer.music.play()
-                    try:
-                        self.AudioPlayer.set_pos(start_position + (monotonic() - buffer_time_frame)) # pygame.mixer.music.set_pos(start_position + (monotonic() - buffer_time_frame))
-                        print(f"Used set_pos({float(start_position + (monotonic() - buffer_time_frame)):.2f}) after play()")
-                    except Exception as e:
-                        print(f"set_pos failed: {e}")
+                    self._start_offset = float(start_position + (self.AudioPlayer.radio_play(start_pos=start_position, buffer_time=buffer_time_frame) - buffer_time_frame))
+                    print(f"Playing song from position: {self._start_offset:.2f}s")
+                except Exception as e:
+                    print(f"set_pos failed: {e}")
             else:
                 print("Warning: Music did not start in time, skipping seek.")
             

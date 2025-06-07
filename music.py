@@ -245,7 +245,7 @@ class MusicPlayer:
             state = {
                 "path": self.current_song["path"],
                 "elapsed": self.song_elapsed_seconds,
-                "paused": self.pause_event.is_set(),
+                "paused": False if self.current_player_mode.is_set() else self.pause_event.is_set(),
                 "repeat": self.repeat_event.is_set()
             }
             try:
@@ -638,7 +638,9 @@ class MusicPlayer:
                 self.skip_flag.clear()
                 if self.shuffler.replay_queue:
                     song = self.get_unique_song()
-                elif self.skip_flag.is_set() or not self.repeat_event.is_set() or prev_song is None:
+                elif self.repeat_event.is_set() and prev_song is not None:
+                    song = prev_song
+                elif self.skip_flag.is_set() or prev_song is None:
                     song = self.get_unique_song()
                 else:
                     song = prev_song
