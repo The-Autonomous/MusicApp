@@ -696,7 +696,12 @@ class MusicPlayer:
                     else:
                         start_pos = 0.0
                         AudioPlayer.play() # pygame.mixer.music.play()
-                        start_time = time.time()
+                        # Add a small delay or mixer busy check here
+                        self.hold_thread_until_mixer() # <--- Add this call!
+                        start_time = time.time() # Reset start_time after mixer is ready
+
+                    # Now update the screen, after the music has actually started
+                    self.set_screen(song['artist'], self.get_display_title()) # <--- Move this line here
 
                     audio = MP3(song['path'])
                     total_duration = audio.info.length
