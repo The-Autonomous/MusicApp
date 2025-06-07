@@ -1,9 +1,4 @@
-import os
-import platform
-import subprocess
-import zipfile
-import io
-import json
+import os, platform, subprocess, zipfile, json
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -232,7 +227,7 @@ class AudioPlayerRoot:
                 # --- FIX: Prevent console window from showing up on Windows ---
                 creation_flags = 0
                 if platform.system() == 'Windows':
-                    creation_flags = subprocess.CREATE_NO_WINDOW
+                    creation_flags = subprocess.DETACHED_PROCESS # Use DETACHED_PROCESS to prevent window
 
                 process = subprocess.Popen(
                     ffmpeg_cmd,
@@ -303,7 +298,7 @@ class AudioPlayerRoot:
             
             # Copy the chunk to the output buffer.
             outdata[:len(modified_chunk)] = modified_chunk
-
+            
             # If the chunk is smaller than the buffer, fill the rest with silence.
             if len(chunk) < len(outdata):
                 outdata[len(chunk):] = 0
