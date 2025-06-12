@@ -231,12 +231,29 @@ class MusicPlayer:
         else:
             song = path_or_song
 
-        # Check if it's already playing
-        if self.current_song and self.current_song['path'] == song['path']:
-            return  # Already playing this song
+        # Clear the replay queue when explicitly playing a song.
+        # This ensures that after this song plays, the shuffler will naturally
+        # pick the next song from its upcoming queue, preventing unintended repeats.
+        self.shuffler.replay_queue.clear() # <--- MODIFICATION: Clear replay queue
 
-        # Queue the song and skip to it
-        self._queue_song(song)
+        # Check if it's already playing the exact same song
+        if self.current_song and self.current_song['path'] == song['path']:
+            if self.pause_event.is_set():
+                self.pause(True)  # Unpause if paused
+            # If it's already playing, no need to re-queue or manipulate history.
+            return
+
+        # If it's a new song or a different instance of the same song, queue it and handle history
+        self.skip_flag.set() # Signal core loop to pick up new song on next iteration
+        self.shuffler.enqueue_replay(song) # Add to replay queue for immediate playback
+
+        # Update history for direct plays (if not navigating history manually)
+        if not self.navigating_history:
+            # If we're playing a new song directly, add it to history and clear forward_stack
+            self.shuffler.history = self.shuffler.history[:self.current_index+1]
+            self.shuffler.history.append(song['path'])
+            self.current_index = len(self.shuffler.history) - 1
+            self.forward_stack.clear() # Clear forward stack on new direct play
 
 #####################################################################################################
 
@@ -640,9 +657,7 @@ class MusicPlayer:
                 self.skip_flag.clear()
                 if self.shuffler.replay_queue:
                     song = self.get_unique_song()
-                elif self.repeat_event.is_set() and prev_song is not None:
-                    song = prev_song
-                elif self.skip_flag.is_set() or prev_song is None:
+                elif self.skip_flag.is_set() or not self.repeat_event.is_set() or prev_song is None:
                     song = self.get_unique_song()
                 else:
                     song = prev_song
