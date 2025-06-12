@@ -6,24 +6,24 @@ from time import time, sleep, monotonic
 
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
-        self.client_data = {'radio_text': '', 'radio_duration': [0, 0]} # [current position, [current song position, current song duration]]
+        self.client_data = {'radio_text': '', 'radio_duration': [0, 0]} # [current position, total song duration]
         self._running = Event()
         self._paused = False
         self._repeat = False
-        self._pause_time = None
         self._channel_changed = False
         self.AudioPlayer = audio_player
         self._ip = ip
         self._callback = None
         self._handled = False
         self.update_interval = 0.5
-        self.sync_threshold = 1.0
+        self.sync_threshold = 1.0 # Threshold for re-syncing client position to server position
         self.temp_song_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache.mp3")
-        self._start_time = None
-        self._start_offset = 0.0
-        self._total_pause_duration = 0.0
-        self._pause_start_time = None
-        self.static_noise = self.generate_static()
+
+        # New/Revised time tracking variables for robust radio client playback
+        self._current_song_start_time = None # Monotonic time when the *current song* started playing locally
+        self._current_song_start_server_pos = 0.0 # The server's position when _current_song_start_time was recorded
+        self._total_pause_duration_for_current_song = 0.0 # Accumulated pause time for the current song
+        self._pause_start_time = None # Monotonic time when the *current pause* started
 
 
     def generate_static(self, duration_ms: int = 500) -> np.ndarray:
@@ -49,7 +49,7 @@ class RadioClient:
         # Calculate number of frames for the desired duration
         num_frames = int(samplerate * (duration_ms / 1000.0))
 
-        # Generate white noise (random samples between -1.0 and 1.0)
+        # Generate white noise (random samples between -0.5 and 0.5)
         # Reshape for stereo if channels > 1
         if channels == 1:
             static_data = np.random.uniform(-0.5, 0.5, size=num_frames).astype(np.float32)
@@ -86,7 +86,7 @@ class RadioClient:
     def _update_loop(self):
         while self._running.is_set():
             server_pos = -1.0
-            client_pos = -1.0
+            data = None # Initialize data to None
             try:
                 data = self._fetch_data()
                 if not data:
@@ -97,200 +97,163 @@ class RadioClient:
 
                 is_paused = data['title'].endswith("***[]*Paused")
 
+                # Handle pause/unpause state transitions
                 if is_paused and not self._paused:
-                    self.AudioPlayer.pause() # pygame.mixer.music.pause()
-                    self._pause_time = time() # This was already here for some reason, we'll use a new one
-                    self._pause_start_time = time() # <<< NEW: Mark the start of this pause
+                    self.AudioPlayer.pause()
+                    self._pause_start_time = monotonic() # Mark the start of THIS pause
                     self._paused = True
                 elif not is_paused and self._paused:
-                    self.AudioPlayer.unpause() # pygame.mixer.music.unpause()
-                    # <<< NEW: Accumulate pause duration when unpausing
+                    self.AudioPlayer.unpause()
                     if self._pause_start_time is not None:
-                        self._total_pause_duration += (time() - self._pause_start_time)
-                    self._pause_start_time = None # Reset pause start time
-                    self._pause_time = None
+                        self._total_pause_duration_for_current_song += (monotonic() - self._pause_start_time)
+                    self._pause_start_time = None
                     self._paused = False
+
                 self._repeat = data['title'].endswith(" *+*")
 
+                # Check for song change
                 if data['title'] != self.client_data['radio_text'] and not self._repeat:
-                    # When a new song starts, reset the pause duration
-                    self._total_pause_duration = 0.0 # <<< NEW: Reset for new song
+                    # New song detected
+                    self._total_pause_duration_for_current_song = 0.0 # Reset for new song
                     self._pause_start_time = None # Ensure this is also reset
-                    self._handle_song_change(data, self._start_download_offset)
-                elif self.AudioPlayer.get_busy() or self._paused: # pygame.mixer.music.get_busy() or self._paused:
-                    try:
-                        # Replacing get_pos with manual time tracking
-                        if self._start_time is not None:
-                            # <<< MODIFIED: Subtract total_pause_duration
-                            # If currently paused, add the duration of the current pause to the total
-                            current_effective_pause_duration = self._total_pause_duration
-                            if self._paused and self._pause_start_time is not None:
-                                current_effective_pause_duration += (time() - self._pause_start_time)
+                    self._paused = False # Ensure client is not marked as paused when new song starts
+                    self._current_song_start_time = None # Indicate no playback until _download_and_play sets it
+                    self._current_song_start_server_pos = 0.0 # Reset server start pos
+                    self._handle_song_change(data) # Call updated method
 
-                            client_pos = self._start_offset + (time() - self._start_time) - current_effective_pause_duration
-                            print(client_pos)
-                        else:
-                            client_pos = 0.0
+                # Update client_data radio_text and total duration regardless of song change
+                self.client_data['radio_text'] = data['title']
+                self.client_data['radio_duration'][1] = data['duration']
 
-                        if self._repeat and abs(self.client_data['radio_duration'][1] - (client_pos + 5)) < 5 and not self._handled:
-                            self._handled = True
-                            Timer(5.0, self._update_playback_position, args=(0,)).start()
-                            continue
+                # Calculate client_pos based on local playback and server sync
+                client_pos = 0.0
+                if self._current_song_start_time is not None:
+                    # Calculate elapsed time on client, accounting for pauses
+                    elapsed_active_time = (monotonic() - self._current_song_start_time) - self._total_pause_duration_for_current_song
+                    if self._paused and self._pause_start_time is not None:
+                        # If currently paused, subtract the duration of the *current, ongoing* pause from the elapsed time
+                        # to get the position as if the song is paused.
+                        elapsed_active_time -= (monotonic() - self._pause_start_time)
 
-                        duration = self.client_data['radio_duration'][1]
-                        if duration - self.sync_threshold - 1 >= client_pos and client_pos >= 0 and abs(server_pos - client_pos) > self.sync_threshold and not self._repeat and not self._paused:
-                            print(f"Sync Triggered: Server={server_pos:.1f}s, Client={client_pos:.1f}s, Diff={abs(server_pos - client_pos):.1f}s")
-                            self._update_playback_position(server_pos)
-                            self.client_data['radio_duration'][0] = server_pos
-                        else:
-                            self.client_data['radio_duration'][0] = client_pos
+                    client_pos = self._current_song_start_server_pos + elapsed_active_time
 
-                    except Exception as e:
-                        print(f"Error getting position: {e}")
+                    # Clamping client_pos to song duration:
+                    if data['duration'] > 0:
+                        client_pos = min(client_pos, data['duration'])
+                        client_pos = max(client_pos, 0.0) # Ensure it doesn't go below 0
 
+                    # Re-sync logic: If client position deviates too much from server position
+                    # This is crucial for handling repeated songs or desynchronization
+                    if abs(client_pos - server_pos) > self.sync_threshold:
+                         print(f"🔄 Resyncing due to drift: Client {client_pos:.2f}s, Server {server_pos:.2f}s (Diff: {abs(client_pos - server_pos):.2f}s)")
+                         self._resync_playback(data['url'], server_pos, data['buffered_at'])
+                         # After resync, client_pos will be updated on the next loop iteration based on new _current_song_start_time
+                         # For this iteration, we can just use the server_pos or re-calculate.
+                         client_pos = server_pos # Assume instant sync for this display update
+
+                self.client_data['radio_duration'][0] = client_pos # Update displayed current position
+
+            except requests.exceptions.ConnectionError:
+                print(f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s...")
+                self.AudioPlayer.pause()
+                self._paused = True # Mark as paused if connection is lost
             except Exception as e:
-                print(f"Error in update loop: {str(e)}")
-                print(f"State at error: Server Pos={server_pos:.1f}s, Client Pos={client_pos:.1f}s")
-                self.stopListening()
+                print(f"Error in _update_loop: {e}")
+                # Consider adding self.stopListening() if critical error
 
             sleep(self.update_interval)
 
     def _fetch_data(self):
         try:
-            self._start_download_offset = monotonic()
-            response = requests.get(f"http://{self._ip}:8080", timeout=1)
+            response = requests.get(f"http://{self._ip}:8080", timeout=self.update_interval)
             response.raise_for_status()
             content = response.text
+            title_match = re.search(r"<title>(.*?)</title>", content)
+            location_match = re.search(r"<location>(.*?)</location>", content)
+            duration_match = re.search(r"<duration>(.*?)</duration>", content)
+            url_match = re.search(r"<url>(.*?)</url>", content)
+            buffered_at_match = re.search(r"<buffered_at>(.*?)</buffered_at>", content)
 
-            title_match = re.search(r'<title>(.*?)</title>', content)
-            location_match = re.search(r'<location>(.*?)</location>', content)
-
-            if not all([title_match, location_match]):
-                print(f"Error: Could not parse all required fields from server response: {content[:200]}...")
-                return None
-
-            title = title_match.group(1)
-            location_str = location_match.group(1)
-
-            try:
-                location = float(location_str)
-                if location < 0:
-                    print(f"Warning: Received negative location: {location}")
-                    return None
-            except ValueError:
-                print(f"Invalid location format received: {location_str}")
-                return None
-
-            return {
-                'title': title,
-                'location': location,
-                'song_url': f"http://{self._ip}:8080/song",
-                'lyric_url': f"http://{self._ip}:8080/lyrics"
-            }
+            if title_match and location_match and duration_match and url_match and buffered_at_match:
+                title = title_match.group(1)
+                location = float(location_match.group(1))
+                duration = float(duration_match.group(1))
+                url = url_match.group(1)
+                buffered_at = float(buffered_at_match.group(1))
+                return {'title': title, 'location': location, 'duration': duration, 'url': url, 'buffered_at': buffered_at}
+            return None
         except requests.exceptions.Timeout:
-            print("Fetch error: Request timed out.")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"Fetch error: {str(e)}")
+            print("Request to radio host timed out.")
             return None
         except Exception as e:
-            print(f"Data processing error: {str(e)}")
+            print(f"Error fetching data: {e}")
             return None
 
-    def _handle_song_change(self, data, dilation_data):
-        print(f"Song changed to {data['title']} with Dilation: {dilation_data:.2f}")
+    def _handle_song_change(self, data): # sync_start_offset removed from parameters
+        print(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
+        # Update client data
         self.client_data['radio_text'] = data['title']
-        self._play_song(data['song_url'], data['lyric_url'], data['location'], dilation_data)
+        self.client_data['radio_duration'][1] = data['duration'] # Update total duration
 
-    def _play_song(self, song_url, lyric_url, start_position, buffer_time_frame):
+        # Download the new song in a separate thread
+        Thread(target=self._download_and_play, args=(data['url'], data['location'], data['buffered_at']), daemon=True).start() # Removed sync_start_offset
+
+    def _download_and_play(self, url, server_location, buffered_at): # Removed sync_start_offset from parameters
         try:
-            print(f"Downloading song: {song_url}, {lyric_url}")
-            self.AudioPlayer.stop() # pygame.mixer.music.unload()
-            if not self._channel_changed:
-                self.static_noise.set_volume(0.01)
-                self.static_noise.play(loops=-1)
+            if not self._running.is_set():
+                print("Download cancelled: client stopped.")
+                return
 
-            if os.path.exists(self.temp_song_file):
-                try:
-                    os.remove(self.temp_song_file)
-                except OSError as e:
-                    print(f"Warning: Could not remove old temp file before download: {e}")
+            if self.AudioPlayer.get_busy() or self._paused:
+                self.AudioPlayer.stop() # Stop current playback if any
 
-            song_data = requests.get(song_url, stream=True, timeout=10)
-            song_data.raise_for_status()
-
-            with open(self.temp_song_file, "wb") as f:
-                for chunk in song_data.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            print(f"Song downloaded.")
+            print(f"Downloading: {url}")
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(self.temp_song_file), exist_ok=True)
             
-            if not self._channel_changed:
-                self._channel_changed = True
-                self.static_noise.stop()
-            audio = MP3(self.temp_song_file)
-            self.client_data['radio_duration'][1] = audio.info.length
-            self.AudioPlayer.load(self.temp_song_file) # pygame.mixer.music.load(self.temp_song_file)
-            self.AudioPlayer.play() # pygame.mixer.music.play()
-            
-            # Wait until music is actually playing before seeking
-            waited = 0
-            while not self.AudioPlayer.get_busy() and waited < 10: # not pygame.mixer.music.get_busy() and waited < 10:
-                sleep(0.01)
-                waited += 0.01
+            headers = {'Range': 'bytes=0-'} # Request the entire file
+            response = requests.get(url, headers=headers, stream=True, timeout=10) # Added timeout for download
+            response.raise_for_status()
 
-            if self.AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
+            with open(self.temp_song_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not self._running.is_set(): # Allow stopping during download
+                        print("Download interrupted: client stopped.")
+                        return
+                    f.write(chunk)
+            print(f"Download complete: {self.temp_song_file}")
+
+            # Play the song, get the actual monotonic start time from AudioPlayer
+            # AudioPlayer.radio_play is expected to start playback from server_location
+            self._current_song_start_time = self.AudioPlayer.radio_play(filepath=self.temp_song_file, start_pos=server_location, buffer_time=buffered_at)
+            self._current_song_start_server_pos = server_location # Record the server's starting point for this song
+            self._total_pause_duration_for_current_song = 0.0 # Reset for new song
+            self._pause_start_time = None # Ensure it's reset
+            self._paused = False # Ensure client is not marked as paused when new song starts playing
+            print(f"Started playback from server position: {server_location:.2f}s at client monotonic time: {self._current_song_start_time:.2f}s")
+
+            # Callback for lyrics if available
+            if self._callback and url.startswith("http"):
                 try:
-                    self._start_offset = float(start_position + (self.AudioPlayer.radio_play(start_pos=start_position, buffer_time=buffer_time_frame) - buffer_time_frame))
-                    print(f"Playing song from position: {self._start_offset:.2f}s")
+                    song_length = MP3(self.temp_song_file).info.length
+                    self._callback(url, song_length)
                 except Exception as e:
-                    print(f"set_pos failed: {e}")
-            else:
-                print("Warning: Music did not start in time, skipping seek.")
-            
-            if self._paused:
-                self.AudioPlayer.pause() # pygame.mixer.music.pause()
-
-            # Set accurate timer values
-            self._start_time = time()
-            Thread(target=self._callback, args=(lyric_url, self._start_offset, self.client_data['radio_text'],), daemon=True).start()
-
-        except requests.exceptions.RequestException as e:
-            print(f"Song download error: {str(e)}")
-            self.stopListening()
+                    print(f"Warning: Could not get song length for lyrics callback: {e}")
         except Exception as e:
-            print(f"General playback error: {str(e)}")
-            self.stopListening()
+            print(f"Error in _download_and_play: {e}")
+            self.stopListening() # Stop if download/play fails
 
-    def _update_playback_position(self, new_position):
-        try:
-            if self.AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
-                if new_position < 0:
-                    print(f"Skipping seek to invalid position: {new_position:.1f}s")
-                    return
+    # New method to handle resync, similar to _download_and_play but ensures current temp file is used
+    def _resync_playback(self, url, new_server_location, buffered_at):
+        print(f"Resyncing playback to {new_server_location:.2f}s using existing temp file.")
+        # Ensure AudioPlayer stops and is ready for a new play command
+        self.AudioPlayer.stop() # This should cleanly stop the current audio stream
 
-                self.AudioPlayer.set_pos(new_position) # pygame.mixer.music.set_pos(new_position)
-                self._start_time = time()
-                self._start_offset = new_position
-                print(f"Jumped to position: {new_position:.1f}s")
-                self._handled = False
-            else:
-                print("Skipping position update: Music not busy.")
-        except Exception as e:
-            print(f"General position update error: {str(e)}")
+        # Reset pause tracking for the resync (as we are effectively starting fresh from this point)
+        self._total_pause_duration_for_current_song = 0.0
+        self._pause_start_time = None
+        self._paused = False
 
-# Example usage
-if __name__ == "__main__":
-    def disconnect_handler(reason):
-        print(f"Music disconnected: {reason}")
-
-    client = RadioClient()
-    client.listenTo("localhost", disconnect_handler)
-
-    try:
-        while True:
-            sleep(1)
-    except KeyboardInterrupt:
-        print("\nStopping client...")
-        client.stopListening()
-        print("Client stopped.")
+        # Re-play from the new server location. This will update self._current_song_start_time internally.
+        self._current_song_start_time = self.AudioPlayer.radio_play(filepath=self.temp_song_file, start_pos=new_server_location, buffer_time=buffered_at)
+        self._current_song_start_server_pos = new_server_location

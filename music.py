@@ -219,6 +219,8 @@ class MusicPlayer:
     def play_song(self, path_or_song):
         """
         Play a song either from a path string or a song dictionary.
+        This method now clears the replay queue to ensure explicit plays don't
+        get stuck in a loop and allows shuffle to proceed afterwards.
         """
         # Convert path to song dict if needed
         if isinstance(path_or_song, str):

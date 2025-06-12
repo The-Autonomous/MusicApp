@@ -2,9 +2,11 @@ import os, socket, psutil, threading, time
 from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
 from waitress import serve
+from mutagen.mp3 import MP3 # Import MP3 to get audio duration
+from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 
 class RadioHost:
-    def __init__(self, player, port=8080):
+    def __init__(self, player, port=8080, ip=None, fake_load=False):
         # Flask app setup
         self.MusicPlayer = player
         self.app_pad_site = "app_pad"
@@ -14,9 +16,11 @@ class RadioHost:
         # Shared state
         self.current_data = {
             'title': '',
-            'mp3_path': '',
+            'mp3_path': '', # Renamed for clarity to include WAV files later
             'lyrics': '',
-            'mixer': None
+            'mixer': None,
+            'duration': 0.0, # Add duration to current_data
+            'buffered_at': time.time() # Add buffered_at timestamp
         }
 
         def get_pos():
@@ -25,15 +29,23 @@ class RadioHost:
                 mix = self.current_data['mixer']
                 return mix.get_pos() if mix else 0
             except Exception:
-                print("Error getting position from mixer")
+                # print("Error getting position from mixer") # Suppress frequent error message
                 return 0
 
         # Routes
         @self.app.route('/')
         def index():
+            # Get the base filename for serving
+            song_filename = os.path.basename(self.current_data['mp3_path'])
+            # Construct the full URL for the song
+            song_url = f"http://{self._get_local_ip()}:{port}/song"
+
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
                 f"<location>{get_pos()}</location>"
+                f"<duration>{self.current_data['duration']}</duration>" # Added duration
+                f"<url>{song_url}</url>" # Added song URL
+                f"<buffered_at>{self.current_data['buffered_at']}</buffered_at>" # Added buffered_at
                 f"<script>location.href='/{self.app_pad_site}';</script>"
             )
             resp.headers['Cache-Control'] = 'no-store'
@@ -109,7 +121,7 @@ class RadioHost:
             if not mp3_path or not os.path.isfile(mp3_path):
                 return "No song loaded", 404
             directory, filename = os.path.split(mp3_path)
-            return send_from_directory(directory, filename, mimetype='audio/mpeg')
+            return send_from_directory(directory, filename, mimetype='audio/mpeg' if filename.lower().endswith('.mp3') else 'audio/wav')
 
         @self.app.route('/lyrics')
         def serve_lyrics():
@@ -122,26 +134,45 @@ class RadioHost:
             response.headers['Expires']       = '0'
             return response
 
-        # Start server in background
-        host = self._get_local_ip()
-        self._free_port(port)
-        self._server_thread = threading.Thread(
-            target=serve,
-            args=(self.app,),
-            kwargs={'host': host, 'port': port},
-            daemon=True
-        )
-        self._server_thread.start()
-        print(f"[RadioHost] Serving on http://{host}:{port}")
+        if not fake_load:
+            if not ip:
+                self._free_port(port)
+                host = self._get_local_ip()
+            else:
+                host = ip
+            self._server_thread = threading.Thread(
+                target=serve,
+                args=(self.app,),
+                kwargs={'host': host, 'port': port},
+                daemon=True
+            )
+            self._server_thread.start()
+            print(f"[RadioHost] Serving on http://{host}:{port}")
 
     def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
         """Call whenever you load a new track."""
+        song_duration = 0.0
+        if os.path.exists(mp3_song_file_path):
+            try:
+                if mp3_song_file_path.lower().endswith('.mp3'):
+                    audio = MP3(mp3_song_file_path)
+                    song_duration = audio.info.length
+                elif mp3_song_file_path.lower().endswith('.wav'):
+                    # For WAV files, you can use WAVE from mutagen or scipy.io.wavfile.read
+                    # Using WAVE from mutagen for consistency with MP3 duration fetching
+                    audio = WAVE(mp3_song_file_path)
+                    song_duration = audio.info.length
+            except Exception as e:
+                print(f"Error getting duration for {mp3_song_file_path}: {e}")
+
         # Update data
         self.current_data.update({
             'title': title,
             'mp3_path': mp3_song_file_path,
             'lyrics': current_song_lyrics,
-            'mixer': current_mixer
+            'mixer': current_mixer,
+            'duration': song_duration, # Set the actual duration
+            'buffered_at': time.time() # Update buffered_at to current time on new song
         })
 
     def _get_local_ip(self):
@@ -178,9 +209,9 @@ if __name__ == '__main__':
     # Replace these stubs with your actual pygame mixer and file paths:
 
     try:
-        from audio import AudioPlayer
+        from audio import AudioPlayerRoot
     except ImportError:
-        from .audio import AudioPlayer
+        from .audio import AudioPlayerRoot
 
     class MusicPlayer:
         def __init__(self, directories=None, set_screen=None, set_duration=None, set_lyrics=None, set_ips=None):
@@ -225,11 +256,26 @@ if __name__ == '__main__':
             # Dummy implementation for example
             return [("Example Song", "example.mp3")]
 
+    # Create a dummy WAV file for the example usage within radioMaster.py's __main__ block
+    import tempfile, atexit
+    import numpy as np
+    from scipy.io.wavfile import write as write_wav
+
+    temp_dir_for_test = tempfile.gettempdir()
+    test_wav_path = os.path.join(temp_dir_for_test, "test_radio_host_file.wav")
+    samplerate_test = 44100
+    duration_test = 10 # seconds
+    num_samples_test = int(duration_test * samplerate_test)
+    silent_data_test = np.zeros(num_samples_test, dtype=np.float32)
+    write_wav(test_wav_path, samplerate_test, silent_data_test)
+    print(f"Created test WAV file: {test_wav_path}")
+    atexit.register(lambda: os.remove(test_wav_path) if os.path.exists(test_wav_path) else None)
+
     host = RadioHost(player=MusicPlayer(), port=8080)
     host.initSong(
-        title="Example Song",
-        mp3_song_file_path=os.path.abspath("example.mp3"),
-        current_mixer=AudioPlayer, # Audio mixer instance
+        title="Example Song![]!Mock Artist", # Use the expected format
+        mp3_song_file_path=test_wav_path, # Use the generated WAV file
+        current_mixer=AudioPlayerRoot(), # Audio mixer instance
         current_song_lyrics="These are the lyrics..."
     )
 

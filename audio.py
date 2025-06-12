@@ -15,7 +15,8 @@ class AudioPlayerRoot:
         #self.root_reading_thread = Lock()
         self.filepath = None
         
-        self.actual_start_monotonic = None
+        self.average_stream_load_time = 0.0
+        self.times_taken_loading_stream = []
 
         self.paused = Event()
         self.stop_event = Event()
@@ -37,6 +38,17 @@ class AudioPlayerRoot:
         # Add a lock for buffer access if multiple threads interact with it
         # (though in this design, reader adds, callback pops, so usually fine)
         # self._buffer_lock = Lock()
+
+    def update_average_load_time(self):
+        if self.times_taken_loading_stream:
+            self.average_stream_load_time = sum(self.times_taken_loading_stream) / len(self.times_taken_loading_stream)
+        else:
+            self.average_stream_load_time = 0
+            
+    def add_time(self, start_time):
+        self.times_taken_loading_stream.append(monotonic()-start_time)
+        self.update_average_load_time()
+        print(f"[Music Averages] Current Song Averages: {self.times_taken_loading_stream}\nCurrent Average:{self.average_stream_load_time}")
 
     def _get_audio_info(self, filepath):
         cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filepath]
@@ -96,10 +108,12 @@ class AudioPlayerRoot:
         final_math = start_pos
         if radio_mode:
             solved_monotonic = monotonic()
-            final_math += (solved_monotonic + 1 - buffertime)
+            final_math += (solved_monotonic + 0.15 - buffertime)
         
         self.position_frames = int((final_math) * self.samplerate)
         self.buffer.clear() # Clear buffer for new session
+        
+        self.current_time_diff = monotonic()
 
         self.stop_event.clear() # Clear stop event for new session
         self.paused.set()       # Start paused until buffer is ready or explicit play is called
@@ -168,6 +182,8 @@ class AudioPlayerRoot:
             self.stream.start()
             self.play_event.set() # Indicate that the stream is active
             self.stop_event.wait() # Block until stop is called
+            self.add_time(self.current_time_diff)
+            self.current_time_diff = 0
 
         except Exception as e:
             print(f"[PlaybackThread] Error in _run_stream: {e}")
