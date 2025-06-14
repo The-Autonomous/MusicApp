@@ -41,8 +41,5 @@ class Administrator:
         startupinfo.wShowWindow = 0  # SW_HIDE
         try:
             subprocess.Popen(params, startupinfo=startupinfo)
-            while True:
-                print("Dormanting for next music player termination...")
-                time.sleep(60)
         except Exception as e:
             print(f"Failed to relaunch hidden: {e}")
