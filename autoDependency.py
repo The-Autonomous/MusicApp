@@ -1,204 +1,423 @@
-import subprocess, sys, time, importlib, os, zipfile
-from urllib.request import urlopen
+import subprocess
+import sys
+import time
+import importlib
+import os
+import zipfile
+import platform
+from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 from importlib.util import find_spec
+from typing import Dict, List, Optional, Tuple
 
 # --- tqdm installation ---
-# It's good to see output if this initial critical dependency fails
 try:
     from tqdm import tqdm
-    # print("✅ 'tqdm' is already available.") # Optional: confirmation
 except ImportError:
     print("🛠️ 'tqdm' not found. Attempting to install 'tqdm' for progress bars...")
     try:
-        # Show pip's output for this initial install for clarity if it fails
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "tqdm"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "tqdm"], 
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("✅ 'tqdm' installed successfully.")
         from tqdm import tqdm
     except subprocess.CalledProcessError as e:
-        print(f"❌ Critical Error: Failed to install 'tqdm'. tqdm is required for this script.")
+        print(f"❌ Critical Error: Failed to install 'tqdm'. Error: {e}")
         print(f"   Please install it manually: {sys.executable} -m pip install tqdm")
-        print(f"   Error details: {e}")
-        sys.exit(1) # Exit if tqdm cannot be installed
+        sys.exit(1)
     except ImportError:
-        print(f"❌ Critical Error: 'tqdm' was reportedly installed but still cannot be imported.")
+        print("❌ Critical Error: 'tqdm' was installed but cannot be imported.")
         sys.exit(1)
 
 class AutoDependencies:
-    def __init__(self):
+    def __init__(self, timeout: int = 30, max_retries: int = 3):
         """
-        packages: dict mapping pip package name to import module name.
-        Example: {"Requests": "requests", "yt-dlp": "yt_dlp"}
-        Pip package names are case-insensitive for installation but using the
-        canonical name (often capitalized as on PyPI) is good practice.
-        Module names are case-sensitive and typically lowercase with underscores.
+        Enhanced dependency manager with better error handling and reliability.
+        
+        Args:
+            timeout: Timeout in seconds for network operations
+            max_retries: Maximum number of retry attempts for failed installations
         """
-        print(f"🐍 Running with Python interpreter: {sys.executable}")
-        # For deeper debugging, you can uncomment the sys.path print:
-        # import pprint
-        # print(f"🐍 sys.path:")
-        # pprint.pprint(sys.path)
-
+        self.timeout = timeout
+        self.max_retries = max_retries
+        
+        print(f"🐍 Running with Python {sys.version}")
+        print(f"🐍 Python interpreter: {sys.executable}")
+        print(f"🔧 Platform: {platform.system()} {platform.release()}")
+        
+        # Enhanced package mapping with version constraints and alternatives
         self.packages = {
-            "requests": "requests",
-            "sounddevice": "sounddevice",
-            "soundfile": "soundfile",
-            "pydub": "pydub",
-            "mutagen": "mutagen",
-            "yt-dlp": "yt_dlp", # pip install yt-dlp, import yt_dlp
-            "Flask": "flask",    # pip install Flask, import flask
-            "Flask-Compress": "flask_compress", # CORRECTED: pip install Flask-Compress, import flask_compress
-            "pynput": "pynput",
-            "aiohttp": "aiohttp",
-            "numpy": "numpy",
-            "psutil": "psutil",
-            "waitress": "waitress",
-            }
+            "colorama": {"module": "colorama", "min_version": None},
+            "requests": {"module": "requests", "min_version": "2.25.0"},
+            "sounddevice": {"module": "sounddevice", "min_version": None},
+            "soundfile": {"module": "soundfile", "min_version": None},
+            "pydub": {"module": "pydub", "min_version": None},
+            "mutagen": {"module": "mutagen", "min_version": None},
+            "yt-dlp": {"module": "yt_dlp", "min_version": None},
+            "Flask": {"module": "flask", "min_version": "2.0.0"},
+            "Flask-Compress": {"module": "flask_compress", "min_version": None},
+            "pynput": {"module": "pynput", "min_version": None},
+            "aiohttp": {"module": "aiohttp", "min_version": "3.7.0"},
+            "numpy": {"module": "numpy", "min_version": "1.20.0"},
+            "psutil": {"module": "psutil", "min_version": None},
+            "waitress": {"module": "waitress", "min_version": None},
+        }
         
         self.missing_details = []
+        self.failed_installs = []
+        
+        # Check if we're in a virtual environment
+        self._check_virtual_environment()
+        
+        # Perform initial dependency check
+        self._initial_check()
+
+    def _check_virtual_environment(self) -> None:
+        """Check if running in a virtual environment and warn if not."""
+        in_venv = (hasattr(sys, 'real_prefix') or 
+                  (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix))
+        
+        if in_venv:
+            print("✅ Running in virtual environment")
+        else:
+            print("⚠️  Not running in virtual environment - installations will be system-wide")
+            print("   Consider using a virtual environment for better isolation")
+
+    def _check_pip_availability(self) -> bool:
+        """Verify pip is available and working."""
+        try:
+            result = subprocess.run([sys.executable, "-m", "pip", "--version"], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                print(f"✅ pip available: {result.stdout.strip()}")
+                return True
+            else:
+                print(f"❌ pip check failed: {result.stderr}")
+                return False
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"❌ pip not available: {e}")
+            return False
+
+    def _get_installed_version(self, package_name: str) -> Optional[str]:
+        """Get the installed version of a package."""
+        try:
+            result = subprocess.run([sys.executable, "-m", "pip", "show", package_name], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if line.startswith('Version:'):
+                        return line.split(':', 1)[1].strip()
+        except Exception:
+            pass
+        return None
+
+    def _version_compare(self, current: str, required: str) -> bool:
+        """Simple version comparison. Returns True if current >= required."""
+        try:
+            current_parts = [int(x) for x in current.split('.')]
+            required_parts = [int(x) for x in required.split('.')]
+            
+            # Pad shorter version with zeros
+            max_len = max(len(current_parts), len(required_parts))
+            current_parts.extend([0] * (max_len - len(current_parts)))
+            required_parts.extend([0] * (max_len - len(required_parts)))
+            
+            return current_parts >= required_parts
+        except ValueError:
+            # If version parsing fails, assume it's okay
+            return True
+
+    def _initial_check(self) -> None:
+        """Perform initial dependency check with version validation."""
         print("\n🔍 Checking dependencies...")
-        importlib.invalidate_caches() # Ensure a fresh view before checking
-        for pkg_name, module_name in self.packages.items():
+        
+        if not self._check_pip_availability():
+            print("❌ pip is not available. Cannot proceed with dependency management.")
+            sys.exit(1)
+        
+        importlib.invalidate_caches()
+        
+        for pkg_name, pkg_info in self.packages.items():
+            module_name = pkg_info["module"]
+            min_version = pkg_info["min_version"]
+            
             spec = find_spec(module_name)
             if spec is None:
-                print(f"  ❓ Module '{module_name}' (for package '{pkg_name}') -> NOT FOUND by find_spec.")
-                self.missing_details.append({'pkg': pkg_name, 'mod': module_name})
+                print(f"  ❓ Module '{module_name}' (package '{pkg_name}') -> NOT FOUND")
+                self.missing_details.append({'pkg': pkg_name, 'mod': module_name, 'info': pkg_info})
             else:
-                # Providing spec.origin can be long, conditionally print or shorten
+                # Check version if specified
+                version_ok = True
+                installed_version = None
+                
+                if min_version:
+                    installed_version = self._get_installed_version(pkg_name)
+                    if installed_version:
+                        version_ok = self._version_compare(installed_version, min_version)
+                        if not version_ok:
+                            print(f"  ⚠️  Module '{module_name}' found but version {installed_version} < {min_version}")
+                            self.missing_details.append({'pkg': pkg_name, 'mod': module_name, 'info': pkg_info})
+                            continue
+                
+                # Module found and version is acceptable
+                version_info = f" (v{installed_version})" if installed_version else ""
                 origin = spec.origin
-                if origin and len(origin) > 70: # Heuristic for long paths
+                if origin and len(origin) > 70:
                     origin = "..." + origin[-67:]
-                print(f"  ✅ Module '{module_name}' (for package '{pkg_name}') -> FOUND (origin: {origin})")
+                print(f"  ✅ Module '{module_name}' (package '{pkg_name}'){version_info} -> FOUND")
         
         self.missing_pkgs_to_install = [details['pkg'] for details in self.missing_details]
+        
         if self.missing_pkgs_to_install:
-            print(f"\n📋 Missing packages that will be targeted for installation: {', '.join(self.missing_pkgs_to_install)}")
+            print(f"\n📋 Packages needing installation/upgrade: {', '.join(self.missing_pkgs_to_install)}")
         else:
-            print("👍 All listed Python dependencies appear to be met based on initial check.")
-            self.ensure_ffmpeg() # Ensure ffmpeg is available before proceeding
-            print("🎉 All dependencies are satisfied! No installation needed.")
+            print("👍 All Python dependencies are satisfied!")
+            self.ensure_ffmpeg()
+            print("🎉 All dependencies are ready!")
 
-
-    def ensure_ffmpeg(self):
+    def ensure_ffmpeg(self) -> None:
+        """Enhanced ffmpeg installation with better error handling."""
         try:
-            subprocess.run(['ffprobe', '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print("✅ [FFMPEG/FFPROBE] Found in PATH. Ffmpeg is available.")
+            result = subprocess.run(['ffprobe', '-version'], 
+                                  stdout=subprocess.DEVNULL, 
+                                  stderr=subprocess.DEVNULL, 
+                                  timeout=5)
+            if result.returncode == 0:
+                print("✅ [FFMPEG/FFPROBE] Found in PATH")
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        print("🔧 [FFMPEG/FFPROBE] Not found. Attempting to install...")
+        
+        # Only attempt Windows installation for now
+        if platform.system() != 'Windows':
+            print("⚠️  Auto-installation only supported on Windows.")
+            print("   Please install ffmpeg manually for your platform:")
+            print("   - macOS: brew install ffmpeg")
+            print("   - Linux: sudo apt install ffmpeg (Ubuntu/Debian)")
+            print("   - Or download from: https://ffmpeg.org/download.html")
             return
-        except FileNotFoundError:
-            print("[FFMPEG/FFPROBE] Not found. Attempting to install...")
 
-        ffmpeg_dir = os.path.join(os.path.dirname(__file__), 'ffmpeg-bin')
-        os.makedirs(ffmpeg_dir, exist_ok=True)
-        zip_url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-        zip_path = os.path.join(ffmpeg_dir, 'ffmpeg.zip')
+        ffmpeg_dir = Path(__file__).parent / 'ffmpeg-bin'
+        ffmpeg_dir.mkdir(exist_ok=True)
+        zip_path = ffmpeg_dir / 'ffmpeg.zip'
 
         try:
-            with urlopen(zip_url) as resp, open(zip_path, 'wb') as out_file:
-                out_file.write(resp.read())
+            print("📥 Downloading ffmpeg (this may take a while)...")
+            zip_url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+            
+            # Add user agent and handle potential network issues
+            req = Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+            
+            with urlopen(req, timeout=self.timeout) as response:
+                total_size = int(response.headers.get('content-length', 0))
+                
+                with open(zip_path, 'wb') as out_file:
+                    if total_size > 0:
+                        with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading") as pbar:
+                            while True:
+                                chunk = response.read(8192)
+                                if not chunk:
+                                    break
+                                out_file.write(chunk)
+                                pbar.update(len(chunk))
+                    else:
+                        out_file.write(response.read())
 
+            print("📦 Extracting ffmpeg...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                for member in zip_ref.namelist():
-                    if 'bin/ffmpeg.exe' in member or 'bin/ffprobe.exe' in member:
+                # Extract only the executables we need
+                for member in tqdm(zip_ref.namelist(), desc="Extracting"):
+                    if any(exe in member for exe in ['bin/ffmpeg.exe', 'bin/ffprobe.exe']):
                         zip_ref.extract(member, ffmpeg_dir)
 
-            os.remove(zip_path)
+            zip_path.unlink()  # Remove zip file
 
+            # Find and add to PATH
             for root, _, files in os.walk(ffmpeg_dir):
                 if 'ffmpeg.exe' in files:
                     bin_path = os.path.abspath(root)
                     os.environ['PATH'] = bin_path + os.pathsep + os.environ['PATH']
-                    subprocess.run(['ffmpeg', '-version'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    # Verify installation
+                    subprocess.run(['ffmpeg', '-version'], 
+                                 check=True, 
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL,
+                                 timeout=5)
+                    print("✅ [FFMPEG] Successfully installed and verified")
                     return
 
-            raise FileNotFoundError("Failed to find ffmpeg.exe after extraction.")
+            raise FileNotFoundError("Failed to find ffmpeg.exe after extraction")
 
+        except (URLError, HTTPError, subprocess.TimeoutExpired) as e:
+            print(f"❌ [FFMPEG] Network/timeout error: {e}")
+            print("   Please install ffmpeg manually from: https://ffmpeg.org/download.html")
         except Exception as e:
-            print(f"[FFMPEG] Installation failed: {e}. Please install ffmpeg manually and add it to your PATH.")
-            raise SystemExit(1)
+            print(f"❌ [FFMPEG] Installation failed: {e}")
+            print("   Please install ffmpeg manually and add it to your PATH")
+        finally:
+            # Cleanup partial download
+            if zip_path.exists():
+                zip_path.unlink()
 
-    def install(self):
+    def _install_package(self, pkg_name: str, attempt: int = 1) -> bool:
+        """Install a single package with retry logic."""
+        print(f"  ⏳ Installing '{pkg_name}' (attempt {attempt}/{self.max_retries})...")
+        
+        try:
+            # Use --user flag if not in virtual environment for better isolation
+            cmd = [sys.executable, "-m", "pip", "install", pkg_name]
+            if not (hasattr(sys, 'real_prefix') or 
+                   (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)):
+                cmd.append("--user")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.timeout * 2  # Longer timeout for installations
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode == 0:
+                print(f"  ✅ Successfully installed '{pkg_name}'")
+                return True
+            else:
+                print(f"  ❌ Failed to install '{pkg_name}' (exit code: {process.returncode})")
+                if stderr:
+                    # Show only the most relevant part of the error
+                    error_lines = stderr.strip().split('\n')
+                    relevant_errors = [line for line in error_lines if 'ERROR' in line.upper()]
+                    if relevant_errors:
+                        print(f"     Error: {relevant_errors[-1]}")
+                    else:
+                        print(f"     Error: {error_lines[-1] if error_lines else 'Unknown error'}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print(f"  ⏰ Installation of '{pkg_name}' timed out after {self.timeout * 2} seconds")
+            return False
+        except Exception as e:
+            print(f"  ❌ Unexpected error installing '{pkg_name}': {e}")
+            return False
+
+    def install(self) -> None:
+        """Install missing packages with enhanced error handling and retry logic."""
         if not self.missing_pkgs_to_install:
-            # This message might be redundant if __init__ already stated all clear
-            # print("✅ All dependencies were already satisfied (checked in install method).")
             return
 
-        print(f"\n📦 Attempting to install {len(self.missing_pkgs_to_install)} missing package(s)...\n")
+        print(f"\n📦 Installing {len(self.missing_pkgs_to_install)} package(s)...\n")
 
-        for pkg_to_install in tqdm(self.missing_pkgs_to_install, desc="Setting up environment", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"):
-            # Find the module name associated with this package for post-install verification
-            module_to_verify = next((item['mod'] for item in self.missing_details if item['pkg'] == pkg_to_install), None)
+        # Update pip first
+        print("🔄 Updating pip...")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], 
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            print("✅ pip updated successfully")
+        except Exception:
+            print("⚠️  Could not update pip, continuing with current version")
 
-            # tqdm can sometimes interfere with subprocess stdout/stderr if not flushed.
-            # A print before subprocess call can help.
-            sys.stdout.flush() # Ensure "Setting up environment" line is fully printed
-            print(f"\n  ⏳ Installing '{pkg_to_install}'...")
-            sys.stdout.flush() 
-
-            try:
-                # Show pip's output directly for better diagnostics
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "pip", "install", pkg_to_install],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True # Decodes output as text
-                )
-                stdout, stderr = process.communicate()
-
-                if process.returncode == 0:
-                    print(f"  ✅ Successfully ran pip install for '{pkg_to_install}'.")
-                    # print(f"     Output:\n{stdout}") # Uncomment for full pip output
-                    if stderr: # Sometimes pip puts warnings or non-fatal messages in stderr
-                        print(f"     Messages from pip (stderr):\n{stderr}")
+        for pkg_to_install in tqdm(self.missing_pkgs_to_install, 
+                                  desc="Installing packages", 
+                                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}"):
+            
+            # Find module name for verification
+            module_to_verify = next((item['mod'] for item in self.missing_details 
+                                   if item['pkg'] == pkg_to_install), None)
+            
+            success = False
+            for attempt in range(1, self.max_retries + 1):
+                if self._install_package(pkg_to_install, attempt):
+                    success = True
+                    break
+                elif attempt < self.max_retries:
+                    print(f"  🔄 Retrying in 2 seconds...")
+                    time.sleep(2)
+            
+            if not success:
+                print(f"  ❌ Failed to install '{pkg_to_install}' after {self.max_retries} attempts")
+                self.failed_installs.append(pkg_to_install)
+                continue
+            
+            # Verify installation
+            importlib.invalidate_caches()
+            time.sleep(0.5)  # Brief pause for filesystem sync
+            
+            if module_to_verify:
+                spec_after_install = find_spec(module_to_verify)
+                if spec_after_install:
+                    print(f"  👍 Verification successful: '{module_to_verify}' is now available")
                 else:
-                    print(f"  ❌ pip install for '{pkg_to_install}' FAILED with return code {process.returncode}.")
-                    print(f"     Stdout:\n{stdout}")
-                    print(f"     Stderr:\n{stderr}")
-                    # Continue to next package, but this one failed.
-                    continue # Skip verification for this failed package
+                    print(f"  ⚠️  Module '{module_to_verify}' still not found after installation")
+                    self.failed_installs.append(pkg_to_install)
 
-                importlib.invalidate_caches() # Crucial for recognizing the new module
-                
-                if module_to_verify:
-                    spec_after_install = find_spec(module_to_verify)
-                    if spec_after_install:
-                        print(f"  👍 Verification successful: Module '{module_to_verify}' now found by find_spec.")
-                    else:
-                        print(f"  ⚠️ Verification FAILED: Module '{module_to_verify}' STILL NOT found by find_spec after install & cache invalidation.")
-                        print(f"     This could indicate an issue with the package itself, your Python environment's PATH,")
-                        print(f"     or the module name ('{module_to_verify}') might be incorrect for package '{pkg_to_install}'.")
-                
-                time.sleep(0.1) # Small pause, mainly for aesthetics with tqdm if many items
-            except Exception as e: # Catch other exceptions like FileNotFoundError if pip isn't found
-                print(f"  ❌ An unexpected error occurred while trying to install {pkg_to_install}: {e}")
+        self._final_verification()
 
-        print("\n🏁 Dependency installation process finished.")
+    def _final_verification(self) -> None:
+        """Comprehensive final verification of all dependencies."""
+        print("\n🔁 Final dependency verification:")
         
-        # --- Final Verification ---
-        print("\n🔁 Re-checking all dependencies after installation attempts:")
-        final_still_missing_pkgs = []
-        importlib.invalidate_caches() # One more invalidation before final checks
-        for pkg, mod in self.packages.items():
-            spec = find_spec(mod)
+        still_missing = []
+        importlib.invalidate_caches()
+        
+        for pkg, pkg_info in self.packages.items():
+            module_name = pkg_info["module"]
+            min_version = pkg_info["min_version"]
+            
+            spec = find_spec(module_name)
             if spec is None:
-                print(f"  ❌ Post-install check: Module '{mod}' (for package '{pkg}') -> STILL NOT FOUND.")
-                final_still_missing_pkgs.append(pkg)
+                print(f"  ❌ Module '{module_name}' (package '{pkg}') -> STILL MISSING")
+                still_missing.append(pkg)
             else:
-                print(f"  ✅ Post-install check: Module '{mod}' (for package '{pkg}') -> FOUND.")
-        
-        if not final_still_missing_pkgs:
-            print("\n🎉 All dependencies appear to be resolved now!")
+                # Check version if required
+                version_ok = True
+                if min_version:
+                    installed_version = self._get_installed_version(pkg)
+                    if installed_version:
+                        version_ok = self._version_compare(installed_version, min_version)
+                
+                if version_ok:
+                    print(f"  ✅ Module '{module_name}' (package '{pkg}') -> OK")
+                else:
+                    print(f"  ⚠️  Module '{module_name}' version issue")
+                    still_missing.append(pkg)
+
+        # Summary
+        if not still_missing and not self.failed_installs:
+            print("\n🎉 All dependencies successfully installed and verified!")
+            self.ensure_ffmpeg()
         else:
-            print(f"\n⚠️ Some dependencies might still be missing or not detectable: {', '.join(final_still_missing_pkgs)}")
-            print(f"    If issues persist, please manually check their installation in your Python environment:")
-            print(f"    Interpreter: {sys.executable}")
-            print(f"    You can try: {sys.executable} -m pip install <package_name>")
+            if still_missing:
+                print(f"\n⚠️  Still missing: {', '.join(still_missing)}")
+            if self.failed_installs:
+                print(f"⚠️  Failed installations: {', '.join(self.failed_installs)}")
+            
+            print(f"\n🔧 Troubleshooting tips:")
+            print(f"   • Try running: {sys.executable} -m pip install --upgrade pip")
+            print(f"   • Check your internet connection")
+            print(f"   • Consider using a virtual environment")
+            print(f"   • Manual install: {sys.executable} -m pip install <package_name>")
 
 if __name__ == "__main__":
-    print("--- Starting Dependency Check ---")
-    installer = AutoDependencies() # __init__ performs the initial check
+    print("🚀 Starting Enhanced Dependency Check")
+    print("=" * 50)
     
-    if installer.missing_pkgs_to_install: # If __init__ found missing packages
-        installer.install()
-    else:
-        # Message already printed in __init__ if all good
-        pass
-    print("\n--- Dependency Check Complete ---")
+    try:
+        installer = AutoDependencies(timeout=60, max_retries=3)
+        
+        if installer.missing_pkgs_to_install:
+            installer.install()
+        
+        print("\n" + "=" * 50)
+        print("✅ Dependency check complete!")
+        
+    except KeyboardInterrupt:
+        print("\n❌ Process interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        sys.exit(1)

@@ -1,17 +1,19 @@
 import ctypes, psutil, os
 import tkinter as tk
-from tkinter import font, messagebox # Added messagebox
-from threading import Lock, RLock, Thread # Added RLock for SettingsHandler
+from tkinter import font, messagebox
+from threading import Lock, RLock, Thread
 from pynput import keyboard, mouse
 from time import monotonic, sleep
 from math import cos, pi, sin
 from typing import Iterator
-import json # Added json
+import json
 
 try:
+    from log_loader import log_loader
     from adminRaise import Administrator
     from playerUtils import TitleCleaner
 except ImportError:
+    from .log_loader import log_loader
     from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
     
@@ -38,6 +40,10 @@ HWND_NOTOPMOST = -2
 
 # Layered Window Attributes constants (already there, but for context)
 LWA_ALPHA = 0x00000002 # Use this flag with SetLayeredWindowAttributes for alpha transparency
+
+### Logging Handle ###
+
+ll = log_loader("Ghost", debugging = False)
 
 ### Utilities ###
 
@@ -96,8 +102,7 @@ class SettingsHandler:
                     json.dump(self._settings, f, ensure_ascii=False, indent=2)
                 os.replace(temp_path, self.filepath)
             except Exception as e:
-                print(f"Error saving settings: {e}")
-
+                ll.error(f"Error saving settings: {e}")
 
     def reset_settings(self):
         with self._lock:
@@ -170,7 +175,7 @@ class MouseTracker:
         """Internal callback for pynput mouse events."""
         if button == mouse.Button.right:
             self._right_button_pressed = pressed
-        # print(f"pynput: {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
+        ll.debug(f"pynput: {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
 
     def mouse_pos(self):
         """Returns [x, y] of mouse cursor (works in fullscreen games).
@@ -190,28 +195,44 @@ class MouseTracker:
     def stop(self):
         """Stops the pynput listener if it was started and is still active."""
         if hasattr(self, 'listener') and self.listener.is_alive():
-            print("Stopping pynput listener thread.")
+            ll.print("Stopping pynput listener thread.")
             self.listener.stop()
             # Use .join() only if you need to ensure the thread has completely terminated
             # before proceeding, otherwise, daemon=True is often enough for exit.
             # If your app needs a very specific shutdown order, keep .join().
             self.listener.join(timeout=1) # Give it a short timeout to terminate
             if self.listener.is_alive():
-                print("Warning: pynput listener thread did not terminate cleanly.")
+                ll.warn("Warning: pynput listener thread did not terminate cleanly.")
 
 class GhostOverlay:
     def __init__(self, root):
+        ### Root ###
         self.root = root
         self.window = None
         self.canvas = None
         self._last_position = None
         self.key_hints_popup = None
-        self.key_hints_list_frame = None # For updating status
         self.modification_status_label = None # For "Listening..." message
         
+        ### Mouse ###
         self.mouseEvents = MouseTracker()
         self.clickThroughState = True # True To Click Through False To Click On
+        
+        ### Music Player ###
+        self.main_font = font.Font(family='Times', size=14, weight='bold')
+        self.time_font = font.Font(family='Times', size=12)
+        self.lyrics_font = font.Font(family='Helvetica', size=11, weight='normal', slant='italic') # Adjusted lyrics font
+        self.overlay_text_padding = 15
+        self.overlay_corner_radius = 15
+        self.canvas_items = {
+            'bg': None,
+            'player_text': None,
+            'duration_text': None,
+            'lyrics_text': None
+        }
+        self._update_scheduled = False
 
+        ### Display Info ###
         self.triggerDebounce = [0, 1.0] # Reduced debounce for faster UI response
         self.text_lock = Lock()
         self.display_lyrics = True
@@ -224,15 +245,17 @@ class GhostOverlay:
         self.readyForKeys = False # True If Keys Are Ready False If Not
         self.playerState = True # True If Player Is On False If Player Is Off
 
+        ### Key Listening ###
         self.is_listening_for_modification = False
         self.action_id_being_modified = None
 
+        ### Key Code ###
         self.bindings_handler = SettingsHandler(filename=".keyBindings.json")
         self._define_default_key_actions()
         self._load_custom_bindings()
         self._rebuild_key_maps() # Initial build
         self.hidden_keys = { # Handle Headphone Keys
-            'media_play_pause': self._trigger_pause,
+            'media_play_pause': self._wireless_trigger_pause,
             'media_next': self._trigger_skip_next,
             'media_previous': self._trigger_skip_previous,
         }
@@ -247,11 +270,12 @@ class GhostOverlay:
         self.readyForKeys = True
         self._reset_all_keys_pressed()
         
+        ### Title Cleaning ###
         self.TitleCleaner = TitleCleaner()
         
-        Thread(target=self.background_key_loop, daemon=True).start() # Start background key loop (Allows GTA V Or Other Games To Run Keypresses Without Blocking)
-        Thread(target=self.handle_overlay_draggability, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
-        Thread(target=lambda: self.keep_overlay_on_top_loop, daemon=True).start() # Keep Overlay On Top (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
+        ### Finalization ###
+        self.keep_overlay_on_top_init()
+        Thread(target=self.handle_overlay_background_process, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
         self.root.after(0, self.display_overlay) # Start the overlay display process
 
 #####################################################################################################
@@ -378,7 +402,7 @@ class GhostOverlay:
                 if isinstance(new_required_keys, list) and len(new_required_keys) == 2 and new_required_keys[0] == 'alt':
                     action['required'] = new_required_keys
                 else:
-                    print(f"Warning: Invalid custom binding for {action_id} in settings file. Using default.")
+                    ll.warn(f"Warning: Invalid custom binding for {action_id} in settings file. Using default.")
 
     def _rebuild_key_maps(self):
         self.all_existing_keys = set()
@@ -515,22 +539,20 @@ class GhostOverlay:
             self.keys_pressed[k] = False
         self.last_toggle_state = False
         
-    def background_key_loop(self, time_dilation: float = 60):
+    def background_key_reset(self):
         """Continuously reboots listeners for key presses that might get overshadowed."""
-        while True:
-            sleep(time_dilation)
-            self.current_listener_key = monotonic()
-            old_listener = self.listener
-            # Stop and join the old listener before starting a new one
-            if old_listener and old_listener.running:
-                old_listener.stop()
-                old_listener.join(timeout=2)
-            self.listener = keyboard.Listener(
-                on_press=lambda key: self._handle_key_press(key, self.current_listener_key),
-                on_release=lambda key: self._handle_key_release(key, self.current_listener_key)
-            )
-            self.listener.start()
-            self._reset_all_keys_pressed()
+        self.current_listener_key = monotonic()
+        old_listener = self.listener
+        # Stop and join the old listener before starting a new one
+        if old_listener and old_listener.running:
+            old_listener.stop()
+            old_listener.join(timeout=2)
+        self.listener = keyboard.Listener(
+            on_press=lambda key: self._handle_key_press(key, self.current_listener_key),
+            on_release=lambda key: self._handle_key_release(key, self.current_listener_key)
+        )
+        self.listener.start()
+        self._reset_all_keys_pressed()
 
 #####################################################################################################
 
@@ -826,7 +848,9 @@ class GhostOverlay:
         
         if hasattr(self, 'search_overlay'):
             self.close_search_overlay(self._was_main_overlay_open_before_search)
-            del self.search_overlay  # Clean up the old overlay
+            if hasattr(self, 'search_overlay'):
+                del self.search_overlay  # Clean up the old overlay
+            return
 
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
         if self._was_main_overlay_open_before_search:
@@ -1109,6 +1133,12 @@ class GhostOverlay:
             
 #####################################################################################################
 
+    def _wireless_trigger_pause(self):
+        if self.display_radio:
+            self._trigger_pause()
+        else:
+            self._trigger_radio_toggle()
+
     def _trigger_skip_previous(self):
         if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
             self.MusicPlayer.skip_previous()
@@ -1145,7 +1175,7 @@ class GhostOverlay:
             self.triggerDebounce[0] = monotonic()
             self.display_radio = not self.display_radio
             # self.MusicPlayer.toggle_loop_cycle(self.display_radio) # Assuming this controls radio mode in player
-            print(f"Radio mode toggled: {'ON' if self.display_radio else 'OFF'}")
+            ll.debug(f"Radio mode toggled: {'ON' if self.display_radio else 'OFF'}")
             if hasattr(self.MusicPlayer, 'toggle_loop_cycle'):
                  self.MusicPlayer.toggle_loop_cycle(self.display_radio)
             if self.window:
@@ -1155,7 +1185,7 @@ class GhostOverlay:
         if hasattr(self, 'MusicPlayer') and self.display_radio and self.playerState: # Only if radio mode is ON
             if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]: # Debounce scan attempts
                 self.triggerDebounce[0] = monotonic()
-                print("Scanning for radio station...")
+                ll.print("Scanning for radio station...")
                 self.set_radio_channel()
                 if hasattr(self.MusicPlayer, 'set_radio_ip'):
                     if not self.MusicPlayer.set_radio_ip(self.radio_metric['current_ip']):
@@ -1163,7 +1193,7 @@ class GhostOverlay:
                 if self.window:
                     self.root.after(0, self.update_display)
             else:
-                print("Radio scan debounce: please wait.")
+                ll.warn("Radio scan debounce: please wait.")
 
     def toggle_overlay(self):
         if self.playerState:
@@ -1171,16 +1201,15 @@ class GhostOverlay:
                 self.close_overlay()
             else:
                 if not hasattr(self, 'MusicPlayer'):
-                    print("MusicPlayer not initialized yet. Cannot open overlay properly.")
+                    ll.warn("MusicPlayer not initialized yet. Cannot open overlay properly.")
                     return
                 try:
                     # Always schedule on main thread
                     self.root.after(0, self.open_overlay)
                 except tk.TclError as e:
-                    print(f"Could not open overlay yet (TclError): {e}")
-                    self.root.after(1000, self.toggle_overlay)
+                    ll.warn(f"Could not open overlay yet (TclError): {e}")
                 except Exception as e:
-                    print(f"An unexpected error occurred trying to open overlay: {e}")
+                    ll.error(f"An unexpected error occurred trying to open overlay: {e}")
 
     def toggle_player(self): # Turns the whole media player functionality On/Off
         if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]:
@@ -1188,12 +1217,12 @@ class GhostOverlay:
             self.playerState = not self.playerState
             
             if self.playerState: # Transitioning to ON
-                print("Player enabled. Opening overlay.")
+                ll.print("Player enabled. Opening overlay.")
                 self.open_overlay() # Open overlay if not already open
                 if hasattr(self, 'MusicPlayer'):
                     self.MusicPlayer.pause(True) # True to unpause/play
             else: # Transitioning to OFF
-                print("Player disabled. Closing overlay and pausing music.")
+                ll.print("Player disabled. Closing overlay and pausing music.")
                 if hasattr(self, 'MusicPlayer'):
                     if self.display_radio: # If radio was on, turn it off conceptually
                         self.display_radio = False
@@ -1287,15 +1316,30 @@ class GhostOverlay:
             if not self.clickThroughState and not self._overlay_dragging:
                 self.clickThroughState = True
                 self.toggle_overlay_clickthrough(self.clickThroughState)
-
-    def handle_overlay_draggability(self):
+                try:
+                    self.root.after(100, self.keep_overlay_on_top)
+                except:
+                    ll.error("Couldn't Load Root After.")
+                    
+    def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 60):
         """Loop To Handle Draggability Meant To Be Run In A Seperate Thread"""
+        thread_tick_size = 0.1
+        ticks_per_second = int(1 / thread_tick_size) 
+        time_dial = int(time_dilation_for_key_reset * ticks_per_second)
+        time_tick = 0
+        
         while True:
             try:
                 self.parse_mouse_over_overlay()
             except Exception as E:
-                print("Cannot Toggle Mouse-Over Overlay: {E}")
-            sleep(0.1)
+                ll.error(f"Cannot Toggle Mouse-Over Overlay: {E}")
+            time_tick = (time_tick + 1) % time_dial 
+            if time_tick == 0:
+                ll.debug(f"Resetting Key Events")
+                self.background_key_reset()
+            if time_tick % ticks_per_second == 0:
+                self.keep_overlay_on_top()
+            sleep(thread_tick_size)
 
 #####################################################################################################
 
@@ -1348,15 +1392,15 @@ class GhostOverlay:
 
     def display_overlay(self):
         while not hasattr(self, 'MusicPlayer'):
-            sleep(0.1)
+            sleep(1)
         self.root.after(0, self.open_overlay)
 
+    def keep_overlay_on_top_init(self):
+        self.root.bind("<FocusIn>", self.keep_overlay_on_top)
+        self.root.bind("<FocusOut>", self.keep_overlay_on_top)
+        #self.root.after(1, self.keep_overlay_on_top_loop)  # schedule again after 1 ms
 
-    def keep_overlay_on_top_loop(self):
-        self.keep_overlay_on_top()  # your actual function
-        self.root.after(1, self.keep_overlay_on_top_loop)  # schedule again after 1 ms
-
-    def keep_overlay_on_top(self):
+    def keep_overlay_on_top(self, event = None):
         """Keep the overlay window on top of all other windows."""
         if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
             self.window.attributes('-topmost', True)
@@ -1384,6 +1428,15 @@ class GhostOverlay:
         self.window.geometry(f'+{x}+20') # Default y=20 from top
         self._last_position = (x, 20)
 
+    def _create_canvas_items_if_needed(self, init_draw = False):
+        if self.canvas_items.get('bg') is None or init_draw == True:
+            # Create items and store their IDs
+            
+            self.canvas_items['bg'] = self.canvas.create_rounded_box(0, 0, 1, 1, radius=15, color=self.bg_color)
+            self.canvas_items['player_text'] = self.canvas.create_text(0, 0, font=self.main_font, fill='#FFFFFF', anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['duration_text'] = self.canvas.create_text(0, 0, font=self.time_font, fill='#AAAAAA', anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['lyrics_text'] = self.canvas.create_text(0, 0, font=self.lyrics_font, fill='#E0E0E0', anchor=tk.N, justify=tk.CENTER)
+
     def open_overlay(self):
         if hasattr(self, 'search_overlay'):
             self.close_search_overlay(self._was_main_overlay_open_before_search)
@@ -1409,7 +1462,7 @@ class GhostOverlay:
         self.canvas = RoundedCanvas(self.window, bg=transparent_color, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
-        self.update_display() # Initial draw
+        self.update_display(init_draw=True) # Initial draw
         
         if self._last_position:
             x, y = self._last_position
@@ -1450,8 +1503,6 @@ class GhostOverlay:
         self.canvas.bind("<Button-3>", start_move)
         self.canvas.bind("<B3-Motion>", do_move)
         self.canvas.bind("<ButtonRelease-3>", do_stop)
-        # Also allow dragging by the rounded rectangle background if it's a distinct item
-        # If the canvas background IS the rounded rectangle, the above is fine.
 
     def close_overlay(self):
         if self.window:
@@ -1466,94 +1517,57 @@ class GhostOverlay:
             self.canvas = None # Clear canvas reference too
             self.clickThroughState = True # Update clickThroughState
             
-    def update_display(self):
+    def update_display(self, init_draw = False):
         if not (self.window and self.canvas and self.window.winfo_exists()):
             return
-        
+
         try:
-            self.canvas.delete("all")
-            self.overlay_corner_radius = 15
-            self.overlay_text_padding = 15
-            main_font = font.Font(family='Arial', size=14, weight='bold')
-            time_font = font.Font(family='Arial', size=12)
-            lyrics_font = font.Font(family='Arial', size=11, weight='normal', slant='italic') # Adjusted lyrics font
+            # Ensure all canvas items have been created
+            self._create_canvas_items_if_needed(init_draw)
 
             # Wrap main text (song title/artist)
-            wrapped_player_text = self.wrap_text(self.player_metric['player_text'], max_chars_line=35) # Adjust max_chars_line as needed
+            wrapped_player_text = self.wrap_text(self.player_metric['player_text'], 35)
             num_player_text_lines = wrapped_player_text.count('\n') + 1
 
-            main_text_bbox = main_font.measure(wrapped_player_text) # May not be accurate for multiline, use line height
-            
-            main_width = 0
-            for line in wrapped_player_text.split('\n'):
-                main_width = max(main_width, main_font.measure(line))
-
-            time_width = time_font.measure(self.player_metric['player_duration'])
-            
-            
-            
-            # Lyrics wrapping and measurement
             display_lyrics_text = ""
-            num_lyrics_lines = 0
-            lyrics_width = 0
-            if self.running_lyrics and self.display_lyrics and self.player_metric['player_lyrics']:
-                wrapped_lyrics = self.wrap_text(self.player_metric['player_lyrics'], max_chars_line=40) # Adjust max_chars
+            lyrics_visible = self.running_lyrics and self.display_lyrics and self.player_metric['player_lyrics']
+            if lyrics_visible:
+                wrapped_lyrics = self.wrap_text(self.player_metric['player_lyrics'], 40)
                 display_lyrics_text = wrapped_lyrics
-                num_lyrics_lines = display_lyrics_text.count('\n') + 1
-                for line in display_lyrics_text.split('\n'):
-                    lyrics_width = max(lyrics_width, lyrics_font.measure(line))
 
+            main_width = max(self.main_font.measure(line) for line in wrapped_player_text.split('\n')) if wrapped_player_text else 0
+            time_width = self.time_font.measure(self.player_metric['player_duration'])
+            lyrics_width = max(self.lyrics_font.measure(line) for line in display_lyrics_text.split('\n')) if display_lyrics_text else 0
 
             total_width = max(main_width, time_width, lyrics_width) + 2 * self.overlay_text_padding
             
-            main_text_line_height = main_font.metrics("linespace")
-            time_text_line_height = time_font.metrics("linespace")
-            lyrics_text_line_height = lyrics_font.metrics("linespace")
-
-            height_for_main_text = main_text_line_height * num_player_text_lines
-            height_for_time = time_text_line_height
-            height_for_lyrics = 0
-            if num_lyrics_lines > 0:
-                 height_for_lyrics = (lyrics_text_line_height * num_lyrics_lines) + (self.overlay_text_padding / 2 if num_lyrics_lines >0 else 0)
-
-
+            height_for_main_text = self.main_font.metrics("linespace") * num_player_text_lines
+            height_for_time = self.time_font.metrics("linespace")
+            num_lyrics_lines = display_lyrics_text.count('\n') + 1 if lyrics_visible else 0
+            height_for_lyrics = (self.lyrics_font.metrics("linespace") * num_lyrics_lines) + (self.overlay_text_padding / 2) if lyrics_visible else 0
             total_height = height_for_main_text + height_for_time + height_for_lyrics + (2 * self.overlay_text_padding)
-            if num_player_text_lines > 1 : total_height += self.overlay_text_padding /2 # Extra overlay_text_padding for multiline title
-            if num_lyrics_lines > 0: total_height += self.overlay_text_padding /2 # Extra overlay_text_padding before/after lyrics
 
-            self.canvas.create_rounded_box(
-                0, 0, total_width, total_height,
-                radius=self.overlay_corner_radius,
-                color=self.bg_color
-            )
-
+            ### Background ###
+            self.canvas.delete(self.canvas_items['bg'])
+            self.canvas_items['bg'] = self.canvas.create_rounded_box(0, 0, total_width, total_height, radius=self.overlay_corner_radius, color=self.bg_color)
+            self.canvas.tag_lower(self.canvas_items['bg']) # Ensure it's the bottom layer
             current_y = self.overlay_text_padding
 
-            self.canvas.create_text(
-                total_width/2, current_y,
-                text=wrapped_player_text, fill='#FFFFFF',
-                font=main_font, anchor=tk.N, justify=tk.CENTER # Anchor N for top alignment
-            )
-            current_y += height_for_main_text + (self.overlay_text_padding / (2 if num_player_text_lines > 1 else 1) )
+            ### Player Label ###
+            self.canvas.itemconfig(self.canvas_items['player_text'], text=wrapped_player_text)
+            self.canvas.coords(self.canvas_items['player_text'], total_width / 2, current_y)
+            current_y += height_for_main_text + (self.overlay_text_padding / 2)
+            
+            ### Player Lyrics ###
+            self.canvas.itemconfig(self.canvas_items['duration_text'], text=self.player_metric['player_duration'])
+            self.canvas.coords(self.canvas_items['duration_text'], total_width / 2, current_y)
+            current_y += height_for_time + (self.overlay_text_padding / 2 if lyrics_visible else 0)
 
-
-            # Time text
-            self.canvas.create_text(
-                total_width/2, current_y,
-                text=self.player_metric['player_duration'], fill='#AAAAAA',
-                font=time_font, anchor=tk.N, justify=tk.CENTER
-            )
-            current_y += height_for_time + (self.overlay_text_padding /2 if num_lyrics_lines > 0 else 0)
-
-
-            # Lyrics text (if active and visible)
-            if self.running_lyrics and self.display_lyrics and display_lyrics_text:
-                self.canvas.create_text(
-                    total_width/2, current_y,
-                    text=display_lyrics_text, fill='#E0E0E0', # Slightly dimmer white for lyrics
-                    font=lyrics_font, anchor=tk.N, justify=tk.CENTER
-                )
-                # current_y += height_for_lyrics # Not needed if it's the last element
+            if lyrics_visible:
+                self.canvas.itemconfig(self.canvas_items['lyrics_text'], text=display_lyrics_text, state='normal')
+                self.canvas.coords(self.canvas_items['lyrics_text'], total_width / 2, current_y)
+            else:
+                self.canvas.itemconfig(self.canvas_items['lyrics_text'], state='hidden')
 
             # Resize window, preserving position
             if self.window and self.window.winfo_exists():
@@ -1564,23 +1578,26 @@ class GhostOverlay:
                     self.window.geometry(f'{int(total_width)}x{int(total_height)}+{x_pos}+{y_pos}')
                 else: # Fallback if geometry string is unexpected
                     self.window.geometry(f'{int(total_width)}x{int(total_height)}')
+                    
+            self._update_scheduled = False # Reset the flag
 
         except tk.TclError as e:
-            if "invalid command name" in str(e): # Window or canvas likely destroyed
-                # print("GhostOverlay: Update display failed, window/canvas gone.")
-                pass
-            else:
-                print(f"GhostOverlay: TclError in update_display: {e}")
+            pass # Window or canvas likely destroyed
         except Exception as e:
-            print(f"GhostOverlay: Unexpected error in update_display: {e}")
+            ll.error(f"Unexpected error in update_display: {e}")
 
 #####################################################################################################
 
+    def schedule_update(self):
+        if self.window and not self._update_scheduled:
+            self._update_scheduled = True
+            self.root.after(10, self.update_display) # 10ms delay to batch updates
+            
     def set_text(self, text: str):
         with self.text_lock:
+            if self.player_metric['player_text'] == text: return
             self.player_metric['player_text'] = text
-        if self.window and self.window.winfo_exists():
-            self.root.after(0, self.update_display)
+        self.schedule_update()
                 
     def set_duration(self, current_seconds: float, total_seconds: float):
         def format_time(seconds):
@@ -1590,19 +1607,21 @@ class GhostOverlay:
         
         current_str = format_time(current_seconds)
         total_str = format_time(total_seconds)
+        full_str = f"{current_str} / {total_str}"
         
         with self.text_lock:
-            self.player_metric['player_duration'] = f"{current_str} / {total_str}"
-        if self.window and self.window.winfo_exists():
-            self.root.after(0, self.update_display)
+            #if self.player_metric['player_duration'].startswith(current_str): return
+            self.player_metric['player_duration'] = full_str
+        self.schedule_update()
 
     def set_lyrics(self, text: str):
         # This sets the raw lyric string. Wrapping happens in update_display.
         with self.text_lock:
             self.player_metric['player_lyrics'] = text if text else "" # Ensure it's a string
-        if self.window and self.window.winfo_exists() and self.running_lyrics and self.display_lyrics:
-            self.root.after(0, self.update_display)
-                    
+        self.schedule_update()
+
+#####################################################################################################
+
     def set_radio_ips(self, ip_list: list):
         with self.text_lock:
             self.radio_metric['availability'] = list(set(ip_list)) # Ensure unique IPs
@@ -1625,10 +1644,10 @@ class GhostOverlay:
             if len(ip_list) > 0: # Only change if there are options
                 current_ip = self.radio_metric['current_ip']
                 self.radio_metric['current_ip'] = self._get_next_(ip_list, current_ip)
-                print(f"Radio IP set to: {self.radio_metric['current_ip']}")
+                ll.print(f"Radio IP set to: {self.radio_metric['current_ip']}")
             else:
                 self.radio_metric['current_ip'] = '' # No IPs available
-                print("No radio IPs available to select.")
+                ll.warn("No radio IPs available to select.")
         # No automatic display update here, _trigger_radio_station will handle it after attempting connection.
 
 #####################################################################################################
@@ -1662,26 +1681,26 @@ def main():
             self.overlay.set_lyrics(lyrics if lyrics else "")
 
         def skip_previous(self):
-            print("DummyPlayer: Skip Previous")
+            ll.debug("DummyPlayer: Skip Previous")
             self.current_song_index = (self.current_song_index - 1 + len(self.playlist)) % len(self.playlist)
             self._update_overlay_song_info()
         def skip_next(self):
-            print("DummyPlayer: Skip Next")
+            ll.debug("DummyPlayer: Skip Next")
             self.current_song_index = (self.current_song_index + 1) % len(self.playlist)
             self._update_overlay_song_info()
         def pause(self, force_play=None): # True to play, False to pause, None to toggle
             if force_play is True: self.is_paused = False
             elif force_play is False: self.is_paused = True
             else: self.is_paused = not self.is_paused
-            print(f"DummyPlayer: {'Playing' if not self.is_paused else 'Paused'}")
-        def up_volume(self): self.volume = min(100, self.volume + 5); print(f"DummyPlayer: Vol {self.volume}")
-        def dwn_volume(self): self.volume = max(0, self.volume - 5); print(f"DummyPlayer: Vol {self.volume}")
-        def repeat(self): self.is_repeating = not self.is_repeating; print(f"DummyPlayer: Repeat {'On' if self.is_repeating else 'Off'}")
+            ll.debug(f"DummyPlayer: {'Playing' if not self.is_paused else 'Paused'}")
+        def up_volume(self): self.volume = min(100, self.volume + 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
+        def dwn_volume(self): self.volume = max(0, self.volume - 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
+        def repeat(self): self.is_repeating = not self.is_repeating; ll.debug(f"DummyPlayer: Repeat {'On' if self.is_repeating else 'Off'}")
         def toggle_loop_cycle(self, radio_mode_on: bool): # For radio
-            print(f"DummyPlayer: Radio mode {'Activated' if radio_mode_on else 'Deactivated'}")
+            ll.debug(f"DummyPlayer: Radio mode {'Activated' if radio_mode_on else 'Deactivated'}")
         def set_radio_ip(self, ip:str):
-            if ip: print(f"DummyPlayer: Attempting to stream from radio IP: {ip}"); return True # Simulate success
-            print("DummyPlayer: No radio IP to stream from.")
+            if ip: ll.debug(f"DummyPlayer: Attempting to stream from radio IP: {ip}"); return True # Simulate success
+            ll.warn("DummyPlayer: No radio IP to stream from.")
             return False
 
 
@@ -1720,7 +1739,7 @@ def main():
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        print("Exiting GhostOverlay...")
+        ll.warn("Exiting GhostOverlay...")
     finally:
         if overlay.listener and overlay.listener.is_alive():
             overlay.listener.stop()

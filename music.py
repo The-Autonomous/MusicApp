@@ -1,19 +1,20 @@
-import os, random, platform, ast, requests, json
-from threading import Event, Thread, Lock
+import os, random, platform, ast, requests, json, multiprocessing
+from threading import Event, Thread, Lock, Timer
 from mutagen.mp3 import MP3
 from mutagen import File
 from pathlib import Path
 from time import time, sleep
 
-### YT HANDLER IMPORTS ###
+### IMPORTS ###
 
 try:
-    from ytHandle import ytHandle
+    from ytHandle import ytHandle, DownloadPopup
     from lyricMaster import lyricHandler
     from radioIpScanner import SimpleRadioScan
     from radioClient import RadioClient
     from radioMaster import RadioHost
     from audio import AudioPlayer
+    from log_loader import log_loader
 except:
     from .ytHandle import ytHandle
     from .lyricMaster import lyricHandler
@@ -21,6 +22,11 @@ except:
     from .radioClient import RadioClient
     from .radioMaster import RadioHost
     from .audio import AudioPlayer
+    from .log_loader import log_loader
+
+#####################################################################################################
+
+ll = log_loader("Music Player")
 
 #####################################################################################################
 
@@ -57,7 +63,7 @@ class SmartShuffler:
         This method inserts the song at the front of the replay queue. Songs in the replay queue
         take priority over all other playback logic, including the upcoming shuffle list and artist spacing rules.
         """
-        print(AudioPlayer.__repr__(), self.__repr__())
+        ll.debug(AudioPlayer.__repr__(), self.__repr__())
         self.replay_queue.insert(0, song)
 
     def get_unique_song(self):
@@ -114,14 +120,19 @@ class MusicPlayer:
         self.set_lyrics = set_lyrics
         self.set_ips = set_ips
 
-        # Initialize YouTube and lyric handlers
+        # Initialize YouTube
         self.ytHandle = ytHandle()
+        self.ytDownloadThreads = []
+        
+        # Initialize Lyric Handler
         self.lyricHandler = lyricHandler()
 
         # Cache & Shuffler
         self.shuffler = SmartShuffler()
         self.initialize_cache(directories)
         self.load_playback_state()
+        
+        self.wait_for_yt()
 
         # Playback state
         self.current_song = None
@@ -226,7 +237,7 @@ class MusicPlayer:
         if isinstance(path_or_song, str):
             song = next((s for s in self.shuffler.cache if s['path'] == path_or_song), None)
             if not song:
-                print(f"Song not found in cache: {path_or_song}")
+                ll.warn(f"Song not found in cache: {path_or_song}")
                 return
         else:
             song = path_or_song
@@ -273,7 +284,7 @@ class MusicPlayer:
                         with open(self.SAVE_STATE_FILE, "w") as f:
                             json.dump(state, f)
             except Exception as e:
-                print(f"Failed to save playback state: {e}")
+                ll.error(f"Failed to save playback state: {e}")
 
     def load_playback_state(self):
         global save_playback_lock
@@ -318,7 +329,7 @@ class MusicPlayer:
 
                     return True
         except Exception as e:
-            print(f"Failed to load playback state: {e}")
+            ll.warn(f"Failed to load playback state: {e}")
             self.resume_pending = False
         return False
 
@@ -327,7 +338,9 @@ class MusicPlayer:
         unique_paths = set()  # Track unique paths to avoid duplicates
         for path in directories:
             if path.startswith('http'):
-                Thread(target=self.ytDownload, args=(path, directories,)).start()
+                newThread = Thread(target=self.ytDownload, args=(path, directories,))
+                newThread.start()
+                self.ytDownloadThreads.append(newThread)
                 continue
             
             if os.path.exists(path):
@@ -360,7 +373,45 @@ class MusicPlayer:
                 'artist': metadata.get('artist', 'Unknown Artist'),
                 'title': metadata.get('title', os.path.splitext(filename)[0])
             })
-        print(f"⏬ Download Completed: {url}")
+        ll.debug(f"⏬ Download Completed: {url}")
+    
+    def wait_for_yt(self):
+
+        ll.debug("Awaiting Youtube To Finish")
+
+        close_event = multiprocessing.Event()
+        popup_proc = None
+        downloadPopup = DownloadPopup()
+        progress_value = multiprocessing.Value('d', 0.0)  # 'd' = double precision float
+
+        def show_popup():
+            nonlocal popup_proc
+            if any(thread.is_alive() for thread in self.ytDownloadThreads):
+                popup_proc = multiprocessing.Process(target=downloadPopup.popup_process, args=(close_event, progress_value,))
+                popup_proc.start()
+
+        popup_timer = Timer(5.0, show_popup)
+        popup_timer.start()
+
+        # Wait for all downloads to complete
+        fullThreadCount = len(self.ytDownloadThreads)
+        currentThreadIndex = 0
+        for thread in self.ytDownloadThreads:
+            if currentThreadIndex <= 0:
+                progress_value.value = 0
+            else:
+                progress_value.value = currentThreadIndex / fullThreadCount
+            thread.join()
+            currentThreadIndex += 1
+
+        popup_timer.cancel()
+
+        # Close popup if it was shown
+        if popup_proc:
+            close_event.set()
+            popup_proc.join()
+
+        ll.debug("Finished Full Download List")
 
 #####################################################################################################
 
@@ -458,7 +509,7 @@ class MusicPlayer:
         """Set volume between 0.0 (silent) and 1.0 (full volume)"""
         self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
         AudioPlayer.set_volume(self.current_volume) # pygame.mixer.music.set_volume(self.current_volume)
-        print(f"🔊 {self.current_volume}")
+        ll.debug(f"🔊 {self.current_volume}")
         
     def up_volume(self):
         self.set_volume(0.05)
@@ -482,7 +533,6 @@ class MusicPlayer:
 
     def pause_after_mixer_ready(self, paused):
         self.hold_thread_until_mixer()
-        sleep(0.1)  # Ensure mixer is ready
         self.pause(not paused)
 
     def hold_thread_until_mixer(self):
@@ -490,7 +540,7 @@ class MusicPlayer:
         Wait until the mixer is ready and playing music.
         """
         while not AudioPlayer.get_busy(): # pygame.mixer.music.get_busy():
-            sleep(0.01)
+            sleep(1)
         return True
 
 #####################################################################################################
@@ -572,7 +622,7 @@ class MusicPlayer:
                 AudioPlayer.stop() # pygame.mixer.music.stop()
                 # pygame.mixer.music.unload()
             except:
-                print("Couldn't Wait For Mixer. Continue...")
+                ll.warn("Couldn't Wait For Mixer. Continue...")
             AudioPlayer.load(self.current_song['path']) # pygame.mixer.music.load(self.current_song['path'])
             if pauseType:
                 self.pause()
@@ -586,7 +636,7 @@ class MusicPlayer:
                     AudioPlayer.set_pos(self.song_elapsed_seconds) # pygame.mixer.music.set_pos(self.song_elapsed_seconds)
                     AudioPlayer.unpause() # pygame.mixer.music.unpause()
                 except:
-                    print("Error In Loading Music In Radio. Retrying")
+                    ll.warn("Error In Loading Music In Radio. Retrying")
                     if not didReset:
                         return self.toggle_loop_cycle(CycleType)
 
@@ -600,7 +650,7 @@ class MusicPlayer:
                         lyric_data = requests.get(unformatted_return_lyrics, timeout=2)
                         lyric_data.raise_for_status()
                         if lyric_data.content != "b''":
-                            print(f"Lyrics downloaded.")
+                            ll.debug(f"Lyrics downloaded.")
                             break
                         else:
                             sleep(1)
@@ -622,7 +672,7 @@ class MusicPlayer:
                         self.set_lyrics(True, lyric_pair[1])
                 self.set_lyrics(False)
             except Exception as E:
-                print(f"Radio Lyric Callback Error With Data: {unformatted_return_lyrics} And Dilation {return_dilation:.2f}s And Error {E}")
+                ll.error(f"Radio Lyric Callback Error With Data: {unformatted_return_lyrics} And Dilation {return_dilation:.2f}s And Error {E}")
                 
         while True:
             while not self.current_player_mode.is_set() or self.current_radio_ip == "0.0.0.0":
@@ -717,9 +767,9 @@ class MusicPlayer:
                         except Exception as e:
                             try:
                                 AudioPlayer.play(start=start_pos) # pygame.mixer.music.play(start=start_pos)
-                                print(f"Used alternative method to start at {start_pos:.2f}s")
+                                ll.debug(f"Used alternative method to start at {start_pos:.2f}s")
                             except Exception as e:
-                                print(f"Alternative method also failed: {e}")
+                                ll.error(f"Alternative method also failed: {e}")
                         
                         self.resume_pending = False
                         if hasattr(self, '_resume_position'):
@@ -779,7 +829,7 @@ class MusicPlayer:
 
                 except Exception as e:
                     self.set_screen("Error", song['title'])
-                    print(e)
+                    ll.error(e)
                     sleep(1)
                 finally:
                     AudioPlayer.stop() # pygame.mixer.music.stop()
@@ -787,9 +837,7 @@ class MusicPlayer:
                     self.song_elapsed_seconds = 0.0
 
             except Exception as e:
-                print(f"[core_player_loop] Unhandled exception: {e}")
-                import traceback
-                traceback.print_exc()
+                ll.error(f"Core Player failed with an unhandled exception: {e}")
                 sleep(1)
 
 #####################################################################################################

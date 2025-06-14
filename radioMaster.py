@@ -5,6 +5,17 @@ from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 
+try:
+    from log_loader import log_loader
+except:
+    from .log_loader import log_loader
+
+### Logging Handler ###
+
+ll = log_loader("Radio Master")
+
+#######################
+
 class RadioHost:
     def __init__(self, player, port=8080, ip=None, fake_load=False):
         # Flask app setup
@@ -28,8 +39,8 @@ class RadioHost:
             try:
                 mix = self.current_data['mixer']
                 return mix.get_pos() if mix else 0
-            except Exception:
-                # print("Error getting position from mixer") # Suppress frequent error message
+            except Exception as e:
+                ll.debug(f"Exception getting position from mixer: {e}")
                 return 0
 
         # Routes
@@ -147,7 +158,7 @@ class RadioHost:
                 daemon=True
             )
             self._server_thread.start()
-            print(f"[RadioHost] Serving on http://{host}:{port}")
+            ll.debug(f"Serving on http://{host}:{port}")
 
     def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
         """Call whenever you load a new track."""
@@ -163,7 +174,7 @@ class RadioHost:
                     audio = WAVE(mp3_song_file_path)
                     song_duration = audio.info.length
             except Exception as e:
-                print(f"Error getting duration for {mp3_song_file_path}: {e}")
+                ll.error(f"Error getting duration for {mp3_song_file_path}: {e}")
 
         # Update data
         self.current_data.update({
@@ -195,7 +206,7 @@ class RadioHost:
                     continue
                 try:
                     p = psutil.Process(pid)
-                    print(f"[RadioHost] Killing PID {pid} ({p.name()}) on port {port}")
+                    ll.debug(f"Killing PID {pid} ({p.name()}) on port {port}")
                     p.terminate()
                     p.wait(timeout=1.0)
                 except psutil.TimeoutExpired:
@@ -226,31 +237,31 @@ if __name__ == '__main__':
         
         def pause(self, forcedState=False):
             # Dummy implementation for example
-            print("MusicPlayer pause called", forcedState)
+            ll.debug("MusicPlayer pause called", forcedState)
             
         def skip_next(self):
             # Dummy implementation for example
-            print("MusicPlayer skip_next called")
+            ll.debug("MusicPlayer skip_next called")
             
         def skip_previous(self):
             # Dummy implementation for example
-            print("MusicPlayer skip_previous called")
+            ll.debug("MusicPlayer skip_previous called")
             
         def up_volume(self):
             # Dummy implementation for example
-            print("MusicPlayer up_volume called")
+            ll.debug("MusicPlayer up_volume called")
             
         def dwn_volume(self):
             # Dummy implementation for example
-            print("MusicPlayer dwn_volume called")
+            ll.debug("MusicPlayer dwn_volume called")
             
         def repeat(self):
             # Dummy implementation for example
-            print("MusicPlayer repeat called")
+            ll.debug("MusicPlayer repeat called")
             
         def play_song(self, path):
             # Dummy implementation for example
-            print(f"MusicPlayer play_song called with path: {path}")
+            ll.debug(f"MusicPlayer play_song called with path: {path}")
             
         def get_search_term(self, query):
             # Dummy implementation for example
@@ -268,7 +279,7 @@ if __name__ == '__main__':
     num_samples_test = int(duration_test * samplerate_test)
     silent_data_test = np.zeros(num_samples_test, dtype=np.float32)
     write_wav(test_wav_path, samplerate_test, silent_data_test)
-    print(f"Created test WAV file: {test_wav_path}")
+    ll.debug(f"Created test WAV file: {test_wav_path}")
     atexit.register(lambda: os.remove(test_wav_path) if os.path.exists(test_wav_path) else None)
 
     host = RadioHost(player=MusicPlayer(), port=8080)

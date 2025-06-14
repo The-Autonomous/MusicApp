@@ -1,4 +1,4 @@
-import os, sys, ctypes, subprocess
+import os, sys, ctypes, subprocess, time
 
 class Administrator:
     def __init__(self, require_admin=True):
@@ -33,7 +33,9 @@ class Administrator:
             if w_o_admin:
                 self.elevate_w_o_admin()
             else:
-                os._exit(0)
+                while True:
+                    print("Dormanting for next music player termination...")
+                    time.sleep(60)
             
     def elevate_w_o_admin(self):
         params = [sys.executable.replace("python.exe", "pythonw.exe")] + sys.argv
@@ -43,6 +45,8 @@ class Administrator:
         startupinfo.wShowWindow = 0  # SW_HIDE
         try:
             subprocess.Popen(params, startupinfo=startupinfo)
-            os._exit(0)
+            while True:
+                print("Dormanting for next music player termination...")
+                time.sleep(60)
         except Exception as e:
             print(f"Failed to relaunch hidden: {e}")

@@ -1,6 +1,17 @@
 import re, threading, os
 from typing import List, Optional, Tuple
-    
+
+try:
+    from log_loader import log_loader
+except:
+    from .log_loader import log_loader
+
+### Logging Handler ###
+
+ll = log_loader("Player Utilities")
+
+#######################
+
 class TitleCleaner:
     """Clean raw track titles into a consistent 'Artist - Title' format, including dynamic suffix mapping."""
     _split_pattern = re.compile(r'(?: - |\(|\||\[)')
@@ -154,7 +165,7 @@ class MusicOverlayController:
                 lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             return lines
         except FileNotFoundError:
-            print(f"Playlist file '{file_path}' not found.")
+            ll.warn(f"Playlist file '{file_path}' not found.")
             with open(absolute_path, 'w', encoding="utf-8") as f:
                 f.write("")
             return []

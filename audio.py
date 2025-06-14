@@ -1,390 +1,653 @@
-import subprocess, json
+import subprocess
+import json
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from threading import Event, Thread, Lock
+from threading import Event, Thread, Lock, RLock
 from collections import deque
 from time import sleep, monotonic
+from functools import lru_cache
+import gc
+import weakref
+from typing import Optional, Union, Tuple
+
+try:
+    from log_loader import log_loader
+except:
+    from .log_loader import log_loader
+
+### Logging Handler ###
+
+ll = log_loader("Audio", debugging = False)
+
+#######################
+
+class OptimizedAudioBuffer:
+    """Memory-efficient circular buffer with pre-allocated arrays"""
+    
+    def __init__(self, max_chunks: int, chunk_size: int, channels: int):
+        self.max_chunks = max_chunks
+        self.chunk_size = chunk_size
+        self.channels = channels
+        
+        # Pre-allocate buffer memory to avoid constant allocation/deallocation
+        self._buffer = np.zeros((max_chunks, chunk_size, channels), dtype=np.float32)
+        self._chunk_sizes = np.zeros(max_chunks, dtype=np.int32)  # Track actual chunk sizes
+        self._write_idx = 0
+        self._read_idx = 0
+        self._count = 0
+        self._lock = Lock()
+        
+    def append(self, chunk: np.ndarray) -> bool:
+        """Add chunk to buffer. Returns False if buffer is full."""
+        with self._lock:
+            if self._count >= self.max_chunks:
+                return False
+                
+            actual_size = min(len(chunk), self.chunk_size)
+            self._buffer[self._write_idx, :actual_size] = chunk[:actual_size]
+            self._chunk_sizes[self._write_idx] = actual_size
+            
+            self._write_idx = (self._write_idx + 1) % self.max_chunks
+            self._count += 1
+            return True
+    
+    def popleft(self) -> Optional[np.ndarray]:
+        """Remove and return oldest chunk."""
+        with self._lock:
+            if self._count == 0:
+                return None
+                
+            chunk_size = self._chunk_sizes[self._read_idx]
+            chunk = self._buffer[self._read_idx, :chunk_size].copy()
+            
+            self._read_idx = (self._read_idx + 1) % self.max_chunks
+            self._count -= 1
+            return chunk
+    
+    def clear(self):
+        """Clear the buffer."""
+        with self._lock:
+            self._write_idx = 0
+            self._read_idx = 0
+            self._count = 0
+    
+    def __len__(self):
+        return self._count
+    
+    @property
+    def is_full(self):
+        return self._count >= self.max_chunks
+    
+    @property
+    def fill_ratio(self):
+        return self._count / self.max_chunks
 
 class AudioPlayerRoot:
-    def __init__(self, buffer_size_seconds=10):
-        self.stream = None
+    """Optimized audio player with efficient memory management and CPU usage"""
+    
+    def __init__(self, buffer_size_seconds: float = 10):
+        # Core audio settings
         self.samplerate = 44100
         self.channels = 2
-        self.chunk_size = 1024
-        #self.root_reading_thread = Lock()
-        self.filepath = None
-        
-        self.average_stream_load_time = 0.0
-        self.times_taken_loading_stream = []
-
-        self.paused = Event()
-        self.stop_event = Event()
-        self.play_event = Event() # Indicates if playback is active (stream running)
-        self.volume = 0.1
-        self.position_frames = 0
-        self.total_frames = 0
-        self.duration = 0
-        
-        self.stop_active = False # To track if stop was called to avoid redundant actions
-
-        self.buffer = deque()
+        self.chunk_size = 1024  # Optimized chunk size
         self.buffer_size_seconds = buffer_size_seconds
-
+        
+        # State management
+        self._state_lock = RLock()  # Use RLock for nested locking
+        self._filepath = None
+        self._stream = None
+        self._current_process = None
+        
+        # Threading events - more efficient event handling
+        self._stop_event = Event()
+        self._paused = Event()
+        self._play_event = Event()
+        self._buffer_ready = Event()
+        self._eof_event = Event()
+        
+        # Thread management with weak references to prevent memory leaks
         self._playback_thread = None
         self._reader_thread = None
-        self._current_process = None # To hold the ffmpeg process
+        self._thread_pool = []  # Keep track of all threads for cleanup
+        
+        # Audio state
+        self._volume = 0.1
+        self._position_frames = 0
+        self._total_frames = 0
+        self._duration = 0.0
+        
+        # Performance tracking
+        self._performance_stats = {
+            'load_times': deque(maxlen=50),  # Keep only recent measurements
+            'underruns': 0,
+            'buffer_efficiency': 0.0
+        }
+        
+        # Optimized buffer
+        max_buffer_chunks = int((self.samplerate * buffer_size_seconds) / self.chunk_size)
+        self._buffer = OptimizedAudioBuffer(max_buffer_chunks, self.chunk_size, self.channels)
+        
+        # FFmpeg process pool for better resource management
+        self._process_startupinfo = self._create_startupinfo()
+        
+        # Movement state for thread synchronization
+        self._movement_active = False
+        self._movement_lock = Lock()
 
-        # Add a lock for buffer access if multiple threads interact with it
-        # (though in this design, reader adds, callback pops, so usually fine)
-        # self._buffer_lock = Lock()
-
-    def update_average_load_time(self):
-        if self.times_taken_loading_stream:
-            self.average_stream_load_time = sum(self.times_taken_loading_stream) / len(self.times_taken_loading_stream)
-        else:
-            self.average_stream_load_time = 0
-            
-    def add_time(self, start_time):
-        self.times_taken_loading_stream.append(monotonic()-start_time)
-        self.update_average_load_time()
-        print(f"[Music Averages] Current Song Averages: {self.times_taken_loading_stream}\nCurrent Average:{self.average_stream_load_time}")
-
-    def _get_audio_info(self, filepath):
-        cmd = ['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', filepath]
-        creationflags = subprocess.CREATE_NO_WINDOW
+    @staticmethod
+    def _create_startupinfo():
+        """Create reusable startup info for subprocess calls"""
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
+        return startupinfo
 
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding='utf-8', errors='ignore',
-                                creationflags=creationflags, startupinfo=startupinfo)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffprobe error: {result.stderr}")
-        info = json.loads(result.stdout)
-        audio_stream = next((s for s in info['streams'] if s['codec_type'] == 'audio'), None)
-        if audio_stream is None:
-            raise ValueError("No audio stream found in file.")
-        return {
-            'samplerate': int(audio_stream['sample_rate']),
-            'channels': int(audio_stream['channels']),
-            'duration': float(info['format'].get('duration', 0.0))
-        }
+    @lru_cache(maxsize=32)
+    def _get_audio_info(self, filepath: str) -> dict:
+        """Cached audio info retrieval to avoid repeated ffprobe calls"""
+        cmd = [
+            'ffprobe', '-v', 'error', '-print_format', 'json',
+            '-show_format', '-show_streams', filepath
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='ignore',
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                startupinfo=self._process_startupinfo,
+                timeout=10  # Add timeout to prevent hanging
+            )
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"ffprobe error: {result.stderr}")
+                
+            info = json.loads(result.stdout)
+            audio_stream = next((s for s in info['streams'] if s['codec_type'] == 'audio'), None)
+            
+            if audio_stream is None:
+                raise ValueError("No audio stream found in file.")
+                
+            return {
+                'samplerate': int(audio_stream['sample_rate']),
+                'channels': int(audio_stream['channels']),
+                'duration': float(info['format'].get('duration', 0.0))
+            }
+        except subprocess.TimeoutExpired:
+            ll.warn("ffprobe timeout - file may be corrupted or inaccessible")
+        except Exception as e:
+            ll.error(f"Error getting audio info for {filepath}: {e}")
 
-    def load(self, filepath):
-        if filepath:
-            # Load doesn't play immediately, so pause it right away
-            self._start_playback_session(filepath, start_pos=0.0, play_immediately=False)
+    def load(self, filepath: str) -> bool:
+        """Load audio file without starting playback"""
+        return self._start_playback_session(filepath, start_pos=0.0, play_immediately=False)
 
     def unload(self):
+        """Unload current audio and free resources"""
         self.stop()
+        with self._state_lock:
+            self._filepath = None
+            # Clear cache for the unloaded file
+            self._get_audio_info.cache_clear()
 
-    def play(self, filepath=None, start_pos=0.0):
+    def play(self, filepath: Optional[str] = None, start_pos: float = 0.0) -> bool:
+        """Play audio file or resume current playback"""
         if filepath:
-            self._start_playback_session(filepath, start_pos=start_pos, play_immediately=True)
-        elif self.filepath:
-            if self.paused.is_set():
+            return self._start_playback_session(filepath, start_pos=start_pos, play_immediately=True)
+        elif self._filepath:
+            if self._paused.is_set():
                 self.unpause()
-            else: # If already playing or paused with no new file, restart from start_pos
-                self._start_playback_session(self.filepath, start_pos=start_pos, play_immediately=True)
-        else:
-            print('No file loaded to play.')
-
-    def _start_playback_session(self, filepath, start_pos, play_immediately, buffertime=None, radio_mode=False):
-        self.stop() # Ensure previous session is stopped and cleaned up
-
-        self.filepath = filepath
-        try:
-            audio_info = self._get_audio_info(filepath)
-            self.samplerate = audio_info['samplerate']
-            self.channels = audio_info['channels']
-            self.total_frames = int(audio_info['duration'] * self.samplerate)
-            self.duration = audio_info['duration']
-        except Exception as e:
-            self.stop() # Clean up if info gathering fails
-            return
-
-        final_math = start_pos
-        if radio_mode:
-            solved_monotonic = monotonic()
-            final_math += (solved_monotonic + 0.15 - buffertime)
-        
-        self.position_frames = int((final_math) * self.samplerate)
-        self.buffer.clear() # Clear buffer for new session
-        
-        self.current_time_diff = monotonic()
-
-        self.stop_event.clear() # Clear stop event for new session
-        self.paused.set()       # Start paused until buffer is ready or explicit play is called
-
-        # Start playback thread (which will start reader thread)
-        self._playback_thread = Thread(target=self._run_stream, args=(radio_mode,), daemon=True)
-        self._playback_thread.start()
-
-        # Wait for reader thread to initialize and start filling
-        while not self._reader_thread or not self._reader_thread.is_alive():
-            sd.sleep(10) # Small sleep to avoid busy-waiting
-
-        # Crucial addition for quick seeks to prevent underruns
-        # Wait for a minimum buffer fill before allowing playback to truly start
-        if not radio_mode:
-            min_buffer_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.2) # Wait for 20% of buffer
-            if min_buffer_chunks < 2: min_buffer_chunks = 2 # Ensure at least 2 chunks
-            while len(self.buffer) < min_buffer_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
-                sd.sleep(10) # Small sleep to avoid busy-waiting
-            
-        if play_immediately:
-            self.unpause() # This will truly start the audio stream output
-        else:
-            self.pause() # Keep paused as requested by load
-        Thread(target=self.set_movement, args=(False,), daemon=True).start() # Reset movement state on stop
-        if radio_mode:
-            return solved_monotonic
-
-    def radio_play(self, filepath=None, start_pos=0.0, buffer_time=None):
-        """Special method for radio playback, similar to play but with different handling."""
-        if filepath:
-            return self._start_playback_session(filepath, start_pos=start_pos, play_immediately=True, buffertime=buffer_time, radio_mode=True)
-        elif self.filepath:
-            if self.paused.is_set():
-                self.unpause()
-            else: # If already playing or paused with no new file, restart from start_pos
-                return self._start_playback_session(self.filepath, start_pos=start_pos, play_immediately=True, buffertime=buffer_time, radio_mode=True)
-        else:
-            print('No file loaded to play.')
-        print("Something went wrong with returning from radio_play. No start_offset was returned.")
-        return 0.0
-
-    def _run_stream(self, radio_mode=False):
-        # This thread's main job is to manage the audio output stream
-        # and ensure the reader thread is running.
-
-        try:
-            # Start reader thread here, passing the current position
-            self._reader_thread = Thread(target=self._read_audio_chunks, daemon=True)
-            self._reader_thread.start()
-
-            # Wait for some initial buffer to be filled before starting the stream
-            # This helps prevent initial underruns, especially on fresh starts or seeks.
-            if not radio_mode:
-                initial_buffer_wait_chunks = int(self.buffer_size_seconds * self.samplerate / self.chunk_size * 0.1) # 10% of buffer
-                if initial_buffer_wait_chunks < 2: initial_buffer_wait_chunks = 2
-                while len(self.buffer) < initial_buffer_wait_chunks and not self.stop_event.is_set() and self._reader_thread.is_alive():
-                    sd.sleep(20) # A bit longer sleep for initial fill
-
-            if self.stop_event.is_set():
-                return
-
-            self.stream = sd.OutputStream(samplerate=self.samplerate, channels=self.channels,
-                                          dtype='float32', blocksize=self.chunk_size,
-                                          latency='low', callback=self.callback)
-            self.stream.start()
-            self.play_event.set() # Indicate that the stream is active
-            self.stop_event.wait() # Block until stop is called
-            self.add_time(self.current_time_diff)
-            self.current_time_diff = 0
-
-        except Exception as e:
-            print(f"[PlaybackThread] Error in _run_stream: {e}")
-        finally:
-            self.play_event.clear() # Clear play event
-            if self.stream:
-                try:
-                    self.stream.stop()
-                    self.stream.close()
-                except Exception as e:
-                    print(f"Error stopping/closing stream in finally: {e}")
-                self.stream = None
-            if self._reader_thread and self._reader_thread.is_alive():
-                self._reader_thread.join(timeout=0.5) # Give reader a moment to finish
-
-    def _read_audio_chunks(self):
-        max_buffer_chunks = (self.samplerate * self.buffer_size_seconds) // self.chunk_size
-        try:
-            if not self.filepath:
-                return
-
-            is_mp3 = self.filepath.lower().endswith('.mp3')
-            if is_mp3:
-                # Start ffmpeg from the current position_frames
-                start_time_seconds = self.position_frames / self.samplerate
-                ffmpeg_cmd = [
-                    'ffmpeg', '-ss', str(start_time_seconds), '-i', self.filepath,
-                    '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
-                    '-ar', str(self.samplerate), '-ac', str(self.channels), 'pipe:1'
-                ]
-                creationflags = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-
-                process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE,
-                                           creationflags=creationflags,
-                                           startupinfo=startupinfo)
-                self._current_process = process
-                bytes_per_frame = 4 * self.channels
-                chunk_size_bytes = self.chunk_size * bytes_per_frame
-
-                while not self.stop_event.is_set():
-                    # --- Dynamic buffer management ---
-                    current_buffer_len = len(self.buffer)
-                    if current_buffer_len >= max_buffer_chunks:
-                        # Buffer is full, slow down reading, but don't stop entirely
-                        sd.sleep(50) # Sleep longer to let callback consume
-                        continue
-                    elif current_buffer_len > max_buffer_chunks * 0.8: # Nearing full, just a small pause
-                        sd.sleep(10)
-                        continue
-
-                    raw_audio = process.stdout.read(chunk_size_bytes)
-                    if not raw_audio:
-                        break
-                    chunk = np.frombuffer(raw_audio, dtype=np.float32)
-                    if self.channels > 1:
-                        chunk = chunk.reshape(-1, self.channels)
-                    self.buffer.append(chunk)
-
-                if process.poll() is None: # Check if process is still running
-                    process.kill()
-                    process.wait(timeout=0.1) # Give it a moment to terminate
-                self._current_process = None
+                return True
             else:
-                with sf.SoundFile(self.filepath, 'r') as f:
-                    f.seek(self.position_frames) # Seek to current position
-                    while not self.stop_event.is_set():
-                        current_buffer_len = len(self.buffer)
-                        if current_buffer_len >= max_buffer_chunks:
-                            sd.sleep(50)
-                            continue
-                        elif current_buffer_len > max_buffer_chunks * 0.8:
-                            sd.sleep(10)
-                            continue
+                return self._start_playback_session(self._filepath, start_pos=start_pos, play_immediately=True)
+        else:
+            ll.warn('No file loaded to play.')
+            return False
 
-                        chunk = f.read(self.chunk_size, dtype='float32', always_2d=True)
-                        if len(chunk) == 0:
-                            break
-                        self.buffer.append(chunk)
-        except Exception as e:
-            print(f"[ReaderThread] Error: {e}")
-        finally:
-            # If reader finishes because of EOF and not stop_event, signal end of playback
-            if not self.stop_event.is_set() and len(self.buffer) == 0:
-                 self.stop_event.set() # Signal playback thread to stop
-
-    def callback(self, outdata, frames, time, status):
-        if status:
-            print(f"Stream status: {status}")
-        if self.paused.is_set() or not self.play_event.is_set(): # Check play_event too
-            outdata.fill(0)
-            return
-
-        try:
-            chunk = self.buffer.popleft()
-            modified_chunk = chunk * self.volume
-            outdata[:len(modified_chunk)] = modified_chunk
-            if len(chunk) < len(outdata):
-                # If the chunk was smaller than requested frames (e.g., end of file)
-                outdata[len(chunk):] = 0
-            self.position_frames += frames
-        except IndexError:
+    def _start_playback_session(self, filepath: str, start_pos: float, play_immediately: bool, 
+                              buffer_time: Optional[float] = None, radio_mode: bool = False) -> Union[bool, float]:
+        """Optimized playback session initialization"""
+        self.stop()  # Clean shutdown of previous session
+        
+        start_time = monotonic()
+        
+        with self._state_lock:
+            self._filepath = filepath
+            
             try:
-                chunk = self.buffer.popleft()
-            except IndexError:
-                outdata.fill(0)
-                if not self.stop_event.is_set():
-                    print("Buffer underrun. Waiting for refill...")
-                return  # don’t kill the stream immediately
-
-    def stop(self):
-        if self.get_movement():
-            return
-        Thread(target=self.set_movement, args=(True, False,), daemon=True).start() # Reset movement state on stop
-        if self._current_process:
-            try:
-                self._current_process.kill()
-                self._current_process.wait(timeout=0.1)
+                audio_info = self._get_audio_info(filepath)
+                self.samplerate = audio_info['samplerate']
+                self.channels = audio_info['channels']
+                self._total_frames = int(audio_info['duration'] * self.samplerate)
+                self._duration = audio_info['duration']
             except Exception as e:
-                print(f"Error killing ffmpeg process: {e}")
+                ll.error(f"Failed to get audio info: {e}")
+                self.stop()
+                return False if not radio_mode else 0.0
+
+            # Calculate final position
+            final_position = start_pos
+            solved_monotonic = monotonic()
+            if radio_mode and buffer_time:
+                final_position += (solved_monotonic + 0.15 - buffer_time)
+            
+            self._position_frames = int(final_position * self.samplerate)
+            
+            # Reset state for new session
+            self._buffer.clear()
+            self._stop_event.clear()
+            self._paused.set() if not play_immediately else self._paused.clear()
+            self._buffer_ready.clear()
+            
+            # Start threads
+            self._start_playback_threads(radio_mode)
+            
+            # Wait for buffer initialization
+            if not radio_mode:
+                self._wait_for_buffer_ready()
+            
+            if play_immediately:
+                self.unpause()
+            
+            # Update performance stats
+            load_time = monotonic() - start_time
+            self._performance_stats['load_times'].append(load_time)
+            
+            # Start movement state management
+            self._reset_movement_state()
+            
+            return solved_monotonic if radio_mode else True
+
+    def radio_play(self, filepath: Optional[str] = None, start_pos: float = 0.0, 
+                  buffer_time: Optional[float] = None) -> float:
+        """Optimized radio playback mode"""
+        if filepath:
+            return self._start_playback_session(
+                filepath, start_pos=start_pos, play_immediately=True, 
+                buffer_time=buffer_time, radio_mode=True
+            )
+        elif self._filepath:
+            if self._paused.is_set():
+                self.unpause()
+                return monotonic()
+            else:
+                return self._start_playback_session(
+                    self._filepath, start_pos=start_pos, play_immediately=True,
+                    buffer_time=buffer_time, radio_mode=True
+                )
+        else:
+            ll.warn('No file loaded for radio play.')
+            return 0.0
+
+    def _start_playback_threads(self, radio_mode: bool = False):
+        """Start optimized playback threads"""
+        # Start reader thread first
+        self._reader_thread = Thread(
+            target=self._read_audio_chunks_optimized,
+            name="AudioReader",
+            daemon=True
+        )
+        self._reader_thread.start()
+        self._thread_pool.append(weakref.ref(self._reader_thread))
+        
+        # Start playback thread
+        self._playback_thread = Thread(
+            target=self._run_stream_optimized,
+            args=(radio_mode,),
+            name="AudioPlayback",
+            daemon=True
+        )
+        self._playback_thread.start()
+        self._thread_pool.append(weakref.ref(self._playback_thread))
+
+    def _wait_for_buffer_ready(self):
+        """Wait for minimum buffer fill before allowing playback"""
+        min_buffer_ratio = 0.2  # Wait for 20% buffer fill
+        timeout = 5.0  # Maximum wait time
+        start_time = monotonic()
+        
+        while (self._buffer.fill_ratio < min_buffer_ratio and 
+               not self._stop_event.is_set() and 
+               self._reader_thread and self._reader_thread.is_alive() and
+               (monotonic() - start_time) < timeout):
+            sleep(0.01)  # Optimized sleep interval
+        
+        self._buffer_ready.set()
+
+    def _run_stream_optimized(self, radio_mode: bool = False):
+        """Optimized audio stream management"""
+        try:
+            # Wait for reader thread to be ready
+            while (not self._reader_thread or not self._reader_thread.is_alive()) and not self._stop_event.is_set():
+                sleep(0.001)
+            
+            if self._stop_event.is_set():
+                return
+            
+            # Wait for initial buffer fill (except in radio mode)
+            if not radio_mode:
+                self._buffer_ready.wait(timeout=5.0)
+            
+            if self._stop_event.is_set():
+                return
+            
+            # Create optimized audio stream
+            self._stream = sd.OutputStream(
+                samplerate=self.samplerate,
+                channels=self.channels,
+                dtype=np.float32,
+                blocksize=self.chunk_size,
+                latency='low',
+                callback=self._audio_callback_optimized
+            )
+            
+            self._stream.start()
+            self._play_event.set()
+            
+            # Wait for stop signal
+            self._stop_event.wait()
+            
+        except Exception as e:
+            ll.error(f"Error in stream management: {e}")
+        finally:
+            self._cleanup_stream()
+
+    def _audio_callback_optimized(self, outdata: np.ndarray, frames: int, time_info, status):
+        """Highly optimized audio callback with minimal allocations"""
+        if status:
+            ll.debug(f"Audio stream status: {status}")
+        
+        # Fast path for paused state
+        if self._paused.is_set() or not self._play_event.is_set():
+            outdata.fill(0.0)
+            return
+        
+        try:
+            chunk = self._buffer.popleft()
+            if chunk is not None:
+                chunk_len = len(chunk)
+                if chunk_len >= frames:
+                    # Use in-place operations to avoid allocations
+                    np.multiply(chunk[:frames], self._volume, out=outdata)
+                else:
+                    # Partial chunk
+                    outdata[:chunk_len] = chunk * self._volume
+                    outdata[chunk_len:].fill(0.0)
+                
+                self._position_frames += frames
+            else:
+                # Buffer underrun
+                outdata.fill(0.0)
+                self._performance_stats['underruns'] += 1
+                if not self._stop_event.is_set():
+                    ll.debug("Buffer underrun detected")
+                
+        except Exception as e:
+            ll.error(f"Error in audio callback: {e}")
+            outdata.fill(0.0)
+
+    def _read_audio_chunks_optimized(self):
+        """Optimized audio reading with better memory management"""
+        try:
+            if not self._filepath:
+                return
+            
+            is_mp3 = self._filepath.lower().endswith(('.mp3', '.m4a', '.aac'))
+            
+            if is_mp3:
+                self._read_with_ffmpeg()
+            else:
+                self._read_with_soundfile()
+                
+        except Exception as e:
+            ll.error(f"Error in audio reader: {e}")
+        finally:
+            # Signal end of file if not stopped explicitly
+            if not self._stop_event.is_set() and len(self._buffer) == 0:
+                self._stop_event.set()
+
+    def _read_with_ffmpeg(self):
+        """Optimized FFmpeg-based reading"""
+        start_time_seconds = self._position_frames / self.samplerate
+        
+        ffmpeg_cmd = [
+            'ffmpeg', '-ss', str(start_time_seconds), '-i', self._filepath,
+            '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
+            '-ar', str(self.samplerate), '-ac', str(self.channels), 
+            '-avoid_negative_ts', 'make_zero',  # Optimize timestamp handling
+            'pipe:1'
+        ]
+        
+        try:
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                startupinfo=self._process_startupinfo,
+                bufsize=self.chunk_size * 4 * self.channels * 8  # Larger buffer
+            )
+            
+            self._current_process = process
+            bytes_per_frame = 4 * self.channels
+            chunk_size_bytes = self.chunk_size * bytes_per_frame
+            
+            # Pre-allocate read buffer
+            read_buffer = bytearray(chunk_size_bytes)
+            
+            while not self._stop_event.is_set():
+                # Dynamic buffer management
+                if self._buffer.is_full:
+                    sleep(0.02)  # Adaptive sleep
+                    continue
+                elif self._buffer.fill_ratio > 0.8:
+                    sleep(0.005)
+                    continue
+                
+                bytes_read = process.stdout.readinto(read_buffer)
+                if not bytes_read:
+                    break
+                
+                # Convert to numpy array efficiently
+                chunk = np.frombuffer(read_buffer[:bytes_read], dtype=np.float32)
+                if self.channels > 1:
+                    chunk = chunk.reshape(-1, self.channels)
+                
+                if not self._buffer.append(chunk):
+                    # Buffer full, wait a bit
+                    sleep(0.001)
+                    
+        finally:
+            if self._current_process and self._current_process.poll() is None:
+                try:
+                    self._current_process.terminate()
+                    self._current_process.wait(timeout=1.0)
+                except:
+                    self._current_process.kill()
             self._current_process = None
 
-        if self.stop_event.is_set():
+    def _read_with_soundfile(self):
+        """Optimized SoundFile-based reading"""
+        try:
+            with sf.SoundFile(self._filepath, 'r') as f:
+                f.seek(self._position_frames)
+                
+                while not self._stop_event.is_set():
+                    if self._buffer.is_full:
+                        sleep(0.02)
+                        continue
+                    elif self._buffer.fill_ratio > 0.8:
+                        sleep(0.005)
+                        continue
+                    
+                    chunk = f.read(self.chunk_size, dtype=np.float32, always_2d=True)
+                    if len(chunk) == 0:
+                        break
+                    
+                    if not self._buffer.append(chunk):
+                        sleep(0.001)
+                        
+        except Exception as e:
+            ll.error(f"Error reading with SoundFile: {e}")
+
+    def stop(self):
+        """Optimized stop with proper resource cleanup"""
+        if self.get_movement():
             return
+            
+        self._set_movement_state(True, False)
+        
+        # Stop FFmpeg process first
+        if self._current_process:
+            try:
+                self._current_process.terminate()
+                self._current_process.wait(timeout=0.5)
+            except:
+                try:
+                    self._current_process.kill()
+                except:
+                    pass
+            self._current_process = None
+        
+        # Signal stop to all threads
+        self._stop_event.set()
+        self._paused.set()
+        
+        # Clean up threads with timeout
+        threads_to_join = [self._playback_thread, self._reader_thread]
+        for thread in threads_to_join:
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+        
+        # Clean up stream
+        self._cleanup_stream()
+        
+        # Reset state
+        with self._state_lock:
+            self._buffer.clear()
+            self._position_frames = 0
+            self._paused.clear()
+            self._play_event.clear()
+            self._buffer_ready.clear()
+        
+        # Force garbage collection for memory cleanup
+        gc.collect()
 
-        self.stop_event.set() # Signal threads to stop
-        self.paused.set()     # Ensure it's paused if not already
+    def _cleanup_stream(self):
+        """Clean up audio stream resources"""
+        self._play_event.clear()
+        if self._stream:
+            try:
+                if self._stream.active:
+                    self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                ll.error(f"Error cleaning up stream: {e}")
+            finally:
+                self._stream = None
 
-        # Give threads a chance to finish cleanly
-        if self._playback_thread and self._playback_thread.is_alive():
-            self._playback_thread.join(timeout=1.0) # Give it a bit more time
-
-        # Reader thread is joined by playback thread's finally block, but for safety:
-        if self._reader_thread and self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=0.5)
-
-        self.buffer.clear()
-        self.position_frames = 0
-        self.paused.clear() # Clear for next playback session
-        self.play_event.clear() # Clear play event
-
-    def set_movement(self, active: bool = None, do_sleep: bool = True):
-        """ Set the movement active state.
-        If `active` is None, it defaults to False.
-        If `do_sleep` is True, it will sleep for a short duration to allow the state to propagate.
-        If `do_sleep` is False, it will not sleep, allowing immediate state change.
-        This method is thread-safe and can be called from any thread.
-        """
-        if active is not None:
-            self.stop_active = active
-        else:
-            self.stop_active = self.stop_active # Default to False if None
+    def _set_movement_state(self, active: bool, do_sleep: bool = True):
+        """Thread-safe movement state management"""
+        with self._movement_lock:
+            self._movement_active = active
         if do_sleep:
-            sleep(0.1)
+            sleep(0.05)  # Reduced sleep time
+
+    def _reset_movement_state(self):
+        """Reset movement state in a separate thread"""
+        Thread(target=self._set_movement_state, args=(False,), daemon=True).start()
 
     def pause(self):
-        if not self.paused.is_set():
-            self.paused.set()
-            # self.play_event.clear() # Don't clear play_event, stream is still running, just outputting silence
+        """Pause playback"""
+        if not self._paused.is_set():
+            self._paused.set()
 
     def unpause(self):
-        if self.paused.is_set():
-            self.paused.clear()
-            # self.play_event.set() # Don't set, it should already be set if stream is active
+        """Resume playback"""
+        if self._paused.is_set():
+            self._paused.clear()
 
-    def set_pos(self, seconds):
-        if self.filepath:
-            is_paused = self.paused.is_set()
-            # Restart the session from the new position
-            self._start_playback_session(self.filepath, start_pos=seconds, play_immediately=not is_paused)
+    def set_pos(self, seconds: float):
+        """Seek to specific position"""
+        if self._filepath:
+            is_paused = self._paused.is_set()
+            self._start_playback_session(self._filepath, start_pos=seconds, play_immediately=not is_paused)
         else:
-            print("Cannot set position: no file loaded.")
+            ll.warn("Cannot set position: no file loaded.")
 
-    def get_pos(self):
-        return self.position_frames / self.samplerate if self.samplerate else 0
+    def get_pos(self) -> float:
+        """Get current playback position in seconds"""
+        return self._position_frames / self.samplerate if self.samplerate else 0.0
 
-    def get_duration(self):
-        return self.duration
+    def get_duration(self) -> float:
+        """Get total duration in seconds"""
+        return self._duration
 
-    def set_volume(self, volume):
-        self.volume = max(0.0, min(1.0, float(volume)))
+    def set_volume(self, volume: float):
+        """Set playback volume (0.0 to 1.0)"""
+        self._volume = max(0.0, min(1.0, float(volume)))
 
-    def get_busy(self):
-        # A bit more robust check: stream active AND not explicitly stopped/paused
-        return self.play_event.is_set() and not self.paused.is_set() and self.stream and self.stream.active
+    @property
+    def volume(self) -> float:
+        """Get current volume"""
+        return self._volume
 
-    def get_movement(self):
-        # Check if the stream is active and not paused
-        return self.stop_active and self.play_event.is_set() and self.stream and self.stream.active
+    @property
+    def filepath(self) -> Optional[str]:
+        """Get current file path"""
+        return self._filepath
+
+    def get_busy(self) -> bool:
+        """Check if audio is currently playing"""
+        return (self._play_event.is_set() and 
+                not self._paused.is_set() and 
+                self._stream and 
+                self._stream.active)
+
+    def get_movement(self) -> bool:
+        """Check if movement/seeking is active"""
+        with self._movement_lock:
+            return (self._movement_active and 
+                    self._play_event.is_set() and 
+                    self._stream and 
+                    self._stream.active)
+
+    def get_performance_stats(self) -> dict:
+        """Get performance statistics"""
+        avg_load_time = (sum(self._performance_stats['load_times']) / 
+                        len(self._performance_stats['load_times']) 
+                        if self._performance_stats['load_times'] else 0.0)
+        
+        return {
+            'average_load_time': avg_load_time,
+            'buffer_underruns': self._performance_stats['underruns'],
+            'buffer_fill_ratio': self._buffer.fill_ratio,
+            'cache_size': self._get_audio_info.cache_info().currsize
+        }
 
     def load_static_sound(self, audio_data=None, samplerate=None, channels=None):
-        return AudioSound(audio_data=audio_data, samplerate=samplerate, channels=channels)
-    
-    def __repr__(self):
-        return f"<AudioPlayerRoot: {self.filepath or 'No file loaded'}, Volume: {self.volume}, Position: {self.get_pos():.2f}s, Duration: {self.get_duration():.2f}s>"
+        """Load static sound effect"""
+        return OptimizedAudioSound(audio_data=audio_data, samplerate=samplerate, channels=channels)
 
-class AudioSound:
-    def __init__(self, filepath=None, audio_data=None, samplerate=None, channels=None):
+    def __repr__(self) -> str:
+        return (f"<OptimizedAudioPlayer: {self._filepath or 'No file loaded'}, "
+                f"Volume: {self._volume:.2f}, Position: {self.get_pos():.2f}s, "
+                f"Duration: {self.get_duration():.2f}s>")
+
+    def __del__(self):
+        """Cleanup on destruction"""
+        try:
+            self.stop()
+        except:
+            pass
+
+
+class OptimizedAudioSound:
+    """Optimized static sound player with efficient memory usage"""
+    
+    def __init__(self, filepath: Optional[str] = None, audio_data=None, 
+                 samplerate: Optional[int] = None, channels: Optional[int] = None):
         self._audio_data = None
         self._samplerate = 0
         self._channels = 0
@@ -394,7 +657,7 @@ class AudioSound:
         self._loop_count = 0
         self._stop_event = Event()
         self._playback_thread = None
-
+        
         if filepath:
             self._load_from_file(filepath)
         elif audio_data is not None and samplerate is not None and channels is not None:
@@ -402,115 +665,149 @@ class AudioSound:
         else:
             raise ValueError("Either 'filepath' or ('audio_data', 'samplerate', 'channels') must be provided.")
 
-    def _load_from_file(self, filepath):
+    def _load_from_file(self, filepath: str):
+        """Load audio from file with error handling"""
         try:
-            data, samplerate = sf.read(filepath, dtype='float32')
+            data, samplerate = sf.read(filepath, dtype=np.float32)
             if data.ndim == 1:
                 data = data[:, np.newaxis]
             self._audio_data = data
             self._samplerate = samplerate
             self._channels = data.shape[1]
-            print(f"AudioSound: Loaded '{filepath}' ({self._audio_data.shape[0]} frames, {self._channels} channels, {self._samplerate} Hz)")
+            ll.debug(f"Loaded '{filepath}' "
+                       f"({self._audio_data.shape[0]} frames, {self._channels} channels, {self._samplerate} Hz)")
         except Exception as e:
-            print(f"AudioSound: Error loading audio from file '{filepath}': {e}")
-            self._audio_data = np.array([])
+            ll.error(f"Error loading audio from file '{filepath}': {e}")
+            self._audio_data = np.array([], dtype=np.float32)
 
-    def _load_from_array(self, audio_data, samplerate, channels):
+    def _load_from_array(self, audio_data: np.ndarray, samplerate: int, channels: int):
+        """Load audio from numpy array"""
         if audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
         if audio_data.ndim == 1:
             audio_data = audio_data[:, np.newaxis]
             if channels != 1:
-                print(f"Warning: 1D audio_data provided, but channels={channels}.")
+                ll.debug(f"1D audio_data provided, but channels={channels}. Using channels=1.")
                 channels = 1
         self._audio_data = audio_data
         self._samplerate = samplerate
         self._channels = channels
-        print(f"AudioSound: Loaded raw audio data ({self._audio_data.shape[0]} frames, {self._channels} channels, {self._samplerate} Hz)")
+        ll.debug(f"Loaded raw audio data "
+                   f"({self._audio_data.shape[0]} frames, {self._channels} channels, {self._samplerate} Hz)")
 
-    def play(self, loops=0, volume=None):
+    def play(self, loops: int = 0, volume: Optional[float] = None):
+        """Play the sound with optional looping"""
         if self._audio_data.size == 0:
-            print("AudioSound: Cannot play, no audio data loaded.")
+            ll.warn("Cannot play, no audio data loaded.")
             return
+            
         self.stop()
         self._loop_count = loops
         self._current_frame = 0
         self._stop_event.clear()
+        
         if volume is not None:
             self._volume = max(0.0, min(1.0, volume))
+            
         try:
             self._stream = sd.OutputStream(
                 samplerate=self._samplerate,
                 channels=self._channels,
-                callback=self._playback_callback,
-                finished_callback=lambda: self._stop_event.set() # Sets stop event when stream finishes naturally
+                callback=self._playback_callback_optimized,
+                finished_callback=lambda: self._stop_event.set(),
+                dtype=np.float32
             )
             self._stream.start()
-            print(f"AudioSound: Playing (loops={loops}, volume={self._volume})")
-            # Start a separate thread to wait for the stop event
-            self._playback_thread = Thread(target=self._monitor_playback_finished, daemon=True)
+            ll.print(f"Playing (loops={loops}, volume={self._volume})")
+            
+            self._playback_thread = Thread(target=self._monitor_playback, daemon=True)
             self._playback_thread.start()
+            
         except Exception as e:
-            print(f"AudioSound: Error starting playback: {e}")
-            self._stop_event.set() # Ensure stop event is set on error
+            ll.error(f"Error starting playback: {e}")
+            self._stop_event.set()
 
-    def _playback_callback(self, outdata, frames, time_info, status):
+    def _playback_callback_optimized(self, outdata: np.ndarray, frames: int, time_info, status):
+        """Optimized playback callback"""
         if status:
-            pass
+            ll.debug(f"OptimizedAudioSound stream status: {status}")
+            
         if self._stop_event.is_set():
-            outdata.fill(0)
-            raise sd.CallbackStop # Stop the stream if stop event is set
-
+            outdata.fill(0.0)
+            raise sd.CallbackStop
+        
         frames_to_fill = frames
-        current_fill_pos = 0
-
+        output_pos = 0
+        
         while frames_to_fill > 0:
-            remaining_audio_data = self._audio_data.shape[0] - self._current_frame
-            chunk_to_copy_len = min(frames_to_fill, remaining_audio_data)
-
-            if chunk_to_copy_len > 0:
-                outdata[current_fill_pos : current_fill_pos + chunk_to_copy_len] = \
-                    self._audio_data[self._current_frame : self._current_frame + chunk_to_copy_len] * self._volume
-                self._current_frame += chunk_to_copy_len
-                current_fill_pos += chunk_to_copy_len
-                frames_to_fill -= chunk_to_copy_len
-            else: # No more data in current loop iteration
-                if self._loop_count == -1: # Infinite loop
-                    self._current_frame = 0 # Rewind
-                    continue # Try filling again from beginning
+            remaining_frames = self._audio_data.shape[0] - self._current_frame
+            chunk_frames = min(frames_to_fill, remaining_frames)
+            
+            if chunk_frames > 0:
+                # Use efficient array operations
+                chunk_data = self._audio_data[self._current_frame:self._current_frame + chunk_frames]
+                np.multiply(chunk_data, self._volume, out=outdata[output_pos:output_pos + chunk_frames])
+                
+                self._current_frame += chunk_frames
+                output_pos += chunk_frames
+                frames_to_fill -= chunk_frames
+            else:
+                # Handle looping
+                if self._loop_count == -1:  # Infinite loop
+                    self._current_frame = 0
+                    continue
                 elif self._loop_count > 0:
                     self._loop_count -= 1
-                    self._current_frame = 0 # Rewind
-                    continue # Try filling again from beginning
-                else: # No more loops, end of audio
-                    outdata[current_fill_pos:frames] = 0 # Fill remaining with silence
-                    self._stop_event.set() # Signal playback finished
-                    raise sd.CallbackStop # Stop the SoundDevice stream
+                    self._current_frame = 0
+                    continue
+                else:
+                    # End of playback
+                    outdata[output_pos:].fill(0.0)
+                    self._stop_event.set()
+                    raise sd.CallbackStop
 
-    def _monitor_playback_finished(self):
-        # This thread just waits for the stop event
+    def _monitor_playback(self):
+        """Monitor playback completion"""
         self._stop_event.wait()
         if self._stream and self._stream.active:
             try:
                 self._stream.stop()
                 self._stream.close()
                 self._stream = None
-                print("AudioSound: Playback finished/stopped.")
+                ll.print("Playback finished/stopped.")
             except Exception as e:
-                print(f"AudioSound: Error stopping/closing stream in monitor: {e}")
+                ll.error(f"Error stopping stream: {e}")
 
     def stop(self):
+        """Stop playback"""
         if self._stop_event.is_set():
             return
-        self._stop_event.set() # Signal the callback and monitor thread to stop
+            
+        self._stop_event.set()
         if self._playback_thread and self._playback_thread.is_alive():
-            self._playback_thread.join(timeout=0.5) # Give monitor thread a chance to clean up
+            self._playback_thread.join(timeout=0.5)
 
-    def set_volume(self, volume):
+    def set_volume(self, volume: float):
+        """Set playback volume"""
         self._volume = max(0.0, min(1.0, volume))
 
-    def get_busy(self):
-        # A bit more robust check for AudioSound as well
-        return self._stream and self._stream.active and not self._stop_event.is_set()
+    def get_busy(self) -> bool:
+        """Check if sound is currently playing"""
+        return (self._stream and 
+                self._stream.active and 
+                not self._stop_event.is_set())
 
+    def __repr__(self) -> str:
+        return (f"<OptimizedAudioSound: {self._audio_data.shape if self._audio_data is not None else 'No data'}, "
+                f"Volume: {self._volume:.2f}>")
+
+    def __del__(self):
+        """Cleanup on destruction"""
+        try:
+            self.stop()
+        except:
+            pass
+
+
+# Create optimized global instance
 AudioPlayer = AudioPlayerRoot()

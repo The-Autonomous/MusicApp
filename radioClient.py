@@ -4,6 +4,17 @@ import numpy as np
 from mutagen.mp3 import MP3
 from time import time, sleep, monotonic
 
+try:
+    from log_loader import log_loader
+except:
+    from .log_loader import log_loader
+
+### Logging Handler ###
+
+ll = log_loader("Radio Client")
+
+#######################
+
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
         self.client_data = {'radio_text': '', 'radio_duration': [0, 0]} # [current position, total song duration]
@@ -40,7 +51,7 @@ class RadioClient:
         
         # Ensure AudioPlayer is initialized and has samplerate and channels
         if not self.AudioPlayer or not self.AudioPlayer.samplerate:
-            print("⚠️ AudioPlayer not initialized or samplerate not set. Cannot generate static.")
+            ll.error("⚠️ AudioPlayer not initialized or samplerate not set. Cannot generate static.")
             return np.array([]) # Return empty array if player not ready
 
         samplerate = self.AudioPlayer.samplerate
@@ -56,7 +67,7 @@ class RadioClient:
         else:
             static_data = np.random.uniform(-0.5, 0.5, size=(num_frames, channels)).astype(np.float32)
         
-        print(f"Generated {duration_ms}ms of static noise (Samplerate: {samplerate}, Channels: {channels}, Frames: {num_frames}).")
+        ll.debug(f"Generated {duration_ms}ms of static noise (Samplerate: {samplerate}, Channels: {channels}, Frames: {num_frames}).")
         return self.AudioPlayer.load_static_sound(static_data, self.AudioPlayer.samplerate, self.AudioPlayer.channels)
 
     def listenTo(self, ip, lyric_callback = None):
@@ -67,7 +78,7 @@ class RadioClient:
                 try:
                     os.remove(self.temp_song_file)
                 except OSError as e:
-                    print(f"Warning: Could not remove old temp file: {e}")
+                    ll.warn(f"Warning: Could not remove old temp file: {e}")
 
             self._running.set()
             Thread(target=self._update_loop, daemon=True).start()
@@ -145,20 +156,20 @@ class RadioClient:
                     # Re-sync logic: If client position deviates too much from server position
                     # This is crucial for handling repeated songs or desynchronization
                     if abs(client_pos - server_pos) > self.sync_threshold:
-                         print(f"🔄 Resyncing due to drift: Client {client_pos:.2f}s, Server {server_pos:.2f}s (Diff: {abs(client_pos - server_pos):.2f}s)")
-                         self._resync_playback(data['url'], server_pos, data['buffered_at'])
-                         # After resync, client_pos will be updated on the next loop iteration based on new _current_song_start_time
-                         # For this iteration, we can just use the server_pos or re-calculate.
-                         client_pos = server_pos # Assume instant sync for this display update
+                        ll.debug(f"🔄 Resyncing due to drift: Client {client_pos:.2f}s, Server {server_pos:.2f}s (Diff: {abs(client_pos - server_pos):.2f}s)")
+                        self._resync_playback(data['url'], server_pos, data['buffered_at'])
+                        # After resync, client_pos will be updated on the next loop iteration based on new _current_song_start_time
+                        # For this iteration, we can just use the server_pos or re-calculate.
+                        client_pos = server_pos # Assume instant sync for this display update
 
                 self.client_data['radio_duration'][0] = client_pos # Update displayed current position
 
             except requests.exceptions.ConnectionError:
-                print(f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s...")
+                ll.warn(f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s...")
                 self.AudioPlayer.pause()
                 self._paused = True # Mark as paused if connection is lost
             except Exception as e:
-                print(f"Error in _update_loop: {e}")
+                ll.error(f"Error in _update_loop: {e}")
                 # Consider adding self.stopListening() if critical error
 
             sleep(self.update_interval)
@@ -183,14 +194,14 @@ class RadioClient:
                 return {'title': title, 'location': location, 'duration': duration, 'url': url, 'buffered_at': buffered_at}
             return None
         except requests.exceptions.Timeout:
-            print("Request to radio host timed out.")
+            ll.warn("Request to radio host timed out.")
             return None
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            ll.error(f"Error fetching data: {e}")
             return None
 
     def _handle_song_change(self, data): # sync_start_offset removed from parameters
-        print(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
+        ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
         # Update client data
         self.client_data['radio_text'] = data['title']
         self.client_data['radio_duration'][1] = data['duration'] # Update total duration
@@ -201,13 +212,13 @@ class RadioClient:
     def _download_and_play(self, url, server_location, buffered_at): # Removed sync_start_offset from parameters
         try:
             if not self._running.is_set():
-                print("Download cancelled: client stopped.")
+                ll.warn("Download cancelled: client stopped.")
                 return
 
             if self.AudioPlayer.get_busy() or self._paused:
                 self.AudioPlayer.stop() # Stop current playback if any
 
-            print(f"Downloading: {url}")
+            ll.debug(f"Downloading: {url}")
             # Ensure the directory exists
             os.makedirs(os.path.dirname(self.temp_song_file), exist_ok=True)
             
@@ -218,10 +229,10 @@ class RadioClient:
             with open(self.temp_song_file, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if not self._running.is_set(): # Allow stopping during download
-                        print("Download interrupted: client stopped.")
+                        ll.warn("Download interrupted: client stopped.")
                         return
                     f.write(chunk)
-            print(f"Download complete: {self.temp_song_file}")
+            ll.debug(f"Download complete: {self.temp_song_file}")
 
             # Play the song, get the actual monotonic start time from AudioPlayer
             # AudioPlayer.radio_play is expected to start playback from server_location
@@ -230,7 +241,7 @@ class RadioClient:
             self._total_pause_duration_for_current_song = 0.0 # Reset for new song
             self._pause_start_time = None # Ensure it's reset
             self._paused = False # Ensure client is not marked as paused when new song starts playing
-            print(f"Started playback from server position: {server_location:.2f}s at client monotonic time: {self._current_song_start_time:.2f}s")
+            ll.debug(f"Started playback from server position: {server_location:.2f}s at client monotonic time: {self._current_song_start_time:.2f}s")
 
             # Callback for lyrics if available
             if self._callback and url.startswith("http"):
@@ -238,14 +249,14 @@ class RadioClient:
                     song_length = MP3(self.temp_song_file).info.length
                     self._callback(url, song_length)
                 except Exception as e:
-                    print(f"Warning: Could not get song length for lyrics callback: {e}")
+                    ll.warn(f"Warning: Could not get song length for lyrics callback: {e}")
         except Exception as e:
-            print(f"Error in _download_and_play: {e}")
+            ll.error(f"Error in _download_and_play: {e}")
             self.stopListening() # Stop if download/play fails
 
     # New method to handle resync, similar to _download_and_play but ensures current temp file is used
     def _resync_playback(self, url, new_server_location, buffered_at):
-        print(f"Resyncing playback to {new_server_location:.2f}s using existing temp file.")
+        ll.debug(f"Resyncing playback to {new_server_location:.2f}s using existing temp file.")
         # Ensure AudioPlayer stops and is ready for a new play command
         self.AudioPlayer.stop() # This should cleanly stop the current audio stream
 
