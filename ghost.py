@@ -219,7 +219,7 @@ class GhostOverlay:
         self.clickThroughState = True # True To Click Through False To Click On
         
         ### Music Player ###
-        self.main_font = font.Font(family='Times', size=14, weight='bold')
+        self.main_font = font.Font(family='Helvetica', size=14, weight='bold')
         self.time_font = font.Font(family='Times', size=12)
         self.lyrics_font = font.Font(family='Helvetica', size=11, weight='normal', slant='italic') # Adjusted lyrics font
         self.overlay_text_padding = 15

@@ -32,10 +32,6 @@ class Administrator:
             # parent just exits; elevated child runs hidden
             if w_o_admin:
                 self.elevate_w_o_admin()
-            else:
-                while True:
-                    print("Dormanting for next music player termination...")
-                    time.sleep(60)
             
     def elevate_w_o_admin(self):
         params = [sys.executable.replace("python.exe", "pythonw.exe")] + sys.argv
