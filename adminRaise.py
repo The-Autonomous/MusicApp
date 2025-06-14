@@ -32,6 +32,8 @@ class Administrator:
             # parent just exits; elevated child runs hidden
             if w_o_admin:
                 self.elevate_w_o_admin()
+            else:
+                sys.exit(0)
             
     def elevate_w_o_admin(self):
         params = [sys.executable.replace("python.exe", "pythonw.exe")] + sys.argv
