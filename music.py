@@ -176,7 +176,7 @@ class MusicPlayer:
         eq = getattr(AudioPlayer, "eq", None)
         return eq.get_gains() if eq else {}
 
-    def enable_echo(delay_ms: int = 350,
+    def enable_echo(self, delay_ms: int = 350,
                     feedback: float = 0.35,
                     wet: float = 0.5):
         """
@@ -185,14 +185,14 @@ class MusicPlayer:
         AudioPlayer.enable_echo(delay_ms, feedback, wet)
 
 
-    def disable_echo():
+    def disable_echo(self):
         """
         Thin shim → AudioPlayer.disable_echo()
         """
         AudioPlayer.disable_echo()
 
 
-    def set_echo(delay_ms: int | None = None,
+    def set_echo(self, delay_ms: int | None = None,
                 feedback: float | None = None,
                 wet: float | None = None):
         """
