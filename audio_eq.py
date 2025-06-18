@@ -220,3 +220,87 @@ class EQKnob(tk.Canvas):
     @staticmethod
     def _gain_to_angle(gain):
         return gain / 12 * 150             # inverse map
+
+class PercentKnob(tk.Canvas):
+    """
+    Rotary dB-gain knob for a graphic EQ.
+    • Range  : -100 % ↔ +100 %
+    • Dead-zone of 60° at the bottom so the pointer never flips
+    • Callback fires at most every 10 ms while dragging,
+      plus once on mouse-up (exact final value).
+    """
+
+    def __init__(self, master, radius=32, callback=None,
+                 init_gain=0.0, bg=None, **kw):
+        size = radius * 2 + 4
+        super().__init__(master,
+                         width=size, height=size,
+                         bg=bg or master.cget("bg"),
+                         highlightthickness=0, **kw)
+
+        # public
+        self.cb   = callback                 # func(gain_db)
+        self.gain = max(-12, min(12, init_gain))
+
+        # private
+        self.r        = radius
+        self._last_cb = 0.0                  # last callback time stamp
+
+        # bind events
+        self.bind("<Button-1>",        self._start)
+        self.bind("<B1-Motion>",       self._drag)
+        self.bind("<ButtonRelease-1>", self._commit)
+
+        self._draw()
+
+    # ───────────────────────────────────────────────────────── internal ──
+    def _draw(self):
+        """Redraw the knob face + pointer + text."""
+        self.delete("all")
+
+        # shell
+        self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
+                         fill="#222", outline="#555", width=2)
+
+        # pointer
+        ang = radians(self._gain_to_angle(self.gain))
+        x   = self.r + 2 + self.r*0.75 * sin(ang)
+        y   = self.r + 2 - self.r*0.75 * cos(ang)
+        self.create_line(self.r+2, self.r+2, x, y,
+                         fill="#2ee", width=3, capstyle="round")
+
+        # gain text
+        self.create_text(self.r+2, self.r+2,
+                         text=f"{self.gain:+.1f}%",
+                         fill="#ddd", font=("Segoe UI", 8, "bold"))
+
+    def _start(self, ev):
+        self._drag(ev)                      # update instantly
+
+    def _drag(self, ev):
+        dx = ev.x - (self.r+2)
+        dy = (self.r+2) - ev.y
+        angle = degrees(atan2(dx, dy))      # 0° at top
+        angle_clamped = max(-150, min(150, angle))    # dead-zone 60°
+        self.gain = round(self._angle_to_gain(angle_clamped), 1)
+        self._draw()
+
+        # throttle to 10 ms
+        now = time()
+        if self.cb and (now - self._last_cb) >= 0.010:
+            self._last_cb = now
+            self.cb(self.gain)
+
+    def _commit(self, _ev):
+        """Always push final value at mouse-up."""
+        if self.cb:
+            self.cb(self.gain)
+
+    # helpers
+    @staticmethod
+    def _angle_to_gain(angle):
+        return angle / 150 * 12            # ±150° → ±12 dB
+
+    @staticmethod
+    def _gain_to_angle(gain):
+        return gain / 12 * 150             # inverse map

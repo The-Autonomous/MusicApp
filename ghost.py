@@ -12,12 +12,12 @@ try:
     from log_loader import log_loader
     from adminRaise import Administrator
     from playerUtils import TitleCleaner
-    from audio_eq import EQKnob
+    from audio_eq import EQKnob, PercentKnob
 except ImportError:
     from .log_loader import log_loader
     from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
-    from .audio_eq import EQKnob
+    from .audio_eq import EQKnob, PercentKnob
     
 # Windows API constants
 WS_EX_LAYERED = 0x00080000
@@ -871,56 +871,66 @@ class GhostOverlay:
 
     def show_eq_overlay(self):
         """
-        Pops a draggable EQ/echo overlay with rotary knobs.
+        Pops a draggable EQ + Echo overlay with rotary knobs.
         Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer.
         """
 
-        # ── raise if already open ───────────────────────────────────────────
+        # ── raise if already open ─────────────────────────────────────────┐
         if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
             self._eq_window.deiconify(); self._eq_window.lift(); return
-
-        # ── find audio engine ───────────────────────────────────────────────
+        # ── locate audio engine ───────────────────────────────────────────┘
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
             ll.warn("No MusicPlayer with EQ/echo found."); return
 
-        bands = sorted(_eq_target.get_bands().keys())  # [31,62,…16000]
+        bands = sorted(_eq_target.get_bands().keys())          # [31‥16 000]
 
-        # ── theme / style  (one-off per Tk instance) ────────────────────────
+        # ── theme / style (run once per Tk) ───────────────────────────────
         style = ttk.Style(self.root)
-        if "Neon.TFrame" not in style.layout("TFrame"):
-            style.configure("Neon.TFrame", background="#1d1f24")
-            style.configure("Neon.TLabel",
-                            background="#1d1f24", foreground="#d0d0d0",
-                            font=("Segoe UI", 9))
+        style.theme_use("clam")                                # unlock colours
+
+        if "Neon.Option" not in style.element_names():
             style.configure("Neon.TMenubutton",
                             background="#272b33", foreground="#ddd",
-                            relief="flat")
+                            relief="flat", padding=(6,2,10,2))
             style.map("Neon.TMenubutton",
-                    background=[("active", "#313640")])
+                    background=[("active", "#313640")],
+                    arrowcolor=[("active", "#00e8d0"), ("!disabled", "#aaa")])
+            style.configure("Neon.TFrame",  background="#1d1f24")
+            style.configure("Neon.TLabel",  background="#1d1f24",
+                            foreground="#d0d0d0", font=("Segoe UI", 9))
+            style.configure("Neon.Option",  background="#272b33",
+                            foreground="#ddd", relief="flat",
+                            padding=(6, 2, 10, 2))             # extra pad right
+            style.map("Neon.Option",
+                    background=[("active", "#313640")],
+                    arrowcolor=[("active", "#00e8d0"),
+                                ("!disabled", "#aaa")])
+            style.configure("Neon.Menu",   background="#272b33",
+                            foreground="#ddd", relief="flat")
 
-        # ── window shell ────────────────────────────────────────────────────
+        # ── window shell ──────────────────────────────────────────────────
         win = tk.Toplevel(self.root);  win.overrideredirect(True)
         win.attributes("-topmost", True);  win.configure(bg="#000")
         self._eq_window = win
 
         screen_w = self.root.winfo_screenwidth()
-        per_knob = 64                            # px
-        max_cols = max(1, (screen_w-100)//per_knob)
-        rows     = ceil(len(bands)/max_cols)
+        per_knob = 64
+        max_cols = max(1, (screen_w - 100)//per_knob)
+        rows     = ceil(len(bands) / max_cols)
 
         w = min(len(bands), max_cols)*per_knob + 40
-        h = rows*110 + 170                       # rows + echo + presets
+        h = rows*110 + 190                      # rows + echo + presets
         x = self.window.winfo_x() + self.window.winfo_width()//2 - w//2
         y = self.window.winfo_y() + self.window.winfo_height() + 20
         win.geometry(f"{w}x{h}+{x}+{y}")
 
-        card = RoundedCanvas(win, width=w, height=h,
-                            bg="#000", highlightthickness=0)
+        card = tk.Canvas(win, width=w, height=h,
+                        bg="#1d1f24", highlightthickness=0)
         card.pack(fill="both", expand=True)
-        card.create_rounded_box(4, 4, w-4, h-4, radius=18, color="#1d1f24")
+        card.create_rectangle(0, 0, w, h, fill="#1d1f24", outline="")
 
-        # ── EQ knobs ────────────────────────────────────────────────────────
+        # ── EQ knob grid ──────────────────────────────────────────────────
         grid = ttk.Frame(card, style="Neon.TFrame")
         grid.place(relx=0.5, rely=0.05, anchor="n")
 
@@ -940,7 +950,7 @@ class GhostOverlay:
             ttk.Label(col, text=lbl, style="Neon.TLabel").pack()
 
             init = _eq_target.get_band(freq, 0.0)
-            if isinstance(init, tuple): init = init[0]
+            if isinstance(init, tuple):  init = init[0]
 
             knob = EQKnob(col, radius=26, init_gain=init,
                         callback=lambda g, f=freq: knob_changed(g, f),
@@ -948,78 +958,84 @@ class GhostOverlay:
             knob.pack()
             knobs[freq] = knob
 
-        # ── preset menu ─────────────────────────────────────────────────────
+        # ── presets ───────────────────────────────────────────────────────
+        def db(*vals): return list(vals)
         presets = {
-            "Flat":        [0]*len(bands),
-            "Bass Boost":  [6 if f<250 else -2 for f in bands],
-            "Treble Boost":[-2 if f<4000 else 6 for f in bands],
-            "V-Shape":     [4 if f in (bands[0],bands[-1]) else -3 for f in bands],
+            "Flat":            db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            "Warm & Smooth":   db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
+            "Vocal Clarity":   db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
+            "Night Mode":      db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
+            "Hip-Hop Punch":   db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
+            "Rock Arena":      db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
+            "EDM Festival":    db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
+            "Lo-fi Chill":     db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
+            "Vintage Tape":    db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
+            "Loudness :D":     db( 6, 4, 2, 0,-1,-2, 1, 3, 4, 6),
+            "Every Other":     db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
         }
-        presets["Custom"] = None   # placeholder, filled on-the-fly
+        presets["Custom"] = None
 
         def apply_preset(name):
-            if name=="Custom": return
-            for f,g in zip(bands, presets[name]):
+            if name == "Custom": return
+            for f, g in zip(bands, presets[name]):
                 knobs[f].gain = g; knobs[f]._draw()
                 _eq_target.set_band(f, g)
             preset_var.set(name)
 
-        menu = ttk.OptionMenu(card, preset_var, "Flat",
-                            *presets.keys(), command=apply_preset,
-                            style="Neon.TMenubutton")
-        menu.place(relx=0.5, rely=0.72, anchor="n")
+        preset_menu = ttk.OptionMenu(card, preset_var, "Flat",
+                                    *presets.keys(),
+                                    command=apply_preset,
+                                    style="Neon.TMenubutton")
+        preset_menu["menu"].config(tearoff=0, bg="#272b33", fg="#ddd",
+                                activebackground="#313640",
+                                activeforeground="#00e8d0",
+                                relief="flat")
 
-        # ── echo section ────────────────────────────────────────────────────
+        card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
+
+        # ── Echo section ──────────────────────────────────────────────────
         echo_frame = ttk.Frame(card, style="Neon.TFrame")
-        echo_frame.place(relx=0.5, rely=0.55, anchor="n")
+        echo_frame.place(relx=0.5, rely=0.63, anchor="n")
 
         delay_init = getattr(_eq_target, "echo", None)
-        if delay_init:
-            delay_ms = delay_init.delay_ms
-            wet_pct  = int(delay_init.wet*100)
-        else:
-            delay_ms = 0; wet_pct = 0
+        delay_ms   = delay_init.delay_ms if delay_init else 0
+        wet_pct    = int(delay_init.wet*100) if delay_init else 0
 
         ttk.Label(echo_frame, text="Echo", style="Neon.TLabel",
                 font=("Segoe UI", 9, "bold")).grid(row=0, column=0,
                                                     columnspan=2, pady=(0,3))
 
         def update_echo(_=None):
-            nonlocal delay_ms, wet_pct
-            if delay_ms==0 and wet_pct==0:
+            if delay_ms == 0 and wet_pct == 0:
                 _eq_target.disable_echo()
+            elif not getattr(_eq_target, "echo", None):
+                _eq_target.enable_echo(delay_ms=delay_ms,
+                                    wet=wet_pct/100, feedback=0.35)
             else:
-                if not getattr(_eq_target, "echo", None):
-                    _eq_target.enable_echo(delay_ms=delay_ms,
-                                        wet=wet_pct/100, feedback=0.35)
-                else:
-                    _eq_target.set_echo(delay_ms=delay_ms, wet=wet_pct/100)
+                _eq_target.set_echo(delay_ms=delay_ms, wet=wet_pct/100)
 
-        # delay knob (0–1000 ms)
-        delay_knob = EQKnob(echo_frame, radius=20, bg="#1d1f24",
-                            init_gain=delay_ms,
-                            callback=lambda v: (globals().update(delay_ms=int(max(0,v))),
-                                                update_echo())[1])
+        delay_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
+                                init_gain=delay_ms,
+                                callback=lambda v: (globals().update(delay_ms=int(max(0,v))),
+                                                    update_echo())[1])
         ttk.Label(echo_frame, text="Delay ms", style="Neon.TLabel"
                 ).grid(row=1, column=0, padx=6, pady=2)
         delay_knob.grid(row=2, column=0, padx=6)
 
-        # wet knob (0–100 %)
-        wet_knob = EQKnob(echo_frame, radius=20, bg="#1d1f24",
-                        init_gain=wet_pct,
-                        callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
-                                            update_echo())[1])
+        wet_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
+                            init_gain=wet_pct,
+                            callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
+                                                update_echo())[1])
         ttk.Label(echo_frame, text="Wet %", style="Neon.TLabel"
                 ).grid(row=1, column=1, padx=6, pady=2)
         wet_knob.grid(row=2, column=1, padx=6)
 
-        # ── drag & close ────────────────────────────────────────────────────
-        def start_mv(e):  win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
-        def do_mv(e):     win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
-        card.bind("<Button-3>", start_mv);  card.bind("<B3-Motion>", do_mv)
+        # ── drag + close ──────────────────────────────────────────────────
+        def start_mv(e): win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
+        def do_mv(e):    win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
+        card.bind("<Button-3>", start_mv); card.bind("<B3-Motion>", do_mv)
         win.bind("<Escape>", lambda *_: win.destroy())
-        win.bind("<FocusOut>", lambda e: win.destroy()
-                if not win.focus_displayof() else None)
+        win.bind("<FocusOut>", lambda e: win.destroy() if not win.focus_displayof() else None)
 
 #####################################################################################################
 

@@ -176,59 +176,44 @@ class MusicPlayer:
         eq = getattr(AudioPlayer, "eq", None)
         return eq.get_gains() if eq else {}
 
-
-    def enable_echo(self, delay_ms: int = 350,
+    def enable_echo(delay_ms: int = 350,
                     feedback: float = 0.35,
                     wet: float = 0.5):
         """
-        Create an AudioEcho line on the global AudioPlayer if it isn’t active.
+        Thin shim → AudioPlayer.enable_echo()
         """
-        player = globals().get("AudioPlayer")
-        if player and not getattr(player, "echo", None):
-            player.echo = AudioEcho(player.samplerate, player.channels,
-                                    delay_ms, feedback, wet)
+        AudioPlayer.enable_echo(delay_ms, feedback, wet)
 
 
-    def disable_echo(self):
+    def disable_echo():
         """
-        Tear down the echo effect completely.
+        Thin shim → AudioPlayer.disable_echo()
         """
-        player = globals().get("AudioPlayer")
-        if player:
-            player.echo = None
+        AudioPlayer.disable_echo()
 
 
-    def set_echo(self, delay_ms: int | None = None,
+    def set_echo(delay_ms: int | None = None,
                 feedback: float | None = None,
                 wet: float | None = None):
         """
-        Update echo parameters *or* auto-enable/disable based on the values:
-        • If echo already exists ⇒ just tweak its params.
-        • If echo doesn’t exist but delay>0 or wet>0 ⇒ enable it.
-        • If echo exists and delay==0 and wet==0 ⇒ disable it.
+        Delegates to AudioPlayer.set_echo(), but auto-enables or disables
+        the effect when appropriate (delay>0 or wet>0 ⇒ enable, else disable).
         """
-        player = globals().get("AudioPlayer")
-        if not player:
+        # If echo line already exists, just tweak it
+        if getattr(AudioPlayer, "echo", None):
+            AudioPlayer.set_echo(delay_ms, feedback, wet)
+
+            # auto-disable when both delay and wet end up at 0
+            echo = AudioPlayer.echo
+            if echo and echo.delay_ms == 0 and echo.wet == 0:
+                AudioPlayer.disable_echo()
             return
 
-        echo = getattr(player, "echo", None)
-
-        # ── Update existing line ───────────────────────────────────────────
-        if echo:
-            echo.set_params(delay_ms, feedback, wet)
-            # auto-kill if effectively muted
-            d_ms = echo.delay_ms if delay_ms is None else delay_ms
-            w    = echo.wet      if wet      is None else wet
-            if d_ms == 0 and w == 0:
-                player.echo = None
-            return
-
-        # ── Auto-enable when meaningful params arrive ────────────────────
-        should_enable = ((delay_ms or 0) > 0) or ((wet or 0) > 0)
-        if should_enable:
-            self.enable_echo(delay_ms or 350,
-                        feedback if feedback is not None else 0.35,
-                        wet      if wet      is not None else 0.5)
+        # If no echo yet, enable when meaningful params come in
+        if (delay_ms or 0) > 0 or (wet or 0) > 0:
+            AudioPlayer.enable_echo(delay_ms or 350,
+                            feedback if feedback is not None else 0.35,
+                            wet      if wet      is not None else 0.5)
 
 #####################################################################################################
 
