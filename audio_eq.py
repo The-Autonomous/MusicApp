@@ -240,7 +240,7 @@ class PercentKnob(tk.Canvas):
 
         # public
         self.cb   = callback                 # func(gain_db)
-        self.gain = max(-12, min(12, init_gain))
+        self.gain = max(-100, min(100, init_gain))
 
         # private
         self.r        = radius
@@ -299,8 +299,8 @@ class PercentKnob(tk.Canvas):
     # helpers
     @staticmethod
     def _angle_to_gain(angle):
-        return angle / 150 * 12            # ±150° → ±12 dB
+        return angle / 150 * 100            # ±150° → ±12 dB
 
     @staticmethod
     def _gain_to_angle(gain):
-        return gain / 12 * 150             # inverse map
+        return gain / 100 * 150             # inverse map
