@@ -970,7 +970,7 @@ class GhostOverlay:
             "EDM Festival":    db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
             "Lo-fi Chill":     db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
             "Vintage Tape":    db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
-            "Loudness :D":     db( 6, 4, 2, 0,-1,-2, 1, 3, 4, 6),
+            "Loudness :D":     db(12,12,12,12,12,12,12,12,12,12),
             "Every Other":     db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
         }
         presets["Custom"] = None
