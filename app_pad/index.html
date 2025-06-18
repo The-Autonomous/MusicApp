@@ -283,15 +283,17 @@
                     <input type="checkbox" id="play-on-device" style="transform:scale(1.3);" />
                     <label for="play-on-device" style="font-size:1.1rem;cursor:pointer;">Play On Device</label>
                 </div>
+                <div style="margin-top:3rem;display:flex;align-items:center;gap:0.7rem;">
+                    <button type="button" onclick="window.location.href = window.location.href + '/logs';" id="viewLogsButton" style="flex:1; background:#6c757d; color:var(--text,#fff); border:none; border-radius:8px; padding:0.7rem 0;">View Logs</button>
+                </div>
             </form>
         </div>
 
         <div id="audio-status" style="position: fixed; bottom: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 8px 12px; border-radius: 5px; font-size: 0.9em; z-index: 2001; max-width: 90vw; word-wrap: break-word;">Audio: Initializing...</div>
 
-        <button id="openSettingsButton" onclick="openSettings()" style="position: fixed; top: 20px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">⚙️ Theme Settings</button>
+        <button id="openSettingsButton" onclick="openSettings()" style="position: fixed; top: 20px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">⚙️ Settings</button>
 
-        <button id="openSearchButton" style="position: fixed; top: 70px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">🔍 Search Song</button>
-
+        <button id="openSearchButton" style="position: fixed; top: 70px; right: 30px; z-index: 1000; background: var(--accent, #1abc9c); color: var(--text, #fff); border: none; outline: none; border-radius: 50px; padding: 0.7rem 1.2rem; font-size: 1.1rem; cursor: pointer;">🔍 Search</button>
 
         <div id="searchModal" class="modal hidden">
             <div class="modal-content">
@@ -302,7 +304,6 @@
                 <ul id="searchResults"></ul>
             </div>
         </div>
-
 
         <script>
             // --- Theme Management ---

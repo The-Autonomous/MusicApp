@@ -71,7 +71,6 @@ class DownloadPopup:
                 value = max(0, min(1, progress_value.value)) * 100
                 progress['value'] = value
                 percent_label.config(text=f"{int(value)}%")
-                ll.debug(f"Displaying Download At {value}")
                 root.after(100, update_progress)
 
         update_progress()

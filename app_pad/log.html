@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Log Viewer</title>
+        <style>
+            :root {
+                --background: linear-gradient(135deg, #16181f 0%, #232738 100%);
+                --panel-bg: rgba(32, 36, 53, 0.92);
+                --panel-shadow: 0 8px 40px 0 rgba(0,0,0,0.35);
+                --header-bg: rgba(23, 26, 39, 0.98);
+                --border: #262f4d;
+                --accent: #0fdac7;
+                --accent-hover: #20e3b2;
+                --success: #22c67b;
+                --error: #ff5d5d;
+                --text-main: #e8f1fa;
+                --text-secondary: #b7c4d8;
+                --text-muted: #7886a3;
+                --log-bg-even: rgba(255,255,255,0.01);
+                --log-bg-hover: rgba(15,218,199,0.07);
+                --log-border: #24304b;
+                --font-family: 'JetBrains Mono', 'Fira Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
+            }
+
+            body {
+                font-family: var(--font-family);
+                background: var(--background);
+                color: var(--text-main);
+                min-height: 100vh;
+                margin: 0;
+                padding: 0;
+                letter-spacing: 0.02em;
+            }
+
+            .header.mini {
+                min-height: 40px !important;
+                padding: 0.4rem 1rem !important;
+                width: 320px;
+                margin: 0 auto;
+                border-radius: 18px;
+                box-shadow: 0 2px 12px rgba(0,0,0,0.19);
+                opacity: 0.96;
+                justify-content: center;
+                align-items: center;
+                gap: 1rem;
+                display: flex;
+                flex-direction: row;
+                transition: 0.35s cubic-bezier(0.7, 0, 0.3, 1);
+            }
+            
+            .header.mini .controls,
+            .header.mini .pagination,
+            .header.mini .status {
+                font-size: 0.93rem;
+                gap: 0.3em;
+                padding: 0;
+                margin: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .header {
+                top: 0;
+                left: 50%;
+                transform: translateX(-50%);
+                padding: 2rem 2.5rem 1.5rem 2.5rem;
+                position: fixed;
+                background: var(--header-bg);
+                padding: 2rem 2.5rem 1.5rem 2.5rem;
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-end;
+                flex-wrap: wrap;
+                gap: 2rem;
+                box-shadow: var(--panel-shadow);
+                transition: 0.35s cubic-bezier(0.7, 0, 0.3, 1);
+                border-radius: 0px 0px 25px 25px;
+            }
+
+            .header .controls,
+            .header .pagination,
+            .header .status {
+                transition: 0.35s cubic-bezier(0.7, 0, 0.3, 1);
+            }
+
+            .controls {
+                display: flex;
+                gap: 1.5rem;
+                align-items: flex-end;
+                flex-wrap: wrap;
+            }
+
+            .control-group {
+                display: flex;
+                flex-direction: column;
+                gap: 0.3rem;
+            }
+
+            label {
+                color: var(--text-muted);
+                font-size: 1rem;
+                font-weight: 500;
+                margin-bottom: 0.15rem;
+            }
+
+            input, button {
+                padding: 0.7rem 1.1rem;
+                border: 1px solid var(--border);
+                background: var(--panel-bg);
+                color: var(--text-main);
+                border-radius: 7px;
+                font-family: inherit;
+                font-size: 1.09rem;
+                margin-top: 0.2rem;
+            }
+
+            input:focus, button:focus {
+                outline: 2px solid var(--accent);
+                border-color: var(--accent);
+                background: #212946;
+            }
+
+            button {
+                cursor: pointer;
+                transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+                background: var(--accent);
+                color: #162036;
+                font-weight: bold;
+                letter-spacing: 0.03em;
+                box-shadow: 0 1px 8px 0 rgba(15,218,199,0.06);
+            }
+
+            button:hover:not(:disabled) {
+                background: var(--accent-hover);
+                color: #101921;
+                box-shadow: 0 2px 18px 0 rgba(15,218,199,0.18);
+            }
+
+            button:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+                background: var(--panel-bg);
+                color: var(--text-muted);
+            }
+
+            .log-container {
+                flex: 1;
+                padding: 2rem 3vw;
+                overflow-y: auto;
+                background: transparent;
+                min-height: 0;
+                margin-top: 0.5rem;
+                margin-bottom: 1.5rem;
+            }
+
+            .log-line {
+                padding: 1rem 2rem;
+                margin-bottom: 0.5rem;
+                border-radius: 9px;
+                border: 1px solid var(--log-border);
+                background: var(--panel-bg);
+                font-size: 1.15rem;
+                line-height: 1.6;
+                color: var(--text-main);
+                transition: background 0.16s, box-shadow 0.16s;
+                box-shadow: 0 1px 7px rgba(0,0,0,0.12);
+            }
+
+            .log-line:nth-child(even) {
+                background: var(--log-bg-even);
+            }
+
+            .log-line:hover {
+                background: var(--log-bg-hover);
+                box-shadow: 0 2px 18px 0 rgba(15,218,199,0.12);
+            }
+
+            .loading {
+                text-align: center;
+                padding: 3.5rem;
+                color: var(--accent);
+                font-size: 1.2rem;
+                font-style: italic;
+                letter-spacing: 0.08em;
+            }
+
+            .error {
+                background: rgba(244, 67, 54, 0.13);
+                color: var(--error);
+                padding: 1.5rem;
+                margin: 2rem 1rem;
+                border-radius: 7px;
+                border-left: 6px solid var(--error);
+                font-size: 1.07rem;
+                font-weight: 600;
+                letter-spacing: 0.03em;
+            }
+
+            .status {
+                display: flex;
+                gap: 2.5rem;
+                align-items: center;
+                font-size: 1.07rem;
+                color: var(--text-muted);
+                padding: 1rem 2.5rem;
+            }
+
+            .pagination {
+                display: flex;
+                gap: 0.7rem;
+                align-items: center;
+            }
+
+            .auto-refresh {
+                color: var(--accent);
+            }
+
+            /* Log level & ANSI color classes (unchanged, but can be modernized as needed) */
+            .log-info { color: #33ffb2; }
+            .log-warn { color: #ffe780; }
+            .log-error { color: #ff5d5d; }
+            .log-debug { color: #88aaff; }
+            .ansi-black { color: #23272e; }
+            .ansi-red { color: #ff5d5d; }
+            .ansi-green { color: #22c67b; }
+            .ansi-yellow { color: #ffe780; }
+            .ansi-blue { color: #44b7ff; }
+            .ansi-magenta { color: #a57ff7; }
+            .ansi-cyan { color: #0fdac7; }
+            .ansi-white { color: #f3f6fc; }
+            .ansi-bright-black { color: #888fa3; }
+            .ansi-bright-red { color: #ff8888; }
+            .ansi-bright-green { color: #80ffb7; }
+            .ansi-bright-yellow { color: #fffab7; }
+            .ansi-bright-blue { color: #88c2ff; }
+            .ansi-bright-magenta { color: #b7a3ff; }
+            .ansi-bright-cyan { color: #80fff2; }
+            .ansi-bright-white { color: #f8faff; }
+            .ansi-bold { font-weight: bold; }
+            .ansi-dim { opacity: 0.7; }
+            .ansi-italic { font-style: italic; }
+            .ansi-underline { text-decoration: underline; }
+
+            #closeBtn {
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                width: 2em;
+                height: 2em;
+                background: var(--accent);
+                color: var(--text-main);
+                border: none;
+                border-radius: 0.5em;
+                font-size: 1.2em;
+                line-height: 1;
+                cursor: pointer;
+                z-index: 1000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            #closeBtn:hover {
+                background: var(--accent-hover);
+            }
+
+            @media (max-width: 900px) {
+                .log-container {
+                    padding: 1rem 1vw;
+                }
+                .header {
+                    padding: 1.2rem 1vw 1rem 1vw;
+                }
+                .status {
+                    padding: 1rem 1vw;
+                }
+            }
+
+        </style>
+    </head>
+    <body>
+        <button id="closeBtn" title="Close Logs">×</button>
+
+        <div class="header">
+            <div class="controls">
+                <div class="pagination">
+                    <button id="prevBtn">← Prev</button>
+                    <button id="nextBtn">Next →</button>
+                </div>
+                <button id="refreshBtn">🔄 Refresh</button>
+                <button id="autoRefreshBtn">⏱️ Auto</button>
+            </div>
+        </div>
+
+        <div class="status">
+            <span id="statusText">Ready</span>
+            <span id="lineCount">Lines: 0</span>
+        </div>
+
+        <div class="log-container" id="logContainer">
+            <div class="loading">Click refresh to load logs...</div>
+        </div>
+
+        <script>
+            class AnsiParser {
+                constructor() {
+                    // ANSI escape sequence regex
+                    this.ansiRegex = /\x1b\[([0-9;]*)m/g;
+                    
+                    // Color mapping
+                    this.colorMap = {
+                        '30': 'ansi-black',
+                        '31': 'ansi-red',
+                        '32': 'ansi-green',
+                        '33': 'ansi-yellow',
+                        '34': 'ansi-blue',
+                        '35': 'ansi-magenta',
+                        '36': 'ansi-cyan',
+                        '37': 'ansi-white',
+                        '90': 'ansi-bright-black',
+                        '91': 'ansi-bright-red',
+                        '92': 'ansi-bright-green',
+                        '93': 'ansi-bright-yellow',
+                        '94': 'ansi-bright-blue',
+                        '95': 'ansi-bright-magenta',
+                        '96': 'ansi-bright-cyan',
+                        '97': 'ansi-bright-white'
+                    };
+                    
+                    this.styleMap = {
+                        '1': 'ansi-bold',
+                        '2': 'ansi-dim',
+                        '3': 'ansi-italic',
+                        '4': 'ansi-underline'
+                    };
+                }
+                
+                parseAnsiToHtml(text) {
+                    if (!text) return '';
+                    
+                    let result = '';
+                    let lastIndex = 0;
+                    let currentClasses = new Set();
+                    let openSpan = false;
+                    
+                    const matches = [...text.matchAll(this.ansiRegex)];
+                    
+                    for (const match of matches) {
+                        // Add text before this escape sequence
+                        if (match.index > lastIndex) {
+                            const textSegment = text.slice(lastIndex, match.index);
+                            if (textSegment) {
+                                if (currentClasses.size > 0 && !openSpan) {
+                                    result += `<span class="${Array.from(currentClasses).join(' ')}">`;
+                                    openSpan = true;
+                                }
+                                result += this.escapeHtml(textSegment);
+                            }
+                        }
+                        
+                        // Process the escape sequence
+                        const codes = match[1].split(';').filter(code => code !== '');
+                        
+                        for (const code of codes) {
+                            if (code === '0' || code === '') {
+                                // Reset
+                                if (openSpan) {
+                                    result += '</span>';
+                                    openSpan = false;
+                                }
+                                currentClasses.clear();
+                            } else if (this.colorMap[code]) {
+                                // Remove any existing color classes
+                                for (const cls of currentClasses) {
+                                    if (cls.startsWith('ansi-') && !cls.includes('bold') && !cls.includes('dim') && !cls.includes('italic') && !cls.includes('underline')) {
+                                        currentClasses.delete(cls);
+                                    }
+                                }
+                                currentClasses.add(this.colorMap[code]);
+                            } else if (this.styleMap[code]) {
+                                currentClasses.add(this.styleMap[code]);
+                            } else if (code.startsWith('38;2;')) {
+                                // RGB color support
+                                const rgbMatch = match[1].match(/38;2;(\d+);(\d+);(\d+)/);
+                                if (rgbMatch) {
+                                    if (openSpan) {
+                                        result += '</span>';
+                                    }
+                                    result += `<span style="color: rgb(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]})">`;
+                                    openSpan = true;
+                                    currentClasses.clear(); // Clear classes when using inline style
+                                }
+                            }
+                        }
+                        
+                        lastIndex = match.index + match[0].length;
+                    }
+                    
+                    // Add remaining text
+                    if (lastIndex < text.length) {
+                        const textSegment = text.slice(lastIndex);
+                        if (textSegment) {
+                            if (currentClasses.size > 0 && !openSpan) {
+                                result += `<span class="${Array.from(currentClasses).join(' ')}">`;
+                                openSpan = true;
+                            }
+                            result += this.escapeHtml(textSegment);
+                        }
+                    }
+                    
+                    // Close any open spans
+                    if (openSpan) {
+                        result += '</span>';
+                    }
+                    
+                    return result;
+                }
+                
+                escapeHtml(text) {
+                    const div = document.createElement('div');
+                    div.textContent = text;
+                    return div.innerHTML;
+                }
+            }
+
+            class LogViewer {
+                constructor() {
+                    this.startLine = 0;
+                    this.count = 100;
+                    this.hasMore = true;
+                    this.loading = false;
+                    this.autoRefresh = false;
+                    this.autoRefreshInterval = null;
+                    this.ansiParser = new AnsiParser();
+
+                    this.initElements();
+                    this.bindEvents();
+                    this.loadLogs();
+                }
+
+                initElements() {
+                    this.prevBtn = document.getElementById('prevBtn');
+                    this.nextBtn = document.getElementById('nextBtn');
+                    this.refreshBtn = document.getElementById('refreshBtn');
+                    this.autoRefreshBtn = document.getElementById('autoRefreshBtn');
+                    this.logContainer = document.getElementById('logContainer');
+                    this.statusText = document.getElementById('statusText');
+                    this.lineCount = document.getElementById('lineCount');
+                }
+
+                bindEvents() {
+                    this.refreshBtn.addEventListener('click', () => this.loadLogs());
+                    this.prevBtn.addEventListener('click', () => this.prevPage());
+                    this.nextBtn.addEventListener('click', () => this.nextPage());
+                    this.autoRefreshBtn.addEventListener('click', () => this.toggleAutoRefresh());
+
+                    // Keyboard shortcuts
+                    document.addEventListener('keydown', (e) => {
+                        if (e.ctrlKey || e.metaKey) {
+                            switch(e.key) {
+                                case 'r':
+                                    e.preventDefault();
+                                    this.loadLogs();
+                                    break;
+                            }
+                        }
+                        if (!e.ctrlKey && !e.metaKey) {
+                            switch(e.key) {
+                                case 'ArrowLeft':
+                                    if (!this.isInputFocused()) {
+                                        e.preventDefault();
+                                        this.prevPage();
+                                    }
+                                    break;
+                                case 'ArrowRight':
+                                    if (!this.isInputFocused()) {
+                                        e.preventDefault();
+                                        this.nextPage();
+                                    }
+                                    break;
+                            }
+                        }
+                    });
+                }
+
+                async loadLogs() {
+                    if (this.loading) return;
+                    this.loading = true;
+                    this.updateStatus('Loading logs...');
+                    this.updateButtons();
+
+                    fetch(`/logs/api?start=${this.startLine}&count=${this.count}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.error) {
+                                this.renderError(data.error);
+                                return;
+                            }
+                            this.hasMore = data.has_more;
+                            this.renderLogs(data.lines);
+                        })
+                        .catch(err => {
+                            this.renderError(err.message);
+                        })
+                        .finally(() => {
+                            this.loading = false;
+                            this.updateButtons();
+                        });
+                }
+
+                renderLogs(lines) {
+                    if (!lines || lines.length === 0) {
+                        this.updateStatus('No logs discovered...');
+                        this.logContainer.innerHTML = '<div class="loading">No logs found</div>';
+                        return;
+                    }
+                    this.logContainer.innerHTML = lines.map(line => `<div class="log-line">${this.ansiParser.parseAnsiToHtml(line)}</div>`).join('');
+                    this.updateStatus('Success')
+                }
+
+                renderError(message) {
+                    this.logContainer.innerHTML = `<div class="error">${this.ansiParser.escapeHtml(message)}</div>`;
+                    this.lineCount.textContent = 'Lines: 0';
+                    if (!this.autoRefresh) {this.updateStatus('Auto-Refreshing...'); setTimeout(() => loadLogs(), 1000);}
+                }
+
+                nextPage() {
+                    if (this.hasMore) {
+                        this.startLine += this.count;
+                        this.loadLogs();
+                    }
+                }
+
+                prevPage() {
+                    this.startLine = Math.max(0, this.startLine - this.count);
+                    this.loadLogs();
+                }
+
+                toggleAutoRefresh() {
+                    this.autoRefresh = !this.autoRefresh;
+                    
+                    if (this.autoRefresh) {
+                        this.autoRefreshBtn.textContent = '⏹️ Stop';
+                        this.autoRefreshBtn.classList.add('auto-refresh');
+                        this.autoRefreshInterval = setInterval(() => this.loadLogs(), 15000);
+                        this.loadLogs(); // Load immediately
+                    } else {
+                        this.autoRefreshBtn.textContent = '⏱️ Auto';
+                        this.autoRefreshBtn.classList.remove('auto-refresh');
+                        if (this.autoRefreshInterval) {
+                            clearInterval(this.autoRefreshInterval);
+                            this.autoRefreshInterval = null;
+                        }
+                    }
+                }
+
+                updateStatus(message) {
+                    this.statusText.textContent = message;
+                }
+
+                updateButtons() {
+                    this.refreshBtn.disabled = this.loading;
+                    this.prevBtn.disabled = this.loading || this.startLine === 0;
+                    this.nextBtn.disabled = this.loading || !this.hasMore;
+                    this.lineCount.textContent = `Lines: ${this.startLine} - ${this.startLine + this.count}`;
+                }
+                
+                isInputFocused() {
+                    return document.activeElement.tagName === 'INPUT';
+                }
+            }
+
+            // Initialize the log viewer when the page loads
+            document.addEventListener('DOMContentLoaded', () => {
+                const header = document.querySelector('.header');
+                let isMini = false;
+                let lastScroll = 0;
+
+                document.addEventListener('scroll', function() {
+                    const scrollTop = window.scrollY || document.documentElement.scrollTop;
+                    // Trigger mini header if scrolled past 80px
+                    if (scrollTop > 80 && !isMini) {
+                        header.classList.add('mini');
+                        isMini = true;
+                    } else if (scrollTop <= 80 && isMini) {
+                        header.classList.remove('mini');
+                        isMini = false;
+                    }
+                }, { passive: true });
+
+                new LogViewer();
+            });
+
+            document.getElementById('closeBtn').addEventListener('click', () => {
+                window.location.href = window.location.href.replace('/logs', '');
+            });
+        </script>
+    </body>
+</html>

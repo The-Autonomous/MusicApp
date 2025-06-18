@@ -12,14 +12,15 @@ if not DevMode:
 
 try:
     from autoUpdate import AutoUpdater
-    from log_loader import log_loader
+    from log_loader import log_loader, OutputRedirector
 except:
     from .autoUpdate import AutoUpdater
-    from .log_loader import log_loader
+    from .log_loader import log_loader, OutputRedirector
 
 ### Logging Handler ###
 
 ll = log_loader("Main", debugging = False)
+OutputRedirector(enable_dual_logging = DevMode)
 ll.debug(f"Executing With Developer Mode: {DevMode}")
 
 #######################

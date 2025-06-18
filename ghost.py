@@ -1,10 +1,10 @@
 import ctypes, psutil, os
 import tkinter as tk
-from tkinter import font, messagebox
+from tkinter import font, messagebox, Scale, ttk
 from threading import Lock, RLock, Thread
 from pynput import keyboard, mouse
 from time import monotonic, sleep
-from math import cos, pi, sin
+from math import cos, pi, sin, ceil
 from typing import Iterator
 import json
 
@@ -12,10 +12,12 @@ try:
     from log_loader import log_loader
     from adminRaise import Administrator
     from playerUtils import TitleCleaner
+    from audio_eq import EQKnob
 except ImportError:
     from .log_loader import log_loader
     from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
+    from .audio_eq import EQKnob
     
 # Windows API constants
 WS_EX_LAYERED = 0x00080000
@@ -160,6 +162,7 @@ class MouseTracker:
     def __init__(self):
         self.user32 = ctypes.windll.user32
         self._right_button_pressed = False
+        self.window_proportions = [0, 0, 0, 0]
         
         # Initialize the pynput listener.
         # Crucially, set daemon=True. This means the thread will automatically exit
@@ -171,11 +174,24 @@ class MouseTracker:
         )
         self.listener.start() # Start the listener thread immediately upon initialization
 
+    def calc_pos(self, x, y, a_x, a_y, b_x, b_y):
+        """Returns True if point (x,y) is inside the rectangle defined by:
+        - a: top-left corner (a_x, a_y)
+        - b: bottom-right corner (b_x, b_y)
+        """
+        return (a_x <= x <= b_x) and (a_y <= y <= b_y)
+
+    def update_window(self, *values):
+        self.window_proportions = [*values]
+
     def _on_click(self, x, y, button, pressed):
         """Internal callback for pynput mouse events."""
-        if button == mouse.Button.right:
-            self._right_button_pressed = pressed
-        ll.debug(f"pynput: {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
+        try:
+            if button == mouse.Button.right and self.calc_pos(x, y, *self.window_proportions):
+                self._right_button_pressed = pressed
+            ll.debug(f"Mouse tracker got key {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
+        except Exception as E:
+            ll.warn(f"Mouse tracker met unexpected error {E}")
 
     def mouse_pos(self):
         """Returns [x, y] of mouse cursor (works in fullscreen games).
@@ -244,6 +260,10 @@ class GhostOverlay:
         self.last_toggle_state = False # Last toggle state for debouncing
         self.readyForKeys = False # True If Keys Are Ready False If Not
         self.playerState = True # True If Player Is On False If Player Is Off
+        
+        ### Overlay Dragging Variables ###
+        self._win_start_size_width = 0
+        self._win_start_size_height = 0
 
         ### Key Listening ###
         self.is_listening_for_modification = False
@@ -347,9 +367,16 @@ class GhostOverlay:
             },
             {
                 'id': 'show_search',
-                'required': ['alt', '\\'],  # or whatever key combo you prefer
+                'required': ['alt', '\\'],
                 'action': self.show_search_overlay,
                 'hint': "Search Songs",
+                'modifiable': True
+            },
+            {
+                'id': 'show_eq_menu',
+                'required': ['right alt', '\\'],
+                'action': self.show_eq_overlay,
+                'hint': "EQ Menu",
                 'modifiable': True
             },
             {
@@ -842,7 +869,163 @@ class GhostOverlay:
 
 #####################################################################################################
 
+    def show_eq_overlay(self):
+        """
+        Pops a draggable EQ/echo overlay with rotary knobs.
+        Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer.
+        """
+
+        # ── raise if already open ───────────────────────────────────────────
+        if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
+            self._eq_window.deiconify(); self._eq_window.lift(); return
+
+        # ── find audio engine ───────────────────────────────────────────────
+        _eq_target = getattr(self, "MusicPlayer", None)
+        if _eq_target is None:
+            ll.warn("No MusicPlayer with EQ/echo found."); return
+
+        bands = sorted(_eq_target.get_bands().keys())  # [31,62,…16000]
+
+        # ── theme / style  (one-off per Tk instance) ────────────────────────
+        style = ttk.Style(self.root)
+        if "Neon.TFrame" not in style.layout("TFrame"):
+            style.configure("Neon.TFrame", background="#1d1f24")
+            style.configure("Neon.TLabel",
+                            background="#1d1f24", foreground="#d0d0d0",
+                            font=("Segoe UI", 9))
+            style.configure("Neon.TMenubutton",
+                            background="#272b33", foreground="#ddd",
+                            relief="flat")
+            style.map("Neon.TMenubutton",
+                    background=[("active", "#313640")])
+
+        # ── window shell ────────────────────────────────────────────────────
+        win = tk.Toplevel(self.root);  win.overrideredirect(True)
+        win.attributes("-topmost", True);  win.configure(bg="#000")
+        self._eq_window = win
+
+        screen_w = self.root.winfo_screenwidth()
+        per_knob = 64                            # px
+        max_cols = max(1, (screen_w-100)//per_knob)
+        rows     = ceil(len(bands)/max_cols)
+
+        w = min(len(bands), max_cols)*per_knob + 40
+        h = rows*110 + 170                       # rows + echo + presets
+        x = self.window.winfo_x() + self.window.winfo_width()//2 - w//2
+        y = self.window.winfo_y() + self.window.winfo_height() + 20
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        card = RoundedCanvas(win, width=w, height=h,
+                            bg="#000", highlightthickness=0)
+        card.pack(fill="both", expand=True)
+        card.create_rounded_box(4, 4, w-4, h-4, radius=18, color="#1d1f24")
+
+        # ── EQ knobs ────────────────────────────────────────────────────────
+        grid = ttk.Frame(card, style="Neon.TFrame")
+        grid.place(relx=0.5, rely=0.05, anchor="n")
+
+        knobs      = {}
+        preset_var = tk.StringVar(value="Flat")
+
+        def knob_changed(gain, freq):
+            _eq_target.set_band(freq, gain)
+            if preset_var.get() != "Custom":
+                preset_var.set("Custom")
+
+        for i, freq in enumerate(bands):
+            col = ttk.Frame(grid, style="Neon.TFrame")
+            col.grid(row=i//max_cols, column=i%max_cols, padx=6, pady=2)
+
+            lbl = f"{freq//1000}k" if freq >= 1000 else str(freq)
+            ttk.Label(col, text=lbl, style="Neon.TLabel").pack()
+
+            init = _eq_target.get_band(freq, 0.0)
+            if isinstance(init, tuple): init = init[0]
+
+            knob = EQKnob(col, radius=26, init_gain=init,
+                        callback=lambda g, f=freq: knob_changed(g, f),
+                        bg="#1d1f24")
+            knob.pack()
+            knobs[freq] = knob
+
+        # ── preset menu ─────────────────────────────────────────────────────
+        presets = {
+            "Flat":        [0]*len(bands),
+            "Bass Boost":  [6 if f<250 else -2 for f in bands],
+            "Treble Boost":[-2 if f<4000 else 6 for f in bands],
+            "V-Shape":     [4 if f in (bands[0],bands[-1]) else -3 for f in bands],
+        }
+        presets["Custom"] = None   # placeholder, filled on-the-fly
+
+        def apply_preset(name):
+            if name=="Custom": return
+            for f,g in zip(bands, presets[name]):
+                knobs[f].gain = g; knobs[f]._draw()
+                _eq_target.set_band(f, g)
+            preset_var.set(name)
+
+        menu = ttk.OptionMenu(card, preset_var, "Flat",
+                            *presets.keys(), command=apply_preset,
+                            style="Neon.TMenubutton")
+        menu.place(relx=0.5, rely=0.72, anchor="n")
+
+        # ── echo section ────────────────────────────────────────────────────
+        echo_frame = ttk.Frame(card, style="Neon.TFrame")
+        echo_frame.place(relx=0.5, rely=0.55, anchor="n")
+
+        delay_init = getattr(_eq_target, "echo", None)
+        if delay_init:
+            delay_ms = delay_init.delay_ms
+            wet_pct  = int(delay_init.wet*100)
+        else:
+            delay_ms = 0; wet_pct = 0
+
+        ttk.Label(echo_frame, text="Echo", style="Neon.TLabel",
+                font=("Segoe UI", 9, "bold")).grid(row=0, column=0,
+                                                    columnspan=2, pady=(0,3))
+
+        def update_echo(_=None):
+            nonlocal delay_ms, wet_pct
+            if delay_ms==0 and wet_pct==0:
+                _eq_target.disable_echo()
+            else:
+                if not getattr(_eq_target, "echo", None):
+                    _eq_target.enable_echo(delay_ms=delay_ms,
+                                        wet=wet_pct/100, feedback=0.35)
+                else:
+                    _eq_target.set_echo(delay_ms=delay_ms, wet=wet_pct/100)
+
+        # delay knob (0–1000 ms)
+        delay_knob = EQKnob(echo_frame, radius=20, bg="#1d1f24",
+                            init_gain=delay_ms,
+                            callback=lambda v: (globals().update(delay_ms=int(max(0,v))),
+                                                update_echo())[1])
+        ttk.Label(echo_frame, text="Delay ms", style="Neon.TLabel"
+                ).grid(row=1, column=0, padx=6, pady=2)
+        delay_knob.grid(row=2, column=0, padx=6)
+
+        # wet knob (0–100 %)
+        wet_knob = EQKnob(echo_frame, radius=20, bg="#1d1f24",
+                        init_gain=wet_pct,
+                        callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
+                                            update_echo())[1])
+        ttk.Label(echo_frame, text="Wet %", style="Neon.TLabel"
+                ).grid(row=1, column=1, padx=6, pady=2)
+        wet_knob.grid(row=2, column=1, padx=6)
+
+        # ── drag & close ────────────────────────────────────────────────────
+        def start_mv(e):  win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
+        def do_mv(e):     win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
+        card.bind("<Button-3>", start_mv);  card.bind("<B3-Motion>", do_mv)
+        win.bind("<Escape>", lambda *_: win.destroy())
+        win.bind("<FocusOut>", lambda e: win.destroy()
+                if not win.focus_displayof() else None)
+
+#####################################################################################################
+
     def show_search_overlay(self):
+        if self.display_radio: return
+        
         # Close existing search overlay if open
         self.show_key_hints(force_state=False)  # Close key hints if open
         
@@ -1134,7 +1317,7 @@ class GhostOverlay:
 #####################################################################################################
 
     def _wireless_trigger_pause(self):
-        if self.display_radio:
+        if not self.display_radio:
             self._trigger_pause()
         else:
             self._trigger_radio_toggle()
@@ -1246,13 +1429,6 @@ class GhostOverlay:
 
 #####################################################################################################
 
-    def calc_pos(self, x, y, a_x, a_y, b_x, b_y):
-        """Returns True if point (x,y) is inside the rectangle defined by:
-        - a: top-left corner (a_x, a_y)
-        - b: bottom-right corner (b_x, b_y)
-        """
-        return (a_x <= x <= b_x) and (a_y <= y <= b_y)
-
     def toggle_overlay_clickthrough(self, mode: bool):
         """Toggle Whether The Mouse Ignores The Display Or Not
         - True: Disable Mouse Clicking Of The Overlay
@@ -1274,44 +1450,40 @@ class GhostOverlay:
         if not self.window or not self.window.winfo_exists():
             return
         if self.mouseEvents.is_right_mouse_down():
-            # Get current mouse position
+            ## Get current mouse position
+            ## Get window geometry (x, y, width, height)
+            ##  Calculate rectangle bounds:
+            ##  a = top-left (window_x, window_y)
+            ##  b = bottom-right (window_x + width, window_y + height)
+            #a_x, a_y = window_x, window_y
+            #b_x, b_y = window_x + window_width, window_y + window_height
+            ## Check if mouse is inside window
+            #if self.calc_pos(*currentPosition, a_x, a_y, b_x, b_y):
             currentPosition = self.mouseEvents.mouse_pos()
-            # Get window geometry (x, y, width, height)
-            window_x = self.window.winfo_x()
-            window_y = self.window.winfo_y()
-            window_width = self.window.winfo_width()
-            window_height = self.window.winfo_height()
-            #  Calculate rectangle bounds:
-            #  a = top-left (window_x, window_y)
-            #  b = bottom-right (window_x + width, window_y + height)
-            a_x, a_y = window_x, window_y
-            b_x, b_y = window_x + window_width, window_y + window_height
-            # Check if mouse is inside window
-            if self.calc_pos(*currentPosition, a_x, a_y, b_x, b_y):
-                self.clickThroughState = False
-                self.toggle_overlay_clickthrough(self.clickThroughState)
-                if not self._overlay_dragging and self._overlay_start_move:
-                    self._drag_start_x = currentPosition[0]
-                    self._drag_start_y = currentPosition[1]
-                    self._overlay_dragging = True
-                    self._win_start_x = self.window.winfo_x()
-                    self._win_start_y = self.window.winfo_y()
+            self.clickThroughState = False
+            self.toggle_overlay_clickthrough(self.clickThroughState)
+            if not self._overlay_dragging and self._overlay_start_move:
+                self._drag_start_x = currentPosition[0]
+                self._drag_start_y = currentPosition[1]
+                self._overlay_dragging = True
+                self._win_start_x = self.window.winfo_x()
+                self._win_start_y = self.window.winfo_y()
+                
+                if self.window and self.window.winfo_exists():
+                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) # Get the actual window handle
+                    # Try to bring the window to the foreground and activate it
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    ctypes.windll.user32.SetActiveWindow(hwnd)
+                    ctypes.windll.user32.SetFocus(hwnd) # Explicitly set focus
+                    ctypes.windll.user32.BringWindowToTop(hwnd) # Ensure it's on top of other windows
                     
-                    if self.window and self.window.winfo_exists():
-                        hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) # Get the actual window handle
-                        # Try to bring the window to the foreground and activate it
-                        ctypes.windll.user32.SetForegroundWindow(hwnd)
-                        ctypes.windll.user32.SetActiveWindow(hwnd)
-                        ctypes.windll.user32.SetFocus(hwnd) # Explicitly set focus
-                        ctypes.windll.user32.BringWindowToTop(hwnd) # Ensure it's on top of other windows
-                        
-                        # Just incase that didn't work force right click and left click twice to simulate the window to foreground over context windows
-                        mouse_controller = mouse.Controller()
-                        mouse_controller.press(mouse.Button.right)
-                        mouse_controller.release(mouse.Button.right)
-                        mouse_controller.press(mouse.Button.left)
-                        mouse_controller.release(mouse.Button.left)
-                        mouse_controller.press(mouse.Button.right)
+                    # Just incase that didn't work force right click and left click twice to simulate the window to foreground over context windows
+                    mouse_controller = mouse.Controller()
+                    mouse_controller.press(mouse.Button.right)
+                    mouse_controller.release(mouse.Button.right)
+                    mouse_controller.press(mouse.Button.left)
+                    mouse_controller.release(mouse.Button.left)
+                    mouse_controller.press(mouse.Button.right)
         else:
             if not self.clickThroughState and not self._overlay_dragging:
                 self.clickThroughState = True
@@ -1485,6 +1657,8 @@ class GhostOverlay:
                 self._overlay_dragging = True
                 self._win_start_x = self.window.winfo_x()
                 self._win_start_y = self.window.winfo_y()
+                self._win_start_size_width = self.window.winfo_width()
+                self._win_start_size_height = self.window.winfo_height()
 
         def do_move(event):
             if self.window: # Ensure window exists
@@ -1494,6 +1668,7 @@ class GhostOverlay:
                 new_y = self._win_start_y + dy
                 self.window.geometry(f"+{new_x}+{new_y}")
                 self._last_position = (new_x, new_y)
+                self.mouseEvents.update_window(new_x, new_y, self._win_start_size_width, self._win_start_size_height)
 
         def do_stop(event):
             self._overlay_dragging = False

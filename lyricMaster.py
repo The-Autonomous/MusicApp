@@ -19,6 +19,7 @@ ll = log_loader("Lyric Master", debugging=False)
 
 ### Data Structures ###
 
+
 @dataclass
 class LyricEntry:
     """Immutable lyric entry with timestamp and text."""
@@ -325,7 +326,7 @@ class OptimizedLyricHandler:
             ll.error(f"Failed to queue request for {artist} - {title}: {e}")
             # Execute callback with empty result to prevent hanging
             try:
-                callback([], song_id)
+                Thread(lambda:callback([], song_id)).start()
             except Exception as callback_error:
                 ll.error(f"Callback error after queue failure: {callback_error}")
     

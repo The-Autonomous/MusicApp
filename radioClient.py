@@ -35,6 +35,10 @@ class RadioClient:
         self._current_song_start_server_pos = 0.0 # The server's position when _current_song_start_time was recorded
         self._total_pause_duration_for_current_song = 0.0 # Accumulated pause time for the current song
         self._pause_start_time = None # Monotonic time when the *current pause* started
+        
+        # FIXED: Add timing synchronization variables
+        self._download_start_time = None  # When we started downloading
+        self._server_time_at_download = None  # Server's buffered_at when we started downloading
 
 
     def generate_static(self, duration_ms: int = 500) -> np.ndarray:
@@ -155,7 +159,7 @@ class RadioClient:
 
                     # Re-sync logic: If client position deviates too much from server position
                     # This is crucial for handling repeated songs or desynchronization
-                    if abs(client_pos - server_pos) > self.sync_threshold:
+                    if abs(client_pos - server_pos) > self.sync_threshold and abs(client_pos - server_pos) <= data['duration'] - self.sync_threshold:
                         ll.debug(f"🔄 Resyncing due to drift: Client {client_pos:.2f}s, Server {server_pos:.2f}s (Diff: {abs(client_pos - server_pos):.2f}s)")
                         self._resync_playback(data['url'], server_pos, data['buffered_at'])
                         # After resync, client_pos will be updated on the next loop iteration based on new _current_song_start_time
@@ -200,16 +204,20 @@ class RadioClient:
             ll.error(f"Error fetching data: {e}")
             return None
 
-    def _handle_song_change(self, data): # sync_start_offset removed from parameters
+    def _handle_song_change(self, data):
         ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
         # Update client data
         self.client_data['radio_text'] = data['title']
         self.client_data['radio_duration'][1] = data['duration'] # Update total duration
 
-        # Download the new song in a separate thread
-        Thread(target=self._download_and_play, args=(data['url'], data['location'], data['buffered_at']), daemon=True).start() # Removed sync_start_offset
+        # FIXED: Record timing when we start the download/play process
+        self._download_start_time = monotonic()
+        self._server_time_at_download = data['buffered_at']
 
-    def _download_and_play(self, url, server_location, buffered_at): # Removed sync_start_offset from parameters
+        # Download the new song in a separate thread
+        Thread(target=self._download_and_play, args=(data['url'], data['location'], data['buffered_at']), daemon=True).start()
+
+    def _download_and_play(self, url, server_location, buffered_at):
         try:
             if not self._running.is_set():
                 ll.warn("Download cancelled: client stopped.")
@@ -234,20 +242,41 @@ class RadioClient:
                     f.write(chunk)
             ll.debug(f"Download complete: {self.temp_song_file}")
 
-            # Play the song, get the actual monotonic start time from AudioPlayer
-            # AudioPlayer.radio_play is expected to start playback from server_location
-            self._current_song_start_time = self.AudioPlayer.radio_play(filepath=self.temp_song_file, start_pos=server_location, buffer_time=buffered_at)
-            self._current_song_start_server_pos = server_location # Record the server's starting point for this song
+            # FIXED: Calculate the correct start position accounting for download time
+            download_completion_time = monotonic()
+            
+            # Calculate how much time has elapsed since we got the server data
+            time_elapsed_during_download = download_completion_time - self._download_start_time
+            
+            # Calculate the corrected start position
+            # The server was at 'server_location' when we got the data
+            # Now we need to add the time that has passed during download
+            corrected_start_pos = server_location + time_elapsed_during_download
+            
+            ll.debug(f"Timing correction: server_pos={server_location:.3f}, "
+                    f"download_time={time_elapsed_during_download:.3f}, "
+                    f"corrected_start_pos={corrected_start_pos:.3f}")
+
+            # Play the song with corrected timing - don't pass buffered_at as buffer_time
+            # since it's from a different time system (server vs client monotonic clocks)
+            self._current_song_start_time = self.AudioPlayer.radio_play(
+                filepath=self.temp_song_file, 
+                start_pos=corrected_start_pos, 
+                buffer_time=None  # FIXED: Don't pass server's buffered_at
+            )
+            
+            self._current_song_start_server_pos = corrected_start_pos # Record the corrected starting point
             self._total_pause_duration_for_current_song = 0.0 # Reset for new song
             self._pause_start_time = None # Ensure it's reset
             self._paused = False # Ensure client is not marked as paused when new song starts playing
-            ll.debug(f"Started playback from server position: {server_location:.2f}s at client monotonic time: {self._current_song_start_time:.2f}s")
+            
+            ll.debug(f"Started playback from corrected position: {corrected_start_pos:.2f}s at client monotonic time: {self._current_song_start_time:.2f}s")
 
             # Callback for lyrics if available
             if self._callback and url.startswith("http"):
                 try:
                     song_length = MP3(self.temp_song_file).info.length
-                    self._callback(url, song_length)
+                    self._callback(url.replace("song", "lyrics"), song_length, f"{self._current_song_start_time}")
                 except Exception as e:
                     ll.warn(f"Warning: Could not get song length for lyrics callback: {e}")
         except Exception as e:
@@ -257,6 +286,15 @@ class RadioClient:
     # New method to handle resync, similar to _download_and_play but ensures current temp file is used
     def _resync_playback(self, url, new_server_location, buffered_at):
         ll.debug(f"Resyncing playback to {new_server_location:.2f}s using existing temp file.")
+        
+        # FIXED: Calculate timing for resync just like in _download_and_play
+        resync_time = monotonic()
+        
+        # Since we're resyncing, we don't have download time, but we need to account 
+        # for any time that may have passed since the server reported this position
+        # For resync, we can assume minimal delay and use the server position directly
+        corrected_resync_pos = new_server_location
+        
         # Ensure AudioPlayer stops and is ready for a new play command
         self.AudioPlayer.stop() # This should cleanly stop the current audio stream
 
@@ -265,6 +303,10 @@ class RadioClient:
         self._pause_start_time = None
         self._paused = False
 
-        # Re-play from the new server location. This will update self._current_song_start_time internally.
-        self._current_song_start_time = self.AudioPlayer.radio_play(filepath=self.temp_song_file, start_pos=new_server_location, buffer_time=buffered_at)
-        self._current_song_start_server_pos = new_server_location
+        # Re-play from the corrected server location - don't pass server's buffered_at
+        self._current_song_start_time = self.AudioPlayer.radio_play(
+            filepath=self.temp_song_file, 
+            start_pos=corrected_resync_pos, 
+            buffer_time=None  # FIXED: Don't pass server's buffered_at
+        )
+        self._current_song_start_server_pos = corrected_resync_pos

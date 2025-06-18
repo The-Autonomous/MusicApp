@@ -1,20 +1,19 @@
-import subprocess
-import json
-import numpy as np
-import sounddevice as sd
-import soundfile as sf
+import subprocess, json, gc, weakref
 from threading import Event, Thread, Lock, RLock
-from collections import deque
+from typing import Optional, Union
 from time import sleep, monotonic
 from functools import lru_cache
-import gc
-import weakref
-from typing import Optional, Union, Tuple
+from collections import deque
+import sounddevice as sd
+import soundfile as sf
+import numpy as np
 
 try:
     from log_loader import log_loader
+    from audio_eq import AudioEQ, AudioEcho
 except:
     from .log_loader import log_loader
+    from .audio_eq import AudioEQ, AudioEcho
 
 ### Logging Handler ###
 
@@ -92,6 +91,8 @@ class AudioPlayerRoot:
         self.channels = 2
         self.chunk_size = 1024  # Optimized chunk size
         self.buffer_size_seconds = buffer_size_seconds
+        self.eq = AudioEQ(self.samplerate, self.channels)
+        self.echo = None  # off by default
         
         # State management
         self._state_lock = RLock()  # Use RLock for nested locking
@@ -145,39 +146,69 @@ class AudioPlayerRoot:
 
     @lru_cache(maxsize=32)
     def _get_audio_info(self, filepath: str) -> dict:
-        """Cached audio info retrieval to avoid repeated ffprobe calls"""
         cmd = [
             'ffprobe', '-v', 'error', '-print_format', 'json',
             '-show_format', '-show_streams', filepath
         ]
-        
+
         try:
             result = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding='utf-8', errors='ignore',
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 startupinfo=self._process_startupinfo,
-                timeout=10  # Add timeout to prevent hanging
+                timeout=10
             )
-            
-            if result.returncode != 0:
-                raise RuntimeError(f"ffprobe error: {result.stderr}")
-                
-            info = json.loads(result.stdout)
-            audio_stream = next((s for s in info['streams'] if s['codec_type'] == 'audio'), None)
-            
-            if audio_stream is None:
-                raise ValueError("No audio stream found in file.")
-                
-            return {
-                'samplerate': int(audio_stream['sample_rate']),
-                'channels': int(audio_stream['channels']),
-                'duration': float(info['format'].get('duration', 0.0))
-            }
-        except subprocess.TimeoutExpired:
-            ll.warn("ffprobe timeout - file may be corrupted or inaccessible")
+
+            if result.returncode == 0:
+                info = json.loads(result.stdout)
+                audio = next((s for s in info['streams']
+                              if s['codec_type'] == 'audio'), None)
+                if audio is None:
+                    ll.error("No audio stream found.")
+                    return
+                return {
+                    'samplerate': int(audio['sample_rate']),
+                    'channels'  : int(audio['channels']),
+                    'duration'  : float(info['format'].get('duration', 0.0))
+                }
+
+            ll.error(f"ffprobe error: {result.stderr}")
+
         except Exception as e:
-            ll.error(f"Error getting audio info for {filepath}: {e}")
+            ll.error(f"ffprobe failed: {e}")
+
+        # ---------- FALLBACK ----------
+        try:
+            with sf.SoundFile(filepath) as f:
+                return {
+                    'samplerate': int(f.samplerate),
+                    'channels'  : int(f.channels),
+                    'duration'  : len(f) / f.samplerate
+                }
+        except Exception as e2:
+            ll.error(f"SoundFile probe failed: {e2}")
+
+        # Last-ditch defaults (keep the app alive)
+        return {'samplerate': 44100, 'channels': 2, 'duration': 0.0}
+
+    def _process(self, chunk):
+        chunk = self.eq.process(chunk)
+        if self.echo:
+            chunk = self.echo.process(chunk)
+        return chunk
+    
+    def enable_echo(self, delay_ms=350, feedback=0.35, wet=0.5):
+        if not self.echo:
+            self.echo = AudioEcho(self.samplerate, self.channels,
+                                  delay_ms, feedback, wet)
+
+    def disable_echo(self):
+        self.echo = None
+
+    def set_echo(self, delay_ms=None, feedback=None, wet=None):
+        if self.echo:
+            self.echo.set_params(delay_ms, feedback, wet)
 
     def load(self, filepath: str) -> bool:
         """Load audio file without starting playback"""
@@ -206,8 +237,8 @@ class AudioPlayerRoot:
             return False
 
     def _start_playback_session(self, filepath: str, start_pos: float, play_immediately: bool, 
-                              buffer_time: Optional[float] = None, radio_mode: bool = False) -> Union[bool, float]:
-        """Optimized playback session initialization"""
+                            buffer_time: Optional[float] = None, radio_mode: bool = False) -> Union[bool, float]:
+        """Optimized playback session initialization with fixed radio timing"""
         self.stop()  # Clean shutdown of previous session
         
         start_time = monotonic()
@@ -227,11 +258,27 @@ class AudioPlayerRoot:
                 return False if not radio_mode else 0.0
 
             # Calculate final position
-            final_position = start_pos
+            final_position = start_pos + 0.1
             solved_monotonic = monotonic()
-            if radio_mode and buffer_time:
-                final_position += (solved_monotonic + 0.15 - buffer_time)
             
+            if radio_mode and buffer_time is not None:
+                # FIXED: Radio mode timing calculation
+                # Instead of mixing different time scales, calculate the time difference
+                # between when the server buffered the data and now
+                current_time = monotonic()
+                time_since_buffer = current_time - buffer_time
+                
+                # Add the elapsed time since buffering to the start position
+                # This accounts for the time that has passed since the server
+                # buffered the audio data
+                final_position = start_pos + time_since_buffer
+                
+                ll.debug(f"Radio timing: start_pos={start_pos:.3f}, "
+                        f"buffer_time={buffer_time:.3f}, current_time={current_time:.3f}, "
+                        f"time_since_buffer={time_since_buffer:.3f}, "
+                        f"final_position={final_position:.3f}")
+            
+            # Use final_position for frame calculation
             self._position_frames = int(final_position * self.samplerate)
             
             # Reset state for new session
@@ -259,7 +306,7 @@ class AudioPlayerRoot:
             
             return solved_monotonic if radio_mode else True
 
-    def radio_play(self, filepath: Optional[str] = None, start_pos: float = 0.0, 
+    def radio_play(self, filepath, start_pos,
                   buffer_time: Optional[float] = None) -> float:
         """Optimized radio playback mode"""
         if filepath:
@@ -358,6 +405,8 @@ class AudioPlayerRoot:
         if status:
             ll.debug(f"Audio stream status: {status}")
         
+        
+        
         # Fast path for paused state
         if self._paused.is_set() or not self._play_event.is_set():
             outdata.fill(0.0)
@@ -366,18 +415,25 @@ class AudioPlayerRoot:
         try:
             chunk = self._buffer.popleft()
             if chunk is not None:
+                if chunk.ndim == 1:                         # 1-D -> mono
+                    chunk = np.repeat(chunk[:, None], self.channels, axis=1)
+                elif chunk.shape[1] != self.channels:       # mismatched
+                    if chunk.shape[1] == 1:
+                        chunk = np.repeat(chunk, self.channels, axis=1)
+                    else:
+                        chunk = chunk[:, :self.channels]    # drop extras
+
+                chunk= self._process(chunk)
+                        
                 chunk_len = len(chunk)
                 if chunk_len >= frames:
-                    # Use in-place operations to avoid allocations
                     np.multiply(chunk[:frames], self._volume, out=outdata)
                 else:
-                    # Partial chunk
                     outdata[:chunk_len] = chunk * self._volume
                     outdata[chunk_len:].fill(0.0)
-                
+
                 self._position_frames += frames
             else:
-                # Buffer underrun
                 outdata.fill(0.0)
                 self._performance_stats['underruns'] += 1
                 if not self._stop_event.is_set():
@@ -449,15 +505,22 @@ class AudioPlayerRoot:
                 if not bytes_read:
                     break
                 
-                # Convert to numpy array efficiently
+                # Convert raw bytes to NumPy ---------------------------------
                 chunk = np.frombuffer(read_buffer[:bytes_read], dtype=np.float32)
-                if self.channels > 1:
-                    chunk = chunk.reshape(-1, self.channels)
-                
+
+                # Always reshape to the stream’s channel count
+                frames_read = chunk.size // self.channels      # self.channels == -ac value
+                chunk = chunk[:frames_read * self.channels].reshape(frames_read,
+                                                                     self.channels)
+
+                # Up-mix a mono file if the output stream is stereo
+                if chunk.shape[1] == 1 and self.channels == 2:
+                    chunk = np.repeat(chunk, 2, axis=1)        # (N,1) → (N,2)
+
+                # -------------------------------------------------------------
                 if not self._buffer.append(chunk):
-                    # Buffer full, wait a bit
-                    sleep(0.001)
-                    
+                    sleep(0.001)  # buffer full – back off a hair
+
         finally:
             if self._current_process and self._current_process.poll() is None:
                 try:
@@ -482,6 +545,9 @@ class AudioPlayerRoot:
                         continue
                     
                     chunk = f.read(self.chunk_size, dtype=np.float32, always_2d=True)
+                    if self.channels == 2 and chunk.shape[1] == 1:      # mono file
+                        chunk = np.repeat(chunk, 2, axis=1)
+
                     if len(chunk) == 0:
                         break
                     

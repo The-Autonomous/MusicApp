@@ -4,11 +4,12 @@ from flask_compress import Compress
 from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
+from itertools import islice
 
 try:
-    from log_loader import log_loader
+    from log_loader import log_loader, OutputRedirector
 except:
-    from .log_loader import log_loader
+    from .log_loader import log_loader, OutputRedirector
 
 ### Logging Handler ###
 
@@ -65,6 +66,37 @@ class RadioHost:
         @self.app.route(f'/{self.app_pad_site}') # App Pad Loader
         def app_pad():
             return self.app.send_static_file('index.html')
+        
+        @self.app.route(f'/{self.app_pad_site}/logs') # App Pad Loader
+        def app_log_pad():
+            return self.app.send_static_file('log.html')
+        
+        serve_log_path = OutputRedirector.filename
+        @self.app.route('/logs/api')
+        def serve_log_chunk():
+            if not os.path.isfile(serve_log_path):
+                return jsonify({'error': 'Log file not found'}), 404
+
+            try:
+                start = int(request.args.get('start', 0))
+                count = min(int(request.args.get('count', 100)), 5000)  # max 5000 lines
+                if start < 0 or count < 1:
+                    return jsonify({'error': 'Invalid start or count'}), 400
+
+                with open(serve_log_path, 'r', encoding='utf-8', errors='replace') as f:
+                    lines = list(islice(f, start, start + count))
+
+                has_more = len(lines) == count
+
+                return jsonify({
+                    'lines': [line.rstrip('\n') for line in lines],
+                    'start': start,
+                    'count': len(lines),
+                    'has_more': has_more
+                })
+
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
         
         @self.app.route('/search', methods=['POST'])
         def handle_search():
