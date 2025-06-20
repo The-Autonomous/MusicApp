@@ -1,4 +1,4 @@
-import json, os
+import json, os, atexit
 import numpy as np
 from threading import Lock
 from scipy.signal import sosfilt, sosfilt_zi
@@ -30,6 +30,7 @@ class AudioEQ:
             gains_db = gains_db or [0.0]*len(self.ISO_BANDS)
         
         self._build_filters(gains_db or [0.0]*len(self.ISO_BANDS))
+        atexit.register(self._save_settings)
 
     # ---------- public API ----------
     def set_gain(self, freq_hz: int, gain_db: float):
@@ -39,7 +40,6 @@ class AudioEQ:
                 idx = self._freq_map[freq_hz]
                 self.gains_db[idx] = float(gain_db)
                 self._refresh_band(idx)
-                self._save_settings()
 
     def get_gains(self):
         return dict(zip(self.ISO_BANDS, self.gains_db.copy()))
