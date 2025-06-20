@@ -73,7 +73,7 @@ class DownloadPopup:
                 percent_label.config(text=f"{int(value)}%")
                 root.after(100, update_progress)
 
-        update_progress()
+        root.after(100, update_progress())
         root.mainloop()
 
 class ytHandle:

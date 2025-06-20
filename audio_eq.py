@@ -1,13 +1,15 @@
+import json, os
 import numpy as np
 from threading import Lock
 from scipy.signal import sosfilt, sosfilt_zi
 from math import sin, cos, pi, radians, atan2, degrees
-import numpy as np
 import tkinter as tk
 from time import time
 
 class AudioEQ:
     """Simple 10-band graphic equaliser, constant-Q, ±12 dB."""
+
+    SETTINGS_FILE = "/.musicapp_eq.json"
 
     ISO_BANDS = (31, 62, 125, 250, 500,
                  1000, 2000, 4000, 8000, 16000)
@@ -18,6 +20,15 @@ class AudioEQ:
         self.ch = int(channels)
         self.q  = float(q)
         self.lock = Lock()
+        
+        # load persisted gains (if user didn't explicitly pass gains_db)
+        if gains_db is None and os.path.isfile(self.SETTINGS_FILE):
+            loaded = self._load_settings()
+            # ensure ordering matches ISO_BANDS
+            gains_db = [loaded.get(f, 0.0) for f in self.ISO_BANDS]
+        else:
+            gains_db = gains_db or [0.0]*len(self.ISO_BANDS)
+        
         self._build_filters(gains_db or [0.0]*len(self.ISO_BANDS))
 
     # ---------- public API ----------
@@ -28,6 +39,7 @@ class AudioEQ:
                 idx = self._freq_map[freq_hz]
                 self.gains_db[idx] = float(gain_db)
                 self._refresh_band(idx)
+                self._save_settings()
 
     def get_gains(self):
         return dict(zip(self.ISO_BANDS, self.gains_db.copy()))
@@ -64,7 +76,7 @@ class AudioEQ:
 
     def _design_peak(self, f0, gain_db):
         """
-        RBJ 'peaking' bi-quad, returned as a 1×6 SOS row:
+        RBJ 'peaking' bi-quad, returned as a 1x6 SOS row:
         [b0, b1, b2, a0 (=1), a1, a2].
         Unity gain at 0 dB, smooth boost/cut around f0.
         """
@@ -91,13 +103,31 @@ class AudioEQ:
     def get_band(self, freq_hz: int, default: float = 0.0) -> float:
         """Return gain in dB for one centre frequency."""
         return self.get_gains().get(freq_hz, default)
+    
+    # ─── persistence internals ─────────────────────────────────────────
+
+    def _load_settings(self) -> dict:
+        """Load {freq: gain_db} from JSON file."""
+        try:
+            with open(self.SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # sanitize types
+            return {int(k): float(v) for k, v in data.items()}
+        except Exception:
+            return {}
+
+    def _save_settings(self):
+        """Write current gains to JSON, atomically if possible."""
+        data = dict(zip(self.ISO_BANDS, self.gains_db))
+        with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=None)
 
 class AudioEcho:
     """
     One-tap echo / delay line.
-      • delay_ms  – echo delay time
-      • feedback  – 0 (no repeats) … 0.9 (lots of repeats)
-      • wet       – 0 (dry only) … 1.0 (echo only)
+      • delay_ms  - echo delay time
+      • feedback  - 0 (no repeats) … 0.9 (lots of repeats)
+      • wet       - 0 (dry only) … 1.0 (echo only)
     """
     def __init__(self, samplerate, channels,
                  delay_ms=350, feedback=0.35, wet=0.5):
@@ -140,7 +170,7 @@ class AudioEcho:
 class EQKnob(tk.Canvas):
     """
     Rotary dB-gain knob for a graphic EQ.
-    • Range  : –12 dB ↔ +12 dB
+    • Range  : -12 dB ↔ +12 dB
     • Dead-zone of 60° at the bottom so the pointer never flips
     • Callback fires at most every 10 ms while dragging,
       plus once on mouse-up (exact final value).
@@ -304,3 +334,114 @@ class PercentKnob(tk.Canvas):
     @staticmethod
     def _gain_to_angle(gain):
         return gain / 100 * 150             # inverse map
+
+class VolumeSlider(tk.Canvas):
+    """
+    Horizontal volume slider on Canvas.
+    Range: 0 (left) to 100 (right).
+    Callback fires at most every 10 ms during drag and once on release.
+    """
+
+    def __init__(self, master, width=200, height=30, callback=None, init_volume=50, bg=None, **kw):
+        size_w = width
+        size_h = height
+        # Determine background: explicit bg wins, else inherit parent's bg
+        parent_bg = None
+        try:
+            parent_bg = master.cget('background')
+        except Exception:
+            try:
+                parent_bg = master.cget('bg')
+            except Exception:
+                parent_bg = None
+        actual_bg = bg if bg is not None else parent_bg
+
+        super().__init__(master,
+                         width=size_w, height=size_h,
+                         **({'bg': actual_bg} if actual_bg is not None else {}),
+                         highlightthickness=0, **kw)
+
+        # Public
+        self.cb      = callback                 # func(volume:int)
+        # Clamp and store volume
+        self.volume  = max(0, min(100, init_volume))
+
+        # Internal
+        self._last_cb      = 0.0                # timestamp of last callback
+        self._dragging     = False
+        self._thumb_radius = size_h // 2 - 2
+        self._track_y      = size_h // 2
+        self._track_height = max(4, size_h // 4)
+
+        # Bind mouse events
+        self.bind("<Button-1>",        self._start)
+        self.bind("<B1-Motion>",       self._drag)
+        self.bind("<ButtonRelease-1>", self._commit)
+
+        # Initial draw
+        self._draw()
+        # Sync initial value
+        if self.cb:
+            self.cb(self.volume)
+
+    def _draw(self):
+        """Draw track, thumb, and percentage text."""
+        self.delete("all")
+        w = int(self['width'])
+        # Draw track line
+        self.create_line(
+            self._thumb_radius, self._track_y,
+            w - self._thumb_radius, self._track_y,
+            fill="#555", width=self._track_height, capstyle="round"
+        )
+        # Draw thumb circle
+        pos = self._value_to_pos(self.volume)
+        self.create_oval(
+            pos - self._thumb_radius, self._track_y - self._thumb_radius,
+            pos + self._thumb_radius, self._track_y + self._thumb_radius,
+            fill="#2ee", outline=""
+        )
+        # Draw volume text
+        self.create_text(
+            w // 2, self._track_y,
+            text=f"{self.volume:.0f}%", fill="#ddd",
+            font=("Segoe UI", 8, "bold")
+        )
+
+    def _value_to_pos(self, value: float) -> float:
+        """Convert volume value (0-100) to x-coordinate on canvas; inverted mapping."""
+        w = int(self['width'])
+        min_x = self._thumb_radius
+        max_x = w - self._thumb_radius
+        # Inverted: 0 -> left (min_x), 100 -> right (max_x)
+        return min_x + (max_x - min_x) * (value / 100)
+
+    def _pos_to_value(self, pos: float) -> float:
+        """Convert x-coordinate to volume value (0-100); inverted mapping."""
+        w = int(self['width'])
+        min_x = self._thumb_radius
+        max_x = w - self._thumb_radius
+        x = max(min_x, min(max_x, pos))
+        return (x - min_x) / (max_x - min_x) * 100
+
+    def _start(self, event):
+        """Begin dragging and update position."""
+        self._dragging = True
+        self._drag(event)
+
+    def _drag(self, event):
+        """Handle mouse movement during drag."""
+        if not self._dragging:
+            return
+        self.volume = round(self._pos_to_value(event.x))
+        self._draw()
+        now = time()
+        if self.cb and (now - self._last_cb) >= 0.010:
+            self._last_cb = now
+            self.cb(self.volume)
+
+    def _commit(self, event):
+        """Finish drag and send final value."""
+        self._dragging = False
+        if self.cb:
+            self.cb(self.volume)

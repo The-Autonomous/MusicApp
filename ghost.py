@@ -1,6 +1,6 @@
 import ctypes, psutil, os
 import tkinter as tk
-from tkinter import font, messagebox, Scale, ttk
+from tkinter import font, messagebox, ttk
 from threading import Lock, RLock, Thread
 from pynput import keyboard, mouse
 from time import monotonic, sleep
@@ -12,12 +12,12 @@ try:
     from log_loader import log_loader
     from adminRaise import Administrator
     from playerUtils import TitleCleaner
-    from audio_eq import EQKnob, PercentKnob
+    from audio_eq import EQKnob, PercentKnob, VolumeSlider
 except ImportError:
     from .log_loader import log_loader
     from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
-    from .audio_eq import EQKnob, PercentKnob
+    from .audio_eq import EQKnob, PercentKnob, VolumeSlider
     
 # Windows API constants
 WS_EX_LAYERED = 0x00080000
@@ -936,11 +936,37 @@ class GhostOverlay:
 
         knobs      = {}
         preset_var = tk.StringVar(value="Flat")
+        
+        # ── preset values ─────────────────────────────────────────────────
+        
+        def db(*vals): return list(vals)
+        
+        presets = {
+            "Flat":            db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            "Warm & Smooth":   db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
+            "Vocal Clarity":   db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
+            "Night Mode":      db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
+            "Hip-Hop Punch":   db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
+            "Rock Arena":      db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
+            "EDM Festival":    db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
+            "Lo-fi Chill":     db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
+            "Vintage Tape":    db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
+            "Loudness :D":     db(12,12,12,12,12,12,12,12,12,12),
+            "Every Other":     db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
+        }
+        presets["Custom"] = None
+
+        preset_map = { tuple(vals): name
+                    for name, vals in presets.items() if vals is not None }
 
         def knob_changed(gain, freq):
             _eq_target.set_band(freq, gain)
-            if preset_var.get() != "Custom":
-                preset_var.set("Custom")
+            # grab current gains in sorted-band order once
+            current = tuple(_eq_target.get_band(f) for f in bands)
+            # one dict lookup instead of a loop
+            preset_var.set(preset_map.get(current, "Custom"))
+
+        # ── knobs ─────────────────────────────────────────────────────────
 
         for i, freq in enumerate(bands):
             col = ttk.Frame(grid, style="Neon.TFrame")
@@ -959,21 +985,6 @@ class GhostOverlay:
             knobs[freq] = knob
 
         # ── presets ───────────────────────────────────────────────────────
-        def db(*vals): return list(vals)
-        presets = {
-            "Flat":            db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-            "Warm & Smooth":   db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
-            "Vocal Clarity":   db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
-            "Night Mode":      db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
-            "Hip-Hop Punch":   db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
-            "Rock Arena":      db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
-            "EDM Festival":    db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
-            "Lo-fi Chill":     db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
-            "Vintage Tape":    db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
-            "Loudness :D":     db(12,12,12,12,12,12,12,12,12,12),
-            "Every Other":     db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
-        }
-        presets["Custom"] = None
 
         def apply_preset(name):
             if name == "Custom": return
@@ -1022,13 +1033,18 @@ class GhostOverlay:
                 ).grid(row=1, column=0, padx=6, pady=2)
         delay_knob.grid(row=2, column=0, padx=6)
 
-        wet_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
+        volume_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
                             init_gain=wet_pct,
                             callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
                                                 update_echo())[1])
         ttk.Label(echo_frame, text="Wet %", style="Neon.TLabel"
                 ).grid(row=1, column=1, padx=6, pady=2)
-        wet_knob.grid(row=2, column=1, padx=6)
+        volume_knob.grid(row=2, column=1, padx=6)
+        
+        volume_knob = VolumeSlider(echo_frame, width=120, height=24, init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
+        ttk.Label(echo_frame, text="Volume %", style="Neon.TLabel"
+                ).grid(row=1, column=2, padx=6, pady=2)
+        volume_knob.grid(row=2, column=2, padx=6)
 
         # ── drag + close ──────────────────────────────────────────────────
         def start_mv(e): win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
@@ -1036,7 +1052,29 @@ class GhostOverlay:
         card.bind("<Button-3>", start_mv); card.bind("<B3-Motion>", do_mv)
         win.bind("<Escape>", lambda *_: win.destroy())
         win.bind("<FocusOut>", lambda e: win.destroy() if not win.focus_displayof() else None)
+        
+        # ── flush ui ──────────────────────────────────────────────────────
+        self.root.update_idletasks()
 
+        # get real on-screen position & size of your main window
+        mx = self.root.winfo_rootx()
+        my = self.root.winfo_rooty()
+        mw = self.root.winfo_width()
+        mh = self.root.winfo_height()
+
+        # center the overlay on the main window
+        x = mx + (mw - w)//2
+        y = my + (mh - h)//2
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        # force Toplevel to update so root coords are valid
+        win.update_idletasks()
+        # compute overlay center in screen coords
+        cx = win.winfo_rootx() + w//2
+        cy = win.winfo_rooty() + h//2
+
+        # move mouse cursor to overlay center (Windows)
+        ctypes.windll.user32.SetCursorPos(cx, cy)
 #####################################################################################################
 
     def show_search_overlay(self):
@@ -1351,11 +1389,11 @@ class GhostOverlay:
             self.MusicPlayer.pause() # Assuming pause toggles
             
     def _trigger_volume_up(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
             self.MusicPlayer.up_volume()
             
     def _trigger_volume_dwn(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState:
+        if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
             self.MusicPlayer.dwn_volume()
             
     def _trigger_repeat(self):

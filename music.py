@@ -1,5 +1,6 @@
 import os, random, platform, ast, requests, json, multiprocessing
-from threading import Event, Thread, Lock, Timer
+from functools import lru_cache
+from threading import Event, Thread, Lock
 from mutagen.mp3 import MP3
 from mutagen import File
 from pathlib import Path
@@ -31,6 +32,18 @@ ll = log_loader("Music Player")
 #####################################################################################################
 
 save_playback_lock = Lock()  # Lock for saving playback state
+
+#####################################################################################################
+
+_REPARSE      = 0x0400   # OneDrive stub (older)
+_OFFLINE      = 0x1000   # “offline” file
+_RECALL_OPEN  = 0x04000  # new OneDrive smart-file flag
+_PLACEHOLDER_MASK = _REPARSE | _OFFLINE | _RECALL_OPEN
+
+#####################################################################################################
+
+_SKIP_TIME_LENGTH_MAX = 15 * 60    # Skip 15 Minutes
+_SKIP_TIME_LENGTH_MIN = 15         # Skip 15 Seconds
 
 #####################################################################################################
 
@@ -108,6 +121,13 @@ class MusicPlayer:
         self.repeat_event = Event()
         self.current_player_mode = Event()  # False = MusicPlayer, True = RadioPlayer
         
+        # Initialize Multiprocess Popup
+        self.close_event = multiprocessing.Event()
+        self.downloadPopup = DownloadPopup()
+        self.progress_value = multiprocessing.Value('d', 0.0)  # 'd' = double precision float
+        self.popup_proc = multiprocessing.Process(target=self.downloadPopup.popup_process, args=(self.close_event, self.progress_value,))
+        self.popup_proc.start()
+        
         # Movement Debounce
         self.movementDebounce = [False, 0.2]  # [is_moving, debounce_time]
         self.movementDebounceTime = 1 # Time Allowed Between Movements In Seconds
@@ -120,16 +140,21 @@ class MusicPlayer:
 
         # Initialize YouTube
         self.ytHandle = ytHandle()
-        self.ytDownloadThreads = []
+        self.songDownloadThreads = []
         
         # Initialize Lyric Handler
         self.lyricHandler = lyricHandler()
 
+        # META Data
+        self.META_FILE = ".musicapp_meta.json"
+        self.meta = {}
+        self.load_meta_cache()
+        
         # Cache & Shuffler
         self.shuffler = SmartShuffler()
-        self.initialize_cache(directories)
-        self.load_playback_state()
-        
+        self.initializer_thread = Thread(target=self.initialize_cache, args=(directories,), daemon=True)
+        self.initializer_thread.start()
+        self.songDownloadThreads.append(self.initializer_thread)
         self.wait_for_yt()
 
         # Playback state
@@ -171,7 +196,7 @@ class MusicPlayer:
     def get_bands(self) -> dict[int, float]:
         """
         Return the full {centre_freq_Hz: gain_dB} map,
-        or an empty dict when EQ isn’t initialised.
+        or an empty dict when EQ isn't initialised.
         """
         eq = getattr(AudioPlayer, "eq", None)
         return eq.get_gains() if eq else {}
@@ -329,6 +354,32 @@ class MusicPlayer:
             self.shuffler.history.append(song['path'])
             self.current_index = len(self.shuffler.history) - 1
             self.forward_stack.clear() # Clear forward stack on new direct play
+        
+#####################################################################################################
+
+    def load_meta_cache(self):
+        """
+        Load persistent metadata (artist/title/duration) from disk.
+        """
+        try:
+            if os.path.exists(self.META_FILE):
+                with open(self.META_FILE, "r") as f:
+                    self.meta = json.load(f)
+            else:
+                self.meta = {}
+        except Exception as e:
+            ll.warn(f"Failed to load metadata cache: {e}")
+            self.meta = {}
+
+    def save_meta_cache(self):
+        """
+        Save updated metadata cache to disk.
+        """
+        try:
+            with open(self.META_FILE, "w") as f:
+                json.dump(self.meta, f)
+        except Exception as e:
+            ll.error(f"Failed to save metadata cache: {e}")
 
 #####################################################################################################
 
@@ -366,15 +417,11 @@ class MusicPlayer:
                     # Find the song dict in cache
                     song = next((s for s in self.shuffler.cache if s["path"] == path), None)
                     if not song:
-                        metadata = self.get_metadata(path)
-                        song = {
-                            'path': path,
-                            'artist': metadata.get('artist', 'Unknown Artist'),
-                            'title': metadata.get('title', os.path.splitext(os.path.basename(path))[0])
-                        }
-                        self.shuffler.cache.append(song)
-                        self.shuffler._refill_upcoming()
-                    
+                        metadata = self.meta.get(path)
+                        if metadata:
+                            self.shuffler.cache.append(metadata)
+                            self.shuffler._refill_upcoming()
+                        
                     self.current_song = song
                     self._resume_position = float(elapsed)
                     self.shuffler.enqueue_replay(song)
@@ -404,26 +451,51 @@ class MusicPlayer:
             if path.startswith('http'):
                 newThread = Thread(target=self.ytDownload, args=(path, directories,))
                 newThread.start()
-                self.ytDownloadThreads.append(newThread)
+                self.songDownloadThreads.append(newThread)
                 continue
-            
-            if os.path.exists(path):
-                for root, _, files in os.walk(path):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        if full_path in unique_paths:
-                            continue  # Skip duplicates
-                        unique_paths.add(full_path)
+            for root, _, files in os.walk(path):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    if full_path in unique_paths or not self.verify_file_ok(full_path):
+                        continue
+                    unique_paths.add(full_path)
+                    if not file.lower().endswith(supported_extensions):
+                        continue
+                    
+                    try:
+                        st = os.stat(follow_symlinks=False)
+                        mtime, size = st.st_mtime, st.st_size
+                    except Exception:
+                        mtime = size = None
+
+                    # Use cached metadata if available
+                    cached_metadata = self.meta.get(full_path)
+                    if not cached_metadata or (mtime and cached_metadata.get('mtime') != mtime) or (size and cached_metadata.get('size') != size):
+                        metadata = self.get_metadata(full_path)
+                        metadata.update({'mtime': mtime, 'size': size})
+                        self.meta[full_path] = metadata
+                        cached_metadata = metadata
+
+                    duration = cached_metadata.get('duration', 0.0)
+                    if self.check_song_length(duration):
+                        self.shuffler.cache.append({
+                            'path': full_path,
+                            'artist': cached_metadata.get('artist', 'Unknown Artist'),
+                            'title': cached_metadata.get('title', os.path.splitext(file)[0]),
+                            'duration': duration
+                        })
                         
-                        if file.lower().endswith(supported_extensions):
-                            metadata = self.get_metadata(full_path)
-                            self.shuffler.cache.append({
-                                'path': full_path,
-                                'artist': metadata.get('artist', 'Unknown Artist'),
-                                'title': metadata.get('title', os.path.splitext(file)[0])
-                            })
+        # Remove cache entries for files that no longer exist
+        removed = set(self.meta) - unique_paths
+        for path in removed:
+            del self.meta[path]
+            
         # Refill upcoming queue after cache is populated
         self.shuffler._refill_upcoming()
+        # Save cache
+        self.save_meta_cache()
+        # Load Playback State
+        self.load_playback_state()
 
 #####################################################################################################
 
@@ -432,62 +504,66 @@ class MusicPlayer:
         for path in returnedPaths:
             filename = os.path.basename(path)
             metadata = self.get_metadata(path)
-            self.shuffler.cache.append({
-                'path': path,
-                'artist': metadata.get('artist', 'Unknown Artist'),
-                'title': metadata.get('title', os.path.splitext(filename)[0])
-            })
+            duration = metadata.get('duration', 0.0)
+            if self.check_song_length(duration):
+                self.shuffler.cache.append({
+                    'path': path,
+                    'artist': metadata.get('artist', 'Unknown Artist'),
+                    'title': metadata.get('title', os.path.splitext(filename)[0]),
+                    'duration': duration
+                })
+            else:
+                ll.debug(f"🚨 File Duration ({duration}) Was Not Enough For It To Qualify")
         ll.debug(f"⏬ Download Completed: {url}")
     
     def wait_for_yt(self):
-
         ll.debug("Awaiting Youtube To Finish")
 
-        close_event = multiprocessing.Event()
-        popup_proc = None
-        downloadPopup = DownloadPopup()
-        progress_value = multiprocessing.Value('d', 0.0)  # 'd' = double precision float
-
-        def show_popup():
-            nonlocal popup_proc
-            if any(thread.is_alive() for thread in self.ytDownloadThreads):
-                popup_proc = multiprocessing.Process(target=downloadPopup.popup_process, args=(close_event, progress_value,))
-                popup_proc.start()
-
-        popup_timer = Thread(target=show_popup)
-        popup_timer.start()
-
         # Wait for all downloads to complete
-        fullThreadCount = len(self.ytDownloadThreads)
         currentThreadIndex = 0
-        for thread in self.ytDownloadThreads:
-            if currentThreadIndex <= 0:
-                progress_value.value = 0
-            else:
-                progress_value.value = currentThreadIndex / fullThreadCount
-            thread.join()
-            currentThreadIndex += 1
+        while currentThreadIndex < len(self.songDownloadThreads):
+            try:
+                if currentThreadIndex <= 0:
+                    self.progress_value.value = 0
+                else:
+                    self.progress_value.value = currentThreadIndex / len(self.songDownloadThreads)
+                self.songDownloadThreads[currentThreadIndex].join()
+                currentThreadIndex += 1
+            except Exception as E:
+                ll.debug(f"Thread Waiting Error: {E}")
+                continue
 
         # Close popup if it was shown
-        if popup_proc:
-            close_event.set()
-            popup_proc.join()
+        if self.popup_proc:
+            self.close_event.set()
+            self.popup_proc.join()
 
         ll.debug("Finished Full Download List")
 
 #####################################################################################################
 
     def get_metadata(self, file_path):
+        """
+        Pull artist, title, and duration (in seconds).  
+        If we can't read length, duration=None.
+        """
         try:
             audio = File(file_path, easy=True)
-            return {
-                'artist': audio.get('artist', ['Unknown Artist'])[0],
-                'title': audio.get('title', [os.path.splitext(os.path.basename(file_path))[0]])[0]
-            }
-        except:
+            # fallback title from filename
+            title = audio.get('title', [os.path.splitext(os.path.basename(file_path))[0]])[0]
+            artist = audio.get('artist', ['Unknown Artist'])[0]
+            # try to get duration
+            try:
+                # MP3 has .info.length; other formats too
+                duration = float(audio.info.length)
+            except Exception:
+                duration = 0.0
+            return {'artist': artist, 'title': title, 'duration': duration}
+        except Exception:
             return {
                 'artist': 'Unknown Artist',
-                'title': os.path.splitext(os.path.basename(file_path))[0]
+                'title': os.path.splitext(os.path.basename(file_path))[0],
+                'duration': 0.0
             }
 
 #####################################################################################################
@@ -567,17 +643,43 @@ class MusicPlayer:
                 self._queue_song(prev_song)
         self.after_move()
             
-    def set_volume(self, direction: int = 0):
+    def set_volume(self, direction: int = 0, set_directly: bool = False):
         """Set volume between 0.0 (silent) and 1.0 (full volume)"""
-        self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
+        if set_directly:
+            self.current_volume = direction
+        else:
+            self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
         AudioPlayer.set_volume(self.current_volume)
         ll.debug(f"🔊 {self.current_volume}")
+        
+    def get_volume(self):
+        return self.current_volume
         
     def up_volume(self):
         self.set_volume(0.05)
         
     def dwn_volume(self):
         self.set_volume(-0.05)
+
+#####################################################################################################
+
+    @lru_cache(maxsize=256)
+    def check_song_length(self, duration: float = 0.0):
+        """Figures out if the duration is the right length to be kept. True if yes False if no"""
+        return (duration >= _SKIP_TIME_LENGTH_MIN) and (duration <= _SKIP_TIME_LENGTH_MAX)
+    
+    @lru_cache(maxsize=256)          # cache a whole playlist worth of hits
+    def verify_file_ok(self, path: str) -> None:
+        """
+        One fast stat call:
+        • raises FileNotFoundError if path missing / not regular file
+        • raises OSError for 0-byte files or OneDrive placeholders
+        """
+        st = os.stat(path, follow_symlinks=False)
+        if not os.path.isfile(path) or st.st_size == 0 or st.st_file_attributes & _PLACEHOLDER_MASK:
+            ll.debug(f"{path} will not work with Media Player! Skipping.")
+            return False
+        return True
 
 #####################################################################################################
 
@@ -845,8 +947,7 @@ class MusicPlayer:
                     # Now update the screen, after the music has actually started
                     self.set_screen(song['artist'], self.get_display_title()) # <--- Move this line here
 
-                    audio = MP3(song['path'])
-                    total_duration = audio.info.length
+                    total_duration = song["duration"]
                     
                     # Ensure start_time reflects our position
                     start_time = time() - start_pos

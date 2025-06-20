@@ -1,4 +1,4 @@
-import subprocess, json, gc, weakref
+import subprocess, json, gc, weakref, os
 from threading import Event, Thread, Lock, RLock
 from typing import Optional, Union
 from time import sleep, monotonic
@@ -144,53 +144,57 @@ class AudioPlayerRoot:
         startupinfo.wShowWindow = subprocess.SW_HIDE
         return startupinfo
 
-    @lru_cache(maxsize=32)
-    def _get_audio_info(self, filepath: str) -> dict:
-        cmd = [
-            'ffprobe', '-v', 'error', '-print_format', 'json',
-            '-show_format', '-show_streams', filepath
-        ]
+    @lru_cache(maxsize=128)
+    def _probe_audio_info(self, filepath: str, mtime: int = 0) -> dict:
+        if mtime != 0:
+            cmd = [
+                'ffprobe', '-v', 'error', '-print_format', 'json',
+                '-show_format', '-show_streams', filepath
+            ]
 
-        try:
-            result = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding='utf-8', errors='ignore',
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                startupinfo=self._process_startupinfo,
-                timeout=10
-            )
+            try:
+                result = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding='utf-8', errors='ignore',
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    startupinfo=self._process_startupinfo,
+                    timeout=10
+                )
 
-            if result.returncode == 0:
-                info = json.loads(result.stdout)
-                audio = next((s for s in info['streams']
-                              if s['codec_type'] == 'audio'), None)
-                if audio is None:
-                    ll.error("No audio stream found.")
-                    return
-                return {
-                    'samplerate': int(audio['sample_rate']),
-                    'channels'  : int(audio['channels']),
-                    'duration'  : float(info['format'].get('duration', 0.0))
-                }
+                if result.returncode == 0:
+                    info = json.loads(result.stdout)
+                    audio = next((s for s in info['streams']
+                                if s['codec_type'] == 'audio'), None)
+                    if audio is None:
+                        ll.error("No audio stream found.")
+                        return
+                    return {
+                        'samplerate': int(audio['sample_rate']),
+                        'channels'  : int(audio['channels']),
+                        'duration'  : float(info['format'].get('duration', 0.0))
+                    }
 
-            ll.error(f"ffprobe error: {result.stderr}")
+                ll.error(f"ffprobe error: {result.stderr}")
 
-        except Exception as e:
-            ll.error(f"ffprobe failed: {e}")
+            except Exception as e:
+                ll.error(f"ffprobe failed: {e}")
 
-        # ---------- FALLBACK ----------
-        try:
-            with sf.SoundFile(filepath) as f:
-                return {
-                    'samplerate': int(f.samplerate),
-                    'channels'  : int(f.channels),
-                    'duration'  : len(f) / f.samplerate
-                }
-        except Exception as e2:
-            ll.error(f"SoundFile probe failed: {e2}")
+            # ---------- FALLBACK ----------
+            try:
+                with sf.SoundFile(filepath) as f:
+                    return {
+                        'samplerate': int(f.samplerate),
+                        'channels'  : int(f.channels),
+                        'duration'  : len(f) / f.samplerate
+                    }
+            except Exception as e2:
+                ll.error(f"SoundFile probe failed: {e2}")
 
         # Last-ditch defaults (keep the app alive)
         return {'samplerate': 44100, 'channels': 2, 'duration': 0.0}
+
+    def _get_audio_info(self, filepath: str) -> dict:
+        return self._probe_audio_info(filepath, os.path.getmtime(filepath))
 
     def _process(self, chunk):
         chunk = self.eq.process(chunk)
@@ -508,7 +512,7 @@ class AudioPlayerRoot:
                 # Convert raw bytes to NumPy ---------------------------------
                 chunk = np.frombuffer(read_buffer[:bytes_read], dtype=np.float32)
 
-                # Always reshape to the stream’s channel count
+                # Always reshape to the stream's channel count
                 frames_read = chunk.size // self.channels      # self.channels == -ac value
                 chunk = chunk[:frames_read * self.channels].reshape(frames_read,
                                                                      self.channels)
