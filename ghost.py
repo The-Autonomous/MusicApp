@@ -410,7 +410,7 @@ class GhostOverlay:
             },
             {
                 'id': 'kill_all_python',
-                'required': ['right alt', 'shift'], # Kept as per original
+                'required': ['right alt', 'ctrl'], # Kept as per original
                 'action': kill_all_python_processes, # Ensure current isn't killed if not intended
                 'hint': "EMERGENCY: Close Player & Python Tasks", # Clarified hint
                 'modifiable': False # Critical, potentially disruptive
