@@ -1,4 +1,4 @@
-import os, sys, ctypes, subprocess, time
+import os, sys, ctypes, subprocess
 
 class Administrator:
     def __init__(self, require_admin=True):

@@ -3,11 +3,14 @@ import os
 DevMode = os.path.exists(".developer_options.json")
 
 try:
+    from adminRaise import Administrator
     from autoDependency import AutoDependencies
 except:
+    from .adminRaise import Administrator
     from .autoDependency import AutoDependencies
 
 if not DevMode:
+    Administrator()
     AutoDependencies().install()
 
 try:
@@ -33,11 +36,9 @@ import tkinter as tk
 try:
     from ghost import GhostOverlay
     from playerUtils import MusicOverlayController
-    from adminRaise import Administrator
 except ImportError:
     from .ghost import GhostOverlay
     from .playerUtils import MusicOverlayController
-    from .adminRaise import Administrator
 
 def main():
     root = tk.Tk()
@@ -49,6 +50,4 @@ def main():
     root.mainloop()
 
 if __name__ == '__main__':
-    if not DevMode:
-        Administrator()
     main()

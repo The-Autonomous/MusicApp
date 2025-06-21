@@ -1003,6 +1003,8 @@ class GhostOverlay:
                                 relief="flat")
 
         card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
+        
+        preset_var.set(preset_map.get(tuple(_eq_target.get_band(f) for f in bands), "Custom"))
 
         # ── Echo section ──────────────────────────────────────────────────
         echo_frame = ttk.Frame(card, style="Neon.TFrame")

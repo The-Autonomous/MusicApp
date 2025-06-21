@@ -1,10 +1,4 @@
-import subprocess
-import sys
-import time
-import importlib
-import os
-import zipfile
-import platform
+import subprocess, urllib, sys, time, importlib, os, zipfile, platform
 from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
@@ -73,6 +67,37 @@ class AutoDependencies:
         # Perform initial dependency check
         self._initial_check()
 
+    # ───────────────── Windows C++ Build Tools ──────────────────────────
+    def ensure_build_tools(self) -> None:
+        """Install MSVC Build Tools silently if they're missing (Windows only)."""
+        if platform.system() != 'Windows':
+            return  # only matters on Windows
+
+        # crude: look for cl.exe anywhere in PATH
+        for p in os.environ['PATH'].split(os.pathsep):
+            if Path(p, 'cl.exe').exists():
+                print("✅ [MSVC] Build Tools already present")
+                return
+        
+        print("🔧 [MSVC] Build Tools missing, downloading installer…")
+        url = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
+        exe = Path.cwd() / "vs_buildtools.exe"
+
+        try:
+            urllib.request.urlretrieve(url, exe)
+            cmd = [
+                str(exe), "--quiet", "--wait", "--norestart", "--nocache",
+                "--add", "Microsoft.VisualStudio.Workload.VCTools",
+                "--includeRecommended",
+            ]
+            subprocess.check_call(cmd)
+            print("✅ [MSVC] Build Tools installed")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ [MSVC] installer failed: {e}. You’ll need to install manually.")
+        finally:
+            if exe.exists():
+                exe.unlink(missing_ok=True)
+
     def _check_virtual_environment(self) -> None:
         """Check if running in a virtual environment and warn if not."""
         in_venv = (hasattr(sys, 'real_prefix') or 
@@ -135,7 +160,8 @@ class AutoDependencies:
         if not self._check_pip_availability():
             print("❌ pip is not available. Cannot proceed with dependency management.")
             sys.exit(1)
-        
+            
+        self.ensure_build_tools()
         importlib.invalidate_caches()
         
         for pkg_name, pkg_info in self.packages.items():
