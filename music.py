@@ -650,7 +650,7 @@ class MusicPlayer:
         else:
             self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
         AudioPlayer.set_volume(self.current_volume)
-        ll.debug(f"🔊 {self.current_volume}")
+        #ll.debug(f"🔊 {self.current_volume}")
         
     def get_volume(self):
         return self.current_volume

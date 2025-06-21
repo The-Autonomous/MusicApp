@@ -1041,7 +1041,7 @@ class GhostOverlay:
                 ).grid(row=1, column=1, padx=6, pady=2)
         volume_knob.grid(row=2, column=1, padx=6)
         
-        volume_knob = VolumeSlider(echo_frame, width=120, height=24, init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
+        volume_knob = VolumeSlider(echo_frame, width=120, height=24, bg="#1d1f24", init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
         ttk.Label(echo_frame, text="Volume %", style="Neon.TLabel"
                 ).grid(row=1, column=2, padx=6, pady=2)
         volume_knob.grid(row=2, column=2, padx=6)
@@ -1053,28 +1053,31 @@ class GhostOverlay:
         win.bind("<Escape>", lambda *_: win.destroy())
         win.bind("<FocusOut>", lambda e: win.destroy() if not win.focus_displayof() else None)
         
-        # ── flush ui ──────────────────────────────────────────────────────
+        # ── flush ui & get real sizes ─────────────────────────────────────
         self.root.update_idletasks()
-
-        # get real on-screen position & size of your main window
-        mx = self.root.winfo_rootx()
-        my = self.root.winfo_rooty()
-        mw = self.root.winfo_width()
-        mh = self.root.winfo_height()
-
-        # center the overlay on the main window
-        x = mx + (mw - w)//2
-        y = my + (mh - h)//2
-        win.geometry(f"{w}x{h}+{x}+{y}")
-
-        # force Toplevel to update so root coords are valid
         win.update_idletasks()
-        # compute overlay center in screen coords
-        cx = win.winfo_rootx() + w//2
-        cy = win.winfo_rooty() + h//2
+
+        # get real overlay size
+        ow = win.winfo_width()
+        oh = win.winfo_height()
+
+        # get total screen size
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+
+        # compute position to center on screen
+        x = (sw - ow) // 2
+        y = (sh - oh) // 2
+
+        # finally place it
+        win.geometry(f"{ow}x{oh}+{x}+{y}")
+        
+        cx = x + (ow // 2)
+        cy = y + (oh // 2)
 
         # move mouse cursor to overlay center (Windows)
         ctypes.windll.user32.SetCursorPos(cx, cy)
+        
 #####################################################################################################
 
     def show_search_overlay(self):
