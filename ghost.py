@@ -551,8 +551,7 @@ class GhostOverlay:
                     try:
                         self.root.after(0, action_func)
                     except Exception as e:
-                        sleep(2) # Wait for 2 seconds before retrying (Not ideal, but prevents immediate re-trigger)
-                        self.root.after(0, action_func) # Retry after a short delay
+                        self.root.after(2000, action_func) # Retry after a short delay
                     self.last_toggle_state = True # Prevent immediate re-trigger
                     # Optional: More selective reset of keys_pressed if needed
                     # For example, keep 'alt' pressed but clear the action-specific key:
@@ -1699,7 +1698,7 @@ class GhostOverlay:
             x, y = self._last_position
             self.window.geometry(f"+{x}+{y}")
         else:
-            self.root.after(15, self.center_window) # Delay centering slightly for dimensions to finalize
+            self.root.after(0, self.center_window) # Delay centering slightly for dimensions to finalize
 
         # Drag-to-move handlers
         self._drag_start_x = 0
@@ -1825,7 +1824,7 @@ class GhostOverlay:
     def schedule_update(self):
         if self.window and not self._update_scheduled:
             self._update_scheduled = True
-            self.root.after(10, self.update_display) # 10ms delay to batch updates
+            self.root.after(100, self.update_display) # 100ms delay to batch updates
             
     def set_text(self, text: str):
         with self.text_lock:

@@ -225,7 +225,7 @@ class OptimizedLyricHandler:
     
     def __init__(self, 
                  api_url: str = "https://lrclib.net/api/get",
-                 max_workers: int = 5,  # Reduced to prevent overwhelming API
+                 max_workers: int = 2,  # Reduced to prevent overwhelming API
                  request_timeout: float = 15.0,  # Increased timeout
                  batch_size: int = 3,  # Smaller batches for better reliability
                  rate_limit_rps: float = 3.0):  # More conservative rate limiting

@@ -186,7 +186,18 @@ class RadioHost:
             self._server_thread = threading.Thread(
                 target=serve,
                 args=(self.app,),
-                kwargs={'host': host, 'port': port},
+                kwargs={
+                    'host': host, 
+                    'port': port,
+                    'threads': 2,  # Reduce from default 4-6 threads
+                    'connection_limit': 10,  # Limit concurrent connections
+                    'cleanup_interval': 15,  # Cleanup inactive connections every 15s
+                    'channel_timeout': 120,  # Timeout for inactive channels
+                    'log_untrusted_proxy_headers': False,  # Reduce logging overhead
+                    'send_bytes': 8192,  # Optimize buffer size
+                    'recv_bytes': 8192,
+                    'asyncore_use_poll': True,  # Use poll instead of select (Linux/Mac)
+                },
                 daemon=True
             )
             self._server_thread.start()
