@@ -495,107 +495,152 @@ class AudioPlayerRoot:
                 self._stop_event.set()
 
     def _read_with_ffmpeg_optimized(self):
-        """Heavily optimized FFmpeg-based reading specifically for MP3 files"""
+        """Optimized FFmpeg-based reading with better error handling"""
         start_time_seconds = self._position_frames / self.samplerate
         
-        # Ultra-optimized MP3-specific FFmpeg command
+        # CPU-optimized FFmpeg command
         ffmpeg_cmd = [
             'ffmpeg',
-            '-ss', str(start_time_seconds),  # Seek before input (fastest)
+            '-threads', '1',           # Limit to 1 thread to reduce CPU usage
+            '-ss', str(start_time_seconds),
             '-i', self._filepath,
-            
-            # MP3-specific optimizations
-            '-c:a', 'copy',  # Try to copy without re-encoding first
-            '-f', 'f32le',   # But force f32le output format
-            '-acodec', 'pcm_f32le',  # Override if copy fails
-            
-            # Performance optimizations
-            '-threads', '0',  # Use all available CPU threads
-            '-fflags', '+fastseek+genpts',  # Fast seeking + generate PTS
-            '-flags', '+low_delay',  # Reduce latency
-            '-probesize', '32',  # Minimal probing (MP3 is well-structured)
-            '-analyzeduration', '0',  # Skip analysis for speed
-            
-            # Audio settings
+            '-f', 'f32le',
+            '-c:a', 'pcm_f32le',      # Use -c:a instead of -acodec (newer syntax)
             '-ar', str(self.samplerate),
             '-ac', str(self.channels),
-            '-avoid_negative_ts', 'disabled',  # Faster than make_zero
-            
-            # Minimize overhead
-            '-loglevel', 'panic',  # Even quieter than 'error'
-            '-hide_banner',
-            '-nostats',
-            
+            '-filter_threads', '1',    # Limit filter threads
+            '-thread_queue_size', '8', # Smaller thread queue
+            '-fflags', '+discardcorrupt+genpts',  # Fast flags for better performance
+            '-avoid_negative_ts', 'disabled',     # Disable timestamp correction
+            '-copyts',                 # Copy timestamps as-is (faster)
+            '-loglevel', 'error',
+            '-nostdin',
+            '-y',
             'pipe:1'
         ]
         
         try:
-            # Optimized process creation for MP3
+            # CPU-optimized process creation
             process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,  # Completely suppress stderr
-                stdin=subprocess.DEVNULL,   # No input needed
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS,  # Lower priority
                 startupinfo=self._process_startupinfo,
-                bufsize=self.chunk_size * 4 * self.channels * 16,  # Even larger buffer
-                close_fds=True  # Reduce overhead
+                bufsize=self.chunk_size * 4 * self.channels * 2  # Slightly larger buffer for efficiency
             )
             
             self._current_process = process
-            bytes_per_frame = 4 * self.channels
+            bytes_per_frame = 4 * self.channels  # 32-bit float = 4 bytes
             chunk_size_bytes = self.chunk_size * bytes_per_frame
             
-            # Pre-allocate larger read buffer for better throughput
-            read_buffer = bytearray(chunk_size_bytes * 2)  # Double buffer
+            # Pre-allocate read buffer
+            read_buffer = bytearray(chunk_size_bytes)
+            
+            ll.debug(f"FFmpeg started: PID {process.pid}, seeking to {start_time_seconds:.3f}s")
+            
+            consecutive_empty_reads = 0
+            max_empty_reads = 10  # Prevent infinite loops
             
             while not self._stop_event.is_set():
-                # More aggressive buffer management
-                if self._buffer.is_full:
-                    sleep(0.001)  # Faster response
-                    continue
-                elif self._buffer.fill_ratio > 0.9:  # Higher threshold
-                    sleep(0.002)
-                    continue
-                
-                # Read larger chunks when possible
-                target_bytes = chunk_size_bytes * 2 if self._buffer.fill_ratio < 0.5 else chunk_size_bytes
-                bytes_read = process.stdout.readinto(read_buffer[:target_bytes])
-                
-                if not bytes_read:
+                # Check if process is still alive
+                if process.poll() is not None:
+                    ll.debug(f"FFmpeg process ended with return code: {process.returncode}")
+                    if process.returncode != 0:
+                        stderr_output = process.stderr.read().decode('utf-8', errors='ignore')
+                        ll.error(f"FFmpeg error: {stderr_output}")
                     break
                 
-                # Process in optimal chunk sizes
-                for offset in range(0, bytes_read, chunk_size_bytes):
-                    chunk_bytes = min(chunk_size_bytes, bytes_read - offset)
-                    if chunk_bytes < bytes_per_frame:  # Skip incomplete frames
-                        break
-                        
-                    chunk = np.frombuffer(read_buffer[offset:offset + chunk_bytes], dtype=np.float32)
-                    frames_read = chunk.size // self.channels
-                    chunk = chunk[:frames_read * self.channels].reshape(frames_read, self.channels)
+                # CPU-friendly buffer management with adaptive sleep
+                fill_ratio = self._buffer.fill_ratio
+                if fill_ratio >= 0.9:
+                    sleep(0.05)  # Longer sleep when buffer is very full
+                    continue
+                elif fill_ratio >= 0.7:
+                    sleep(0.02)  # Medium sleep when buffer is getting full
+                    continue
+                elif fill_ratio >= 0.5:
+                    sleep(0.01)  # Short sleep when buffer is moderately full
+                    continue
+                
+                try:
+                    # CPU-efficient reading with larger chunks
+                    bytes_read = process.stdout.readinto(read_buffer)
                     
-                    # Handle mono to stereo conversion
+                    if not bytes_read:
+                        consecutive_empty_reads += 1
+                        if consecutive_empty_reads >= max_empty_reads:
+                            ll.debug("Too many consecutive empty reads, assuming EOF")
+                            break
+                        sleep(0.005)  # Slightly longer sleep on empty reads
+                        continue
+                    else:
+                        consecutive_empty_reads = 0
+                    
+                    # Ensure we have complete frames
+                    complete_frames = bytes_read // bytes_per_frame
+                    if complete_frames == 0:
+                        continue
+                    
+                    bytes_to_process = complete_frames * bytes_per_frame
+                    
+                    # Convert raw bytes to NumPy array
+                    chunk = np.frombuffer(
+                        read_buffer[:bytes_to_process], 
+                        dtype=np.float32
+                    )
+                    
+                    # Reshape to proper dimensions
+                    chunk = chunk.reshape(complete_frames, self.channels)
+                    
+                    # Handle channel conversion if needed
                     if chunk.shape[1] == 1 and self.channels == 2:
+                        # Mono to stereo conversion
                         chunk = np.repeat(chunk, 2, axis=1)
+                    elif chunk.shape[1] > self.channels:
+                        # Downmix if too many channels
+                        chunk = chunk[:, :self.channels]
                     
-                    if not self._buffer.append(chunk):
-                        break  # Buffer full, break inner loop
+                    # Validate chunk
+                    if chunk.size > 0 and np.isfinite(chunk).all():
+                        if not self._buffer.append(chunk):
+                            # Buffer full, wait a bit
+                            sleep(0.001)
+                        else:
+                            # Debug info (remove in production)
+                            ll.debug(f"Added chunk: {chunk.shape} frames to buffer "
+                                f"(fill: {self._buffer.fill_ratio:.1%})")
+                    else:
+                        ll.warn(f"Invalid audio chunk detected, skipping")
                         
-                if self._stop_event.is_set():
+                except Exception as e:
+                    ll.error(f"Error reading FFmpeg data: {e}")
                     break
                     
+        except Exception as e:
+            ll.error(f"FFmpeg process creation failed: {e}")
+            
         finally:
+            # Clean shutdown of FFmpeg process
             if self._current_process and self._current_process.poll() is None:
                 try:
+                    ll.debug("Terminating FFmpeg process")
                     self._current_process.terminate()
-                    self._current_process.wait(timeout=0.1)  # Shorter timeout
-                except:
+                    
+                    # Give it a moment to terminate gracefully
                     try:
+                        self._current_process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        ll.debug("FFmpeg didn't terminate gracefully, killing it")
                         self._current_process.kill()
-                    except:
-                        pass
+                        self._current_process.wait()
+                        
+                except Exception as e:
+                    ll.error(f"Error terminating FFmpeg: {e}")
+                    
             self._current_process = None
+            ll.debug("FFmpeg reader thread finished")
 
     def _read_with_ffmpeg(self):
         """Optimized FFmpeg-based reading"""
