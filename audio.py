@@ -471,11 +471,11 @@ class AudioPlayerRoot:
         
         ffmpeg_cmd = [
             'ffmpeg', '-ss', str(start_time_seconds), '-i', self._filepath,
-            '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
+            '-loglevel', 'panic', '-f', 'f32le', '-acodec', 'pcm_f32le',
             '-ar', str(self.samplerate), '-ac', str(self.channels),
             '-avoid_negative_ts', 'make_zero',  # Optimize timestamp handling
             #'-threads', '1',  # Limit to single thread for lower CPU usage
-            '-preset', 'fast',  # Minimize CPU usage
+            #'-preset', 'fast',  # Minimize CPU usage
             'pipe:1'
         ]
         

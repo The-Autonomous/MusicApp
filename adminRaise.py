@@ -5,7 +5,7 @@ class Administrator:
         """When require_admin is True → prompt for UAC.
         If lower_priority is True → set BELOW_NORMAL priority so GTA gets more CPU love.
         """
-        self.lower_process_priority()
+        #self.lower_process_priority()
         if require_admin and not self.is_admin():
             self.elevate()
 

@@ -167,7 +167,7 @@ class MusicPlayer:
 
         # Radio system
         self.full_radio_ip_list = []
-        self.current_radio_ip = "0.0.0.0"
+        self.current_radio_ip = "192.168.1.205"
         self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
         self.radio_master = RadioHost(self)
         self.radio_scanner = SimpleRadioScan()

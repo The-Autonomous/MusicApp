@@ -20,7 +20,7 @@ class IPRadioScanner:
         self.network  = ipaddress.ip_network(f"{host_ip}/24", strict=False)
 
     async def _fetch(self, session: ClientSession, ip: str):
-        if ip == self.local_ip or ip == "0.0.0.0":
+        if ip == self.local_ip or ip == "192.168.1.205":
             return None
         url = f"http://{ip}:8080"
         try:
