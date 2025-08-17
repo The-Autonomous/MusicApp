@@ -41,6 +41,7 @@ class AutoDependencies:
         
         # Enhanced package mapping with version constraints and alternatives
         self.packages = {
+            "numpy": {"module": "numpy", "min_version": "1.20.0"},
             "scipy": {"module": "scipy", "min_version": None},
             "colorama": {"module": "colorama", "min_version": None},
             "requests": {"module": "requests", "min_version": "2.25.0"},
@@ -53,7 +54,6 @@ class AutoDependencies:
             "Flask-Compress": {"module": "flask_compress", "min_version": None},
             "pynput": {"module": "pynput", "min_version": None},
             "aiohttp": {"module": "aiohttp", "min_version": "3.7.0"},
-            "numpy": {"module": "numpy", "min_version": "1.20.0"},
             "psutil": {"module": "psutil", "min_version": None},
             "waitress": {"module": "waitress", "min_version": None},
         }
@@ -66,37 +66,154 @@ class AutoDependencies:
         
         # Perform initial dependency check
         self._initial_check()
-
-    # ───────────────── Windows C++ Build Tools ──────────────────────────
+        
     def ensure_build_tools(self) -> None:
-        """Install MSVC Build Tools silently if they're missing (Windows only)."""
+        """Install MSVC Build Tools with timeout and better error handling."""
         if platform.system() != 'Windows':
             return  # only matters on Windows
 
-        # crude: look for cl.exe anywhere in PATH
+        # Check for cl.exe in PATH
         for p in os.environ['PATH'].split(os.pathsep):
             if Path(p, 'cl.exe').exists():
                 print("✅ [MSVC] Build Tools already present")
                 return
         
-        print("🔧 [MSVC] Build Tools missing, downloading installer…")
+        # Also check common VS installation paths
+        vs_paths = [
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Tools\MSVC",
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+            r"C:\Program Files\Microsoft Visual Studio\2019\BuildTools\VC\Tools\MSVC",
+            r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
+        ]
+        
+        for vs_path in vs_paths:
+            if Path(vs_path).exists():
+                # Find cl.exe in subdirectories
+                for root, dirs, files in os.walk(vs_path):
+                    if 'cl.exe' in files:
+                        print("✅ [MSVC] Build Tools found in VS installation")
+                        return
+
+        print("🔧 [MSVC] Build Tools missing, attempting installation...")
+        
+        # Try chocolatey first (much more reliable)
+        if self._try_chocolatey_build_tools():
+            return
+        
+        # Fallback to direct VS installer with strict timeout
+        self._install_vs_build_tools_direct()
+
+    def _try_chocolatey_build_tools(self) -> bool:
+        """Try installing build tools via chocolatey (more reliable)."""
+        try:
+            # Check if chocolatey is available
+            result = subprocess.run(['choco', '--version'], 
+                                  capture_output=True, timeout=5)
+            if result.returncode != 0:
+                print("📝 [MSVC] Chocolatey not available, trying direct installation")
+                return False
+            
+            print("🍫 [MSVC] Installing via Chocolatey...")
+            cmd = ['choco', 'install', 'visualstudio2022buildtools', 
+                   '--package-parameters', '--add Microsoft.VisualStudio.Workload.VCTools', 
+                   '-y']
+            
+            result = subprocess.run(cmd, timeout=600)  # 10 minute timeout
+            if result.returncode == 0:
+                print("✅ [MSVC] Build Tools installed via Chocolatey")
+                return True
+            else:
+                print("❌ [MSVC] Chocolatey installation failed")
+                return False
+                
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            print(f"📝 [MSVC] Chocolatey method failed: {e}")
+            return False
+
+    def _install_vs_build_tools_direct(self) -> None:
+        """Direct VS Build Tools installation with strict timeout."""
         url = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
         exe = Path.cwd() / "vs_buildtools.exe"
 
         try:
-            urllib.request.urlretrieve(url, exe)
+            print("📥 [MSVC] Downloading Visual Studio Build Tools...")
+            
+            # Download with progress and timeout
+            req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urlopen(req, timeout=30) as response:
+                total_size = int(response.headers.get('content-length', 0))
+                with open(exe, 'wb') as out_file:
+                    if total_size > 0:
+                        with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading") as pbar:
+                            while True:
+                                chunk = response.read(8192)
+                                if not chunk:
+                                    break
+                                out_file.write(chunk)
+                                pbar.update(len(chunk))
+                    else:
+                        out_file.write(response.read())
+
+            print("🔧 [MSVC] Installing Build Tools (this may take 5-10 minutes)...")
+            
+            # More aggressive silent installation flags
             cmd = [
-                str(exe), "--quiet", "--wait", "--norestart", "--nocache",
+                str(exe), 
+                "--quiet", "--wait", "--norestart", "--nocache",
                 "--add", "Microsoft.VisualStudio.Workload.VCTools",
+                "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "--add", "Microsoft.VisualStudio.Component.Windows10SDK.19041",
                 "--includeRecommended",
+                "--force"  # Force installation even if newer version exists
             ]
-            subprocess.check_call(cmd)
-            print("✅ [MSVC] Build Tools installed")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ [MSVC] installer failed: {e}. You’ll need to install manually.")
+            
+            # Run with strict timeout and process monitoring
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            try:
+                # Wait for completion with timeout
+                stdout, stderr = process.communicate(timeout=900)  # 15 minute timeout
+                
+                if process.returncode == 0:
+                    print("✅ [MSVC] Build Tools installed successfully")
+                elif process.returncode == 3010:  # Reboot required
+                    print("✅ [MSVC] Build Tools installed (reboot required)")
+                else:
+                    print(f"⚠️ [MSVC] Installer returned code {process.returncode}")
+                    print("    Build tools may still work. Continuing...")
+                    
+            except subprocess.TimeoutExpired:
+                print("⏰ [MSVC] Installation timed out after 15 minutes")
+                print("    Terminating installer process...")
+                process.terminate()
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                
+                print("⚠️ [MSVC] Installation may be incomplete")
+                print("   You may need to:")
+                print("   1. Restart your computer")
+                print("   2. Install Visual Studio Build Tools manually")
+                print("   3. Or install via: pip install scipy --no-build-isolation")
+                
+        except (URLError, HTTPError) as e:
+            print(f"❌ [MSVC] Download failed: {e}")
+            print("   Please install Build Tools manually from:")
+            print("   https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022")
+            
+        except Exception as e:
+            print(f"❌ [MSVC] Installation failed: {e}")
+            print("   Consider installing scipy with pre-compiled wheels:")
+            print(f"   {sys.executable} -m pip install scipy --no-build-isolation")
+            
         finally:
+            # Always cleanup the installer
             if exe.exists():
-                exe.unlink(missing_ok=True)
+                try:
+                    exe.unlink()
+                except PermissionError:
+                    print(f"⚠️ Could not delete {exe}, please remove manually")
 
     def _check_virtual_environment(self) -> None:
         """Check if running in a virtual environment and warn if not."""
@@ -289,12 +406,52 @@ class AutoDependencies:
             if zip_path.exists():
                 zip_path.unlink()
 
+    def _install_scipy_with_fallbacks(self, attempt: int) -> bool:
+        """Install scipy with multiple fallback strategies."""
+        strategies = [
+            ("binary wheel", ["scipy", "--only-binary=all"]),
+            ("no build isolation", ["scipy", "--no-build-isolation"]),  
+            ("pre-release", ["scipy", "--pre"]),
+            ("force reinstall", ["scipy", "--force-reinstall", "--no-deps"])
+        ]
+        
+        for strategy_name, extra_args in strategies:
+            try:
+                print(f"    📦 Trying scipy installation: {strategy_name}")
+                
+                cmd = [sys.executable, "-m", "pip", "install"] + extra_args
+                if not (hasattr(sys, 'real_prefix') or 
+                       (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)):
+                    cmd.append("--user")
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                
+                if result.returncode == 0:
+                    print(f"    ✅ scipy installed successfully using {strategy_name}")
+                    return True
+                else:
+                    print(f"    ❌ {strategy_name} failed: {result.returncode}")
+                    
+            except subprocess.TimeoutExpired:
+                print(f"    ⏰ {strategy_name} timed out")
+                continue
+            except Exception as e:
+                print(f"    ❌ {strategy_name} error: {e}")
+                continue
+        
+        print(f"  ❌ All scipy installation strategies failed")
+        return False
+
     def _install_package(self, pkg_name: str, attempt: int = 1) -> bool:
-        """Install a single package with retry logic."""
+        """Enhanced package installation with scipy-specific handling."""
         print(f"  ⏳ Installing '{pkg_name}' (attempt {attempt}/{self.max_retries})...")
         
+        # Special handling for scipy
+        if pkg_name.lower() == 'scipy':
+            return self._install_scipy_with_fallbacks(attempt)
+        
+        # Regular installation for other packages
         try:
-            # Use --user flag if not in virtual environment for better isolation
             cmd = [sys.executable, "-m", "pip", "install", pkg_name]
             if not (hasattr(sys, 'real_prefix') or 
                    (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)):
