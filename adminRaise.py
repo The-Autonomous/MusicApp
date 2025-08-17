@@ -48,7 +48,7 @@ class Administrator:
         """Drops current process to BELOW_NORMAL priority."""
         try:
             p = psutil.Process(os.getpid())
-            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+            p.nice(psutil.IDLE_PRIORITY_CLASS if os.name == 'nt' else 19) # BELOW_NORMAL on Windows, nice 19 on Unix
             print("✅ Process priority lowered (BELOW_NORMAL).")
         except Exception as e:
             print(f"⚠️ Failed to lower process priority: {e}")

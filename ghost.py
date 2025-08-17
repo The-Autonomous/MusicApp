@@ -1551,24 +1551,30 @@ class GhostOverlay:
                 except:
                     ll.error("Couldn't Load Root After.")
                     
-    def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 60):
-        """Loop To Handle Draggability Meant To Be Run In A Seperate Thread"""
-        thread_tick_size = 0.1
+    def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):  # Increased from 60
+        """Loop To Handle Draggability - OPTIMIZED FOR GAMING"""
+        thread_tick_size = 0.25  # Increased from 0.1 (4x less frequent)
         ticks_per_second = int(1 / thread_tick_size) 
         time_dial = int(time_dilation_for_key_reset * ticks_per_second)
         time_tick = 0
         
         while True:
             try:
-                self.parse_mouse_over_overlay()
+                # Only check mouse when actually needed
+                if self.window and self.window.winfo_exists():
+                    self.parse_mouse_over_overlay()
             except Exception as E:
                 ll.error(f"Cannot Toggle Mouse-Over Overlay: {E}")
+            
             time_tick = (time_tick + 1) % time_dial 
             if time_tick == 0:
                 ll.debug(f"Resetting Key Events")
                 self.background_key_reset()
-            if time_tick % ticks_per_second == 0:
+            
+            # Less frequent topmost updates
+            if time_tick % (ticks_per_second * 5) == 0:  # Every 5 seconds instead of every second
                 self.keep_overlay_on_top()
+            
             sleep(thread_tick_size)
 
 #####################################################################################################
@@ -1632,12 +1638,18 @@ class GhostOverlay:
 
     def keep_overlay_on_top(self, event = None):
         """Keep the overlay window on top of all other windows."""
-        if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
-            self.window.attributes('-topmost', True)
-        if self.key_hints_popup and self.key_hints_popup.winfo_exists() and self.key_hints_popup.state() != 'withdrawn':
-            self.key_hints_popup.attributes('-topmost', True)
-        if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists() and self.search_overlay.state() != 'withdrawn':
-            self.search_overlay.attributes('-topmost', True)
+        try:
+            if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+                # Only set topmost if it's not already topmost
+                if not self.window.attributes('-topmost'):
+                    self.window.attributes('-topmost', True)
+            
+            # Skip other windows if they don't exist
+            if hasattr(self, 'key_hints_popup') and self.key_hints_popup and self.key_hints_popup.winfo_exists():
+                if not self.key_hints_popup.attributes('-topmost'):
+                    self.key_hints_popup.attributes('-topmost', True)
+        except tk.TclError:
+            pass  # Window destroyed, ignore
 
 #####################################################################################################
 
@@ -1843,7 +1855,9 @@ class GhostOverlay:
         full_str = f"{current_str} / {total_str}"
         
         with self.text_lock:
-            #if self.player_metric['player_duration'].startswith(current_str): return
+            # Only update if seconds changed (not every millisecond)
+            if self.player_metric['player_duration'] == full_str:
+                return
             self.player_metric['player_duration'] = full_str
         self.schedule_update()
 

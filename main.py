@@ -16,8 +16,8 @@ except:
 ### Install Handler ###
 
 if not DevMode:
-    Administrator()
     AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
+    Administrator()
     AutoDependencies().install()
 
 ### Logging Handler ###

@@ -87,9 +87,9 @@ class AudioPlayerRoot:
     
     def __init__(self, buffer_size_seconds: float = 10):
         # Core audio settings
-        self.samplerate = 44100
+        self.samplerate = 22050
         self.channels = 2
-        self.chunk_size = 1024  # Optimized chunk size
+        self.chunk_size = 8192  # Optimized chunk size
         self.buffer_size_seconds = buffer_size_seconds
         self.eq = AudioEQ(self.samplerate, self.channels)
         self.echo = None  # off by default
@@ -408,9 +408,7 @@ class AudioPlayerRoot:
         """Highly optimized audio callback with minimal allocations"""
         if status:
             ll.debug(f"Audio stream status: {status}")
-        
-        
-        
+            
         # Fast path for paused state
         if self._paused.is_set() or not self._play_event.is_set():
             outdata.fill(0.0)
@@ -474,8 +472,10 @@ class AudioPlayerRoot:
         ffmpeg_cmd = [
             'ffmpeg', '-ss', str(start_time_seconds), '-i', self._filepath,
             '-loglevel', 'error', '-f', 'f32le', '-acodec', 'pcm_f32le',
-            '-ar', str(self.samplerate), '-ac', str(self.channels), 
+            '-ar', str(self.samplerate), '-ac', str(self.channels),
             '-avoid_negative_ts', 'make_zero',  # Optimize timestamp handling
+            '-threads', '1',  # Limit to single thread for lower CPU usage
+            '-preset', 'ultrafast',  # Minimize CPU usage
             'pipe:1'
         ]
         

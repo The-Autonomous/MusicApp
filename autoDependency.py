@@ -101,7 +101,11 @@ class AutoDependencies:
             return
         
         # Fallback to direct VS installer with strict timeout
-        self._install_vs_build_tools_direct()
+        try:
+            self._install_vs_build_tools_direct()
+        except Exception as e:
+            print(f"❌ [MSVC] Installation failed: {e}")
+            print("Administrator privileges are required for this operation!")
 
     def _try_chocolatey_build_tools(self) -> bool:
         """Try installing build tools via chocolatey (more reliable)."""
