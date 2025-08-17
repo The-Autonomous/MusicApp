@@ -1,4 +1,4 @@
-import subprocess, json, gc, weakref, os, tempfile
+import subprocess, json, gc, weakref, os, tempfile, uuid
 from threading import Event, Thread, Lock, RLock
 from typing import Optional, Union
 from time import sleep, monotonic
@@ -497,11 +497,7 @@ class AudioPlayerRoot:
     def _read_with_ffmpeg_memmap(self):
         """FFmpeg decode → temporary .f32 file → numpy memmap"""
         start_time_seconds = self._position_frames / self.samplerate
-
-        # Make a temp file (auto-cleanup when closed/deleted)
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".f32")
-        tmp_path = tmp.name
-        tmp.close()
+        tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}.f32")
 
         ffmpeg_cmd = [
             "ffmpeg",
@@ -513,43 +509,48 @@ class AudioPlayerRoot:
             "-acodec", "pcm_f32le",
             "-ar", str(self.samplerate),
             "-ac", str(self.channels),
-            "-y",  # overwrite
-            tmp_path
+            "-y", tmp_path
         ]
 
-        # Decode whole file/segment to PCM
-        subprocess.run(
-            ffmpeg_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            startupinfo=self._process_startupinfo
-        )
+        try:
+            subprocess.run(
+                ffmpeg_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                startupinfo=self._process_startupinfo,
+                check=True
+            )
 
-        # Memory-map the raw float32 PCM
-        dtype = np.float32
-        bytes_per_frame = 4 * self.channels
-        mm = np.memmap(tmp_path, dtype=dtype, mode="r")
-        frames = mm.size // self.channels
-        audio_data = mm.reshape(frames, self.channels)
+            # Now safe to mmap
+            mm = np.memmap(tmp_path, dtype=np.float32, mode="r")
+            frames = mm.size // self.channels
+            audio_data = mm.reshape(frames, self.channels)
 
-        # Now feed into your buffer in chunks (like _read_with_soundfile)
-        frame_idx = 0
-        while not self._stop_event.is_set() and frame_idx < frames:
-            if self._buffer.is_full:
-                sleep(0.02)
-                continue
+            frame_idx = 0
+            while not self._stop_event.is_set() and frame_idx < frames:
+                if self._buffer.is_full:
+                    sleep(0.02)
+                    continue
 
-            chunk = audio_data[frame_idx:frame_idx + self.chunk_size]
-            frame_idx += len(chunk)
+                chunk = audio_data[frame_idx:frame_idx + self.chunk_size]
+                frame_idx += len(chunk)
 
-            if len(chunk) == 0:
-                break
-            if not self._buffer.append(chunk):
-                sleep(0.001)
+                if len(chunk) == 0:
+                    break
+                if not self._buffer.append(chunk):
+                    sleep(0.001)
 
-        del mm  # release mmap (temp file stays until deleted)
-        os.unlink(tmp_path)  # cleanup file
+        except Exception as e:
+            ll.error(f"Error in ffmpeg memmap reader: {e}")
+
+        finally:
+            try:
+                del mm
+                gc.collect()
+                os.unlink(tmp_path)
+            except Exception as cleanup_e:
+                ll.debug(f"Cleanup issue for {tmp_path}: {cleanup_e}")
 
     def _read_with_ffmpeg(self):
         """Optimized FFmpeg-based reading"""
