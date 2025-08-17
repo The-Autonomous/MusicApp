@@ -240,7 +240,7 @@ class RadioClient:
                     break
                 except:
                     ll.error(f"Failed to download song from {url}; Attempt {attempt + 1}/3")
-                    time.sleep(1)
+                    sleep(1)
 
             with open(self.temp_song_file, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
