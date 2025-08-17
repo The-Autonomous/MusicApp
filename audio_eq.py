@@ -22,7 +22,7 @@ class AudioEQ:
         self.lock = Lock()
         
         # load persisted gains (if user didn't explicitly pass gains_db)
-        if gains_db is None and os.path.isfile(self.SETTINGS_FILE):
+        if os.path.isfile(self.SETTINGS_FILE):
             loaded = self._load_settings()
             # ensure ordering matches ISO_BANDS
             gains_db = [loaded.get(f, 0.0) for f in self.ISO_BANDS]
@@ -191,11 +191,10 @@ class EQKnob(tk.Canvas):
         # private
         self.r        = radius
         self._last_cb = 0.0                  # last callback time stamp
+        self.ring = None
 
-        # bind events
-        self.bind("<Button-1>",        self._start)
-        self.bind("<B1-Motion>",       self._drag)
-        self.bind("<ButtonRelease-1>", self._commit)
+        # bind mouse
+        self.disable(False)
 
         self._draw()
 
@@ -205,7 +204,7 @@ class EQKnob(tk.Canvas):
         self.delete("all")
 
         # shell
-        self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
+        self.ring = self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
                          fill="#222", outline="#555", width=2)
 
         # pointer
@@ -222,6 +221,22 @@ class EQKnob(tk.Canvas):
 
     def _start(self, ev):
         self._drag(ev)                      # update instantly
+
+    def disable(self, disabled: bool):
+        """Disables or enables the knob and updates its appearance."""
+        if disabled:
+            self.configure(state="disabled")
+            self.unbind("<Button-1>")
+            self.unbind("<B1-Motion>")
+            self.unbind("<ButtonRelease-1>")
+            self.itemconfig(self.ring, fill="#555")
+        else:
+            self.configure(state="normal")
+            self.bind("<Button-1>", self._start)
+            self.bind("<B1-Motion>", self._drag)
+            self.bind("<ButtonRelease-1>", self._commit)
+            self.itemconfig(self.ring, fill="#222")
+        self._draw()
 
     def _drag(self, ev):
         dx = ev.x - (self.r+2)
@@ -271,15 +286,14 @@ class PercentKnob(tk.Canvas):
         # public
         self.cb   = callback                 # func(gain_db)
         self.gain = max(-100, min(100, init_gain))
+        self.ring = None
 
         # private
         self.r        = radius
         self._last_cb = 0.0                  # last callback time stamp
 
-        # bind events
-        self.bind("<Button-1>",        self._start)
-        self.bind("<B1-Motion>",       self._drag)
-        self.bind("<ButtonRelease-1>", self._commit)
+        # bind mouse
+        self.disable(False)
 
         self._draw()
 
@@ -289,7 +303,7 @@ class PercentKnob(tk.Canvas):
         self.delete("all")
 
         # shell
-        self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
+        self.ring = self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
                          fill="#222", outline="#555", width=2)
 
         # pointer
@@ -306,6 +320,22 @@ class PercentKnob(tk.Canvas):
 
     def _start(self, ev):
         self._drag(ev)                      # update instantly
+
+    def disable(self, disabled: bool):
+        """Disables or enables the knob and updates its appearance."""
+        if disabled:
+            self.configure(state="disabled")
+            self.unbind("<Button-1>")
+            self.unbind("<B1-Motion>")
+            self.unbind("<ButtonRelease-1>")
+            self.itemconfig(self.ring, fill="#555")
+        else:
+            self.configure(state="normal")
+            self.bind("<Button-1>", self._start)
+            self.bind("<B1-Motion>", self._drag)
+            self.bind("<ButtonRelease-1>", self._commit)
+            self.itemconfig(self.ring, fill="#222")
+        self._draw()
 
     def _drag(self, ev):
         dx = ev.x - (self.r+2)
@@ -347,6 +377,7 @@ class VolumeSlider(tk.Canvas):
         size_h = height
         # Determine background: explicit bg wins, else inherit parent's bg
         parent_bg = None
+        self.ring = None
         try:
             parent_bg = master.cget('background')
         except Exception:
@@ -373,10 +404,8 @@ class VolumeSlider(tk.Canvas):
         self._track_y      = size_h // 2
         self._track_height = max(4, size_h // 4)
 
-        # Bind mouse events
-        self.bind("<Button-1>",        self._start)
-        self.bind("<B1-Motion>",       self._drag)
-        self.bind("<ButtonRelease-1>", self._commit)
+        # Bind mouse
+        self.disable(False)
 
         # Initial draw
         self._draw()
@@ -396,7 +425,7 @@ class VolumeSlider(tk.Canvas):
         )
         # Draw thumb circle
         pos = self._value_to_pos(self.volume)
-        self.create_oval(
+        self.ring = self.create_oval(
             pos - self._thumb_radius, self._track_y - self._thumb_radius,
             pos + self._thumb_radius, self._track_y + self._thumb_radius,
             fill="#2ee", outline=""
@@ -407,6 +436,22 @@ class VolumeSlider(tk.Canvas):
             text=f"{self.volume:.0f}%", fill="#ddd",
             font=("Segoe UI", 8, "bold")
         )
+
+    def disable(self, disabled: bool):
+        """Disables or enables the knob and updates its appearance."""
+        if disabled:
+            self.configure(state="disabled")
+            self.unbind("<Button-1>")
+            self.unbind("<B1-Motion>")
+            self.unbind("<ButtonRelease-1>")
+            self.itemconfig(self.ring, fill="#555")
+        else:
+            self.configure(state="normal")
+            self.bind("<Button-1>", self._start)
+            self.bind("<B1-Motion>", self._drag)
+            self.bind("<ButtonRelease-1>", self._commit)
+            self.itemconfig(self.ring, fill="#2ee")
+        self._draw()
 
     def _value_to_pos(self, value: float) -> float:
         """Convert volume value (0-100) to x-coordinate on canvas; inverted mapping."""

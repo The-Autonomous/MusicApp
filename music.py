@@ -174,6 +174,20 @@ class MusicPlayer:
 
 #####################################################################################################
 
+    def get_gaming_mode(self) -> bool:
+        """
+        Return whether gaming mode is currently enabled.
+        In gaming mode, audio processing is bypassed for lower latency.
+        """
+        return AudioPlayer._gaming_mode
+    
+    def toggle_gaming_mode(self, enable: bool):
+        """
+        Enable or disable gaming mode, which bypasses audio processing for lower latency.
+        """
+        AudioPlayer._gaming_mode = enable
+        ll.debug(f"Gaming mode {'enabled' if enable else 'disabled'}. Audio processing {'bypassed' if enable else 'active'}.")
+
     def set_band(self, freq_hz: int, gain_db: float, Q: float = 1.0):
         """
         Set the gain of one ISO-centre band.
@@ -968,7 +982,7 @@ class MusicPlayer:
                         if self.skip_flag.is_set(): break
                         if self.pause_event.is_set():
                             self.radio_master.initSong(
-                                title = f"{fullTitle}***[]*Paused",
+                                title = fullTitle,
                                 mp3_song_file_path = song['path'],
                                 current_mixer = AudioPlayer, # FUTURE FIX
                                 current_song_lyrics = self.current_song_lyrics

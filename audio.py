@@ -93,6 +93,7 @@ class AudioPlayerRoot:
         self.buffer_size_seconds = buffer_size_seconds
         self.eq = AudioEQ(self.samplerate, self.channels)
         self.echo = None  # off by default
+        self._gaming_mode = True  # Bypass processing in gaming mode
         
         # State management
         self._state_lock = RLock()  # Use RLock for nested locking
@@ -405,43 +406,65 @@ class AudioPlayerRoot:
             self._cleanup_stream()
 
     def _audio_callback_optimized(self, outdata: np.ndarray, frames: int, time_info, status):
-        """Highly optimized audio callback with minimal allocations"""
+        """Highly optimized audio callback with minimal allocations and gaming mode support"""
         if status:
             ll.debug(f"Audio stream status: {status}")
             
-        # Fast path for paused state
+        # Fast path for paused state - single check
         if self._paused.is_set() or not self._play_event.is_set():
             outdata.fill(0.0)
             return
         
         try:
             chunk = self._buffer.popleft()
-            if chunk is not None:
-                if chunk.ndim == 1:                         # 1-D -> mono
-                    chunk = np.repeat(chunk[:, None], self.channels, axis=1)
-                elif chunk.shape[1] != self.channels:       # mismatched
-                    if chunk.shape[1] == 1:
-                        chunk = np.repeat(chunk, self.channels, axis=1)
-                    else:
-                        chunk = chunk[:, :self.channels]    # drop extras
-
-                chunk= self._process(chunk)
-                        
-                chunk_len = len(chunk)
-                if chunk_len >= frames:
-                    np.multiply(chunk[:frames], self._volume, out=outdata)
-                else:
-                    outdata[:chunk_len] = chunk * self._volume
-                    outdata[chunk_len:].fill(0.0)
-
-                self._position_frames += frames
-            else:
+            if chunk is None:
+                # Buffer underrun handling
                 outdata.fill(0.0)
                 self._performance_stats['underruns'] += 1
                 if not self._stop_event.is_set():
                     ll.debug("Buffer underrun detected")
-                
+                return
+            
+            # Channel handling with pre-computed conditions
+            if chunk.ndim == 1:  # mono to stereo/multi
+                chunk = chunk.reshape(-1, 1)
+                if self.channels > 1:
+                    # Use broadcasting instead of repeat for better performance
+                    chunk = np.broadcast_to(chunk, (chunk.shape[0], self.channels)).copy()
+            elif chunk.shape[1] != self.channels:
+                if chunk.shape[1] == 1 and self.channels > 1:
+                    # Broadcasting is faster than repeat
+                    chunk = np.broadcast_to(chunk, (chunk.shape[0], self.channels)).copy()
+                else:
+                    # Slice to match channels (drops extras or pads with zeros)
+                    chunk = chunk[:, :self.channels]
+            
+            # Gaming mode bypass - skip processing for minimal latency
+            if not self._gaming_mode:
+                chunk = self._process(chunk)
+            
+            # Optimized output handling
+            chunk_len = len(chunk)
+            if chunk_len >= frames:
+                # Direct multiplication into output buffer
+                np.multiply(chunk[:frames], self._volume, out=outdata)
+            else:
+                # Split operation to avoid temporary array creation
+                outdata[:chunk_len] = chunk
+                outdata[:chunk_len] *= self._volume
+                # Only zero the remainder if needed
+                if chunk_len < frames:
+                    outdata[chunk_len:].fill(0.0)
+            
+            # Update position counter
+            self._position_frames += frames
+            
+        except IndexError:
+            # Buffer empty - more specific exception handling
+            outdata.fill(0.0)
+            self._performance_stats['underruns'] += 1
         except Exception as e:
+            # General error handling
             ll.error(f"Error in audio callback: {e}")
             outdata.fill(0.0)
 

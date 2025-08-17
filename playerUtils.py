@@ -16,7 +16,7 @@ class TitleCleaner:
     """Clean raw track titles into a consistent 'Artist - Title' format, including dynamic suffix mapping."""
     _split_pattern = re.compile(r'(?: - |\(|\||\[)')
     SearchReplaceRule = Tuple[str, str]
-    _defaults: List[SearchReplaceRule] = [("***[]*Paused", " -[Paused]-"), ("*=*", " -[Paused]-"), ("*+*", " -[Repeat]-")]
+    _defaults: List[SearchReplaceRule] = [("*=*", " -[Paused]-"), ("*+*", " -[Repeat]-")]
 
     def __init__(self, rules: Optional[List[SearchReplaceRule]] = None):
         self.rules = rules or self._defaults

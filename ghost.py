@@ -234,6 +234,9 @@ class GhostOverlay:
         self.mouseEvents = MouseTracker()
         self.clickThroughState = True # True To Click Through False To Click On
         
+        ### Gaming Mode ###
+        self.gaming_mode_checkbox = None
+        
         ### Music Player ###
         self.main_font = font.Font(family='Helvetica', size=14, weight='bold')
         self.time_font = font.Font(family='Times', size=12)
@@ -868,12 +871,42 @@ class GhostOverlay:
 
 #####################################################################################################
 
-    def show_eq_overlay(self):
-        """
-        Pops a draggable EQ + Echo overlay with rotary knobs.
-        Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer.
-        """
+    def get_gaming_mode(self):
+        """Returns the current state of gaming mode."""
+        try:
+            print("Checking gaming mode state...")
+            return getattr(self, "MusicPlayer", None).get_gaming_mode()
+        except Exception as E:
+            return False
 
+    def set_gaming_mode(self, is_gaming_mode: bool):
+        """Sets the state of gaming mode and updates the UI."""
+        try:
+            print(f"Setting gaming mode to {'ON' if is_gaming_mode else 'OFF'}...")
+            getattr(self, "MusicPlayer", None).toggle_gaming_mode(is_gaming_mode)
+            self._update_eq_ui_state()
+        except Exception as E:
+            return False
+
+    def _update_eq_ui_state(self):
+        """Disables/enables EQ controls and adds/removes a visual overlay based on gaming mode."""
+        if not getattr(self, "_eq_window", None) or not self._eq_window.winfo_exists():
+            return
+
+        is_disabled = self.get_gaming_mode()
+
+        # Disable/enable knobs and update their appearance
+        for knob in self.all_eq_knobs:
+            knob.disable(is_disabled)
+            print(f"Setting knob {knob} to {'disabled' if is_disabled else 'enabled'}.")
+            
+        # Disable/enable preset menu
+        if self.eq_preset_menu:
+            self.eq_preset_menu.config(state="disabled" if is_disabled else "normal")
+            print(f"Setting preset menu to {'disabled' if is_disabled else 'enabled'}.")
+
+    def show_eq_overlay(self):
+        """ Pops a draggable EQ + Echo overlay with rotary knobs. Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer. """
         # ── raise if already open ─────────────────────────────────────────┐
         if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
             self._eq_window.deiconify(); self._eq_window.lift(); return
@@ -881,128 +914,122 @@ class GhostOverlay:
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
             ll.warn("No MusicPlayer with EQ/echo found."); return
-
-        bands = sorted(_eq_target.get_bands().keys())          # [31‥16 000]
-
+        bands = sorted(_eq_target.get_bands().keys()) # [31‥16 000]
         # ── theme / style (run once per Tk) ───────────────────────────────
         style = ttk.Style(self.root)
-        style.theme_use("clam")                                # unlock colours
-
-        if "Neon.Option" not in style.element_names():
-            style.configure("Neon.TMenubutton",
-                            background="#272b33", foreground="#ddd",
-                            relief="flat", padding=(6,2,10,2))
-            style.map("Neon.TMenubutton",
-                    background=[("active", "#313640")],
-                    arrowcolor=[("active", "#00e8d0"), ("!disabled", "#aaa")])
-            style.configure("Neon.TFrame",  background="#1d1f24")
-            style.configure("Neon.TLabel",  background="#1d1f24",
-                            foreground="#d0d0d0", font=("Segoe UI", 9))
-            style.configure("Neon.Option",  background="#272b33",
-                            foreground="#ddd", relief="flat",
-                            padding=(6, 2, 10, 2))             # extra pad right
-            style.map("Neon.Option",
-                    background=[("active", "#313640")],
-                    arrowcolor=[("active", "#00e8d0"),
-                                ("!disabled", "#aaa")])
-            style.configure("Neon.Menu",   background="#272b33",
-                            foreground="#ddd", relief="flat")
-
+        style.theme_use("clam") # unlock colours
+        
+        # Check if the styles are already defined to prevent re-creation
+        if "Neon.TFrame" not in style.element_names():
+            style.configure("Neon.TFrame", background="#1d1f24")
+            style.configure("Neon.TLabel", background="#1d1f24", foreground="#d0d0d0", font=("Segoe UI", 9))
+            
+            style.configure("Neon.TMenubutton", background="#272b33", foreground="#ddd", relief="flat", padding=(6,2,10,2))
+            style.map("Neon.TMenubutton", background=[("active", "#313640")], arrowcolor=[("active", "#00e8d0"), ("!disabled", "#aaa")])
+            style.configure("Neon.Menu", background="#272b33", foreground="#ddd", relief="flat")
+            
+            style.configure("Neon.TCheckbutton", background="#1d1f24", foreground="#ddd", relief="flat", indicatorcolor="#272b33")
+            style.map("Neon.TCheckbutton", 
+                      indicatorcolor=[("selected", "#00e8d0")],
+                      background=[("active", "#313640")]
+            )
         # ── window shell ──────────────────────────────────────────────────
-        win = tk.Toplevel(self.root);  win.overrideredirect(True)
-        win.attributes("-topmost", True);  win.configure(bg="#000")
+        win = tk.Toplevel(self.root); win.overrideredirect(True)
+        win.attributes("-topmost", True); win.configure(bg="#000")
         self._eq_window = win
-
         screen_w = self.root.winfo_screenwidth()
         per_knob = 64
         max_cols = max(1, (screen_w - 100)//per_knob)
-        rows     = ceil(len(bands) / max_cols)
-
+        rows = ceil(len(bands) / max_cols)
         w = min(len(bands), max_cols)*per_knob + 40
-        h = rows*110 + 190                      # rows + echo + presets
+        h = rows*110 + 190 # rows + echo + presets
         x = self.window.winfo_x() + self.window.winfo_width()//2 - w//2
         y = self.window.winfo_y() + self.window.winfo_height() + 20
         win.geometry(f"{w}x{h}+{x}+{y}")
-
-        card = tk.Canvas(win, width=w, height=h,
-                        bg="#1d1f24", highlightthickness=0)
+        card = tk.Canvas(win, width=w, height=h, bg="#1d1f24", highlightthickness=0)
         card.pack(fill="both", expand=True)
         card.create_rectangle(0, 0, w, h, fill="#1d1f24", outline="")
-
         # ── EQ knob grid ──────────────────────────────────────────────────
         grid = ttk.Frame(card, style="Neon.TFrame")
         grid.place(relx=0.5, rely=0.05, anchor="n")
-
-        knobs      = {}
+        
+        self.eq_knobs = {}
+        self.all_eq_knobs = []
+        fmax = 16000
+        
         preset_var = tk.StringVar(value="Flat")
-        
         # ── preset values ─────────────────────────────────────────────────
-        
         def db(*vals): return list(vals)
-        
         presets = {
-            "Flat":            db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-            "Warm & Smooth":   db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
-            "Vocal Clarity":   db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
-            "Night Mode":      db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
-            "Hip-Hop Punch":   db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
-            "Rock Arena":      db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
-            "EDM Festival":    db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
-            "Lo-fi Chill":     db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
-            "Vintage Tape":    db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
-            "Loudness :D":     db(12,12,12,12,12,12,12,12,12,12),
-            "Every Other":     db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
+            "Flat": db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            "Warm & Smooth": db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
+            "Vocal Clarity": db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
+            "Night Mode": db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
+            "Hip-Hop Punch": db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
+            "Crazy Bass": db(10, 8, 5, 0,-5,-6,-2, 3, 5, 4),
+            "Treble Boost": db(-5,-3, 0, 3, 5, 5, 4, 2, 0,-2),
+            "Pop Hits": db( 4, 3, 1, 0,-1, 1, 3, 4, 3, 2),
+            "Dance Club": db( 5, 4, 2, 0,-2, 0, 3, 5, 4, 3),
+            "I Like Screaming": db( 8, 6, 4, 1,-3, 0, 4, 7, 6, 5),
+            "Rock Arena": db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
+            "Rock Metal": db( 5, 4, 3, 1, 0, 2, 4, 5, 4, 2), 
+            "Funk Groove": db( 3, 2, 1, 0, 1, 3, 4, 3, 2, 1),
+            "Classical": db(-2,-1, 0, 1, 3, 3, 2, 1, 0,-1),
+            "Jazz Club": db(-1, 0, 1, 2, 3, 2, 1, 0,-1,-2),
+            "EDM Festival": db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
+            "Lo-fi Chill": db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
+            "Vintage Tape": db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
+            "Loudness :D": db(12,12,12,12,12,12,12,12,12,12),
+            "Every Other": db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
+            "Bass Cut": db(-12,-12,-12,-12, 0, 0, 0, 0, 0, 0),
+            "Treble Cut": db( 0, 0, 0, 0,-12,-12,-12,-12,-12,-12),
+            "V Shape": db(10, 8, 5, 0,-5,-6, 0, 5, 8,10),
+            "Inverted V": db(-6,-5,-3, 0, 3, 3, 0,-3,-5,-6),
+            "Podcast": db(-8,-6,-4,-2, 0, 2, 4, 5, 6, 8),
+            "Speech Boost": db(-5,-4,-2, 0, 3, 5, 4, 2, 0,-2),
+            "Bass & Treble": db( 6, 4, 2, 0,-4,-5, 0, 2, 4, 6),
+            "Lounge": db(-3,-2,-1, 0, 2, 3, 2, 0,-1,-3),
+            "Acoustic": db(-2,-1, 0, 1, 3, 4, 3, 1, 0,-1),
+            "Make Me Sleep": db(-12,-10,-8,-5, 0, 1, 2, 1,-3,-8),
+            "AI Generated These Could You Tell": db( 2, 3, 1, 0,-1, 1, 3, 4, 3, 2),
         }
         presets["Custom"] = None
-
-        preset_map = { tuple(vals): name
-                    for name, vals in presets.items() if vals is not None }
+        preset_map = { tuple(vals): name for name, vals in presets.items() if vals is not None }
 
         def knob_changed(gain, freq):
             _eq_target.set_band(freq, gain)
-            # grab current gains in sorted-band order once
             current = tuple(_eq_target.get_band(f) for f in bands)
-            # one dict lookup instead of a loop
             preset_var.set(preset_map.get(current, "Custom"))
 
         # ── knobs ─────────────────────────────────────────────────────────
-
         for i, freq in enumerate(bands):
             col = ttk.Frame(grid, style="Neon.TFrame")
             col.grid(row=i//max_cols, column=i%max_cols, padx=6, pady=2)
-
             lbl = f"{freq//1000}k" if freq >= 1000 else str(freq)
             ttk.Label(col, text=lbl, style="Neon.TLabel").pack()
-
             init = _eq_target.get_band(freq, 0.0)
-            if isinstance(init, tuple):  init = init[0]
-
-            knob = EQKnob(col, radius=26, init_gain=init,
-                        callback=lambda g, f=freq: knob_changed(g, f),
-                        bg="#1d1f24")
+            if isinstance(init, tuple): init = init[0]
+            callback = lambda g, f=freq: knob_changed(g, f)
+            if freq >= fmax: callback = lambda g, f=freq: knob_changed(0, f) # Less sensitive for very high freqs
+            knob = EQKnob(col, radius=26, init_gain=init, callback=callback, bg="#1d1f24")
             knob.pack()
-            knobs[freq] = knob
+            self.eq_knobs[freq] = knob
+            self.all_eq_knobs.append(knob)
 
         # ── presets ───────────────────────────────────────────────────────
-
         def apply_preset(name):
             if name == "Custom": return
             for f, g in zip(bands, presets[name]):
-                knobs[f].gain = g; knobs[f]._draw()
-                _eq_target.set_band(f, g)
+                self.eq_knobs[f].gain = g
+                self.eq_knobs[f]._draw()
+                if f < fmax:
+                    _eq_target.set_band(f, g)
             preset_var.set(name)
 
-        preset_menu = ttk.OptionMenu(card, preset_var, "Flat",
-                                    *presets.keys(),
-                                    command=apply_preset,
-                                    style="Neon.TMenubutton")
-        preset_menu["menu"].config(tearoff=0, bg="#272b33", fg="#ddd",
-                                activebackground="#313640",
-                                activeforeground="#00e8d0",
-                                relief="flat")
-
+        preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *presets.keys(), command=apply_preset, style="Neon.TMenubutton")
+        preset_menu["menu"].config(tearoff=0, bg="#272b33", fg="#ddd", activebackground="#313640", activeforeground="#00e8d0", relief="flat")
         card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
-        
+        self.eq_preset_menu = preset_menu # Store reference
         preset_var.set(preset_map.get(tuple(_eq_target.get_band(f) for f in bands), "Custom"))
 
         # ── Echo section ──────────────────────────────────────────────────
@@ -1033,21 +1060,41 @@ class GhostOverlay:
         ttk.Label(echo_frame, text="Delay ms", style="Neon.TLabel"
                 ).grid(row=1, column=0, padx=6, pady=2)
         delay_knob.grid(row=2, column=0, padx=6)
+        self.all_eq_knobs.append(delay_knob)
 
-        volume_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
+        wet_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
                             init_gain=wet_pct,
                             callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
                                                 update_echo())[1])
         ttk.Label(echo_frame, text="Wet %", style="Neon.TLabel"
                 ).grid(row=1, column=1, padx=6, pady=2)
-        volume_knob.grid(row=2, column=1, padx=6)
+        wet_knob.grid(row=2, column=1, padx=6)
+        self.all_eq_knobs.append(wet_knob)
         
         volume_knob = VolumeSlider(echo_frame, width=120, height=24, bg="#1d1f24", init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
         ttk.Label(echo_frame, text="Volume %", style="Neon.TLabel"
                 ).grid(row=1, column=2, padx=6, pady=2)
         volume_knob.grid(row=2, column=2, padx=6)
 
-        # ── drag + close ──────────────────────────────────────────────────
+        # ── Gaming Mode Section (New) ───────────────────────────────
+        def toggle_gaming_mode_command():
+            current_state = self._gaming_mode_bool_var.get()
+            self.set_gaming_mode(current_state)
+
+        gaming_mode_frame = ttk.Frame(card, style="Neon.TFrame")
+        gaming_mode_frame.place(relx=0.1, rely=0.88, anchor="n")
+        
+        self._gaming_mode_bool_var = tk.BooleanVar(value=self.get_gaming_mode())
+        self.gaming_mode_checkbox = ttk.Checkbutton(
+            gaming_mode_frame,
+            text="Gaming Mode",
+            variable=self._gaming_mode_bool_var,
+            command=toggle_gaming_mode_command,
+            style="Neon.TCheckbutton"
+        )
+        self.gaming_mode_checkbox.pack(padx=10, pady=(5, 0))
+
+        # ── make draggable & closable ───────────────────────────────────
         def start_mv(e): win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
         def do_mv(e):    win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
         card.bind("<Button-3>", start_mv); card.bind("<B3-Motion>", do_mv)
@@ -1078,6 +1125,7 @@ class GhostOverlay:
 
         # move mouse cursor to overlay center (Windows)
         ctypes.windll.user32.SetCursorPos(cx, cy)
+        self._update_eq_ui_state() # Call new helper to set initial state
         
 #####################################################################################################
 

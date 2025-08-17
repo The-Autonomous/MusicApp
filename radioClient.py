@@ -137,7 +137,7 @@ class RadioClient:
                     self._handle_song_change(data) # Call updated method
 
                 # Update client_data radio_text and total duration regardless of song change
-                self.client_data['radio_text'] = data['title']
+                self.client_data['radio_text'] = data['title'] if not is_paused else f"{data['title']} *=*"
                 self.client_data['radio_duration'][1] = data['duration']
 
                 # Calculate client_pos based on local playback and server sync
