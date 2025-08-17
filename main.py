@@ -5,21 +5,20 @@ DevMode = os.path.exists(".developer_options.json")
 try:
     from adminRaise import Administrator
     from autoDependency import AutoDependencies
+    from autoUpdate import AutoUpdater
+    from log_loader import log_loader, OutputRedirector
 except:
     from .adminRaise import Administrator
     from .autoDependency import AutoDependencies
+    from .autoUpdate import AutoUpdater
+    from .log_loader import log_loader, OutputRedirector
+
+### Install Handler ###
 
 if not DevMode:
     Administrator()
     AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
     AutoDependencies().install()
-
-try:
-    from autoUpdate import AutoUpdater
-    from log_loader import log_loader, OutputRedirector
-except:
-    from .autoUpdate import AutoUpdater
-    from .log_loader import log_loader, OutputRedirector
 
 ### Logging Handler ###
 
