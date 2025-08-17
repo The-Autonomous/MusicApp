@@ -483,7 +483,7 @@ class AudioPlayerRoot:
             is_mp3 = self._filepath.lower().endswith(('.mp3', '.m4a', '.aac'))
             
             if is_mp3:
-                self._read_with_ffmpeg_memmap()
+                self._read_with_ffmpeg_optimized()
             else:
                 self._read_with_soundfile()
                 
@@ -494,63 +494,108 @@ class AudioPlayerRoot:
             if not self._stop_event.is_set() and len(self._buffer) == 0:
                 self._stop_event.set()
 
-    def _read_with_ffmpeg_memmap(self):
-        """FFmpeg decode → temporary .f32 file → numpy memmap"""
+    def _read_with_ffmpeg_optimized(self):
+        """Heavily optimized FFmpeg-based reading specifically for MP3 files"""
         start_time_seconds = self._position_frames / self.samplerate
-        tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}.f32")
-
+        
+        # Ultra-optimized MP3-specific FFmpeg command
         ffmpeg_cmd = [
-            "ffmpeg",
-            "-ss", str(start_time_seconds),
-            "-i", self._filepath,
-            "-vn", "-sn", "-dn",
-            "-c:a", "mp3_mpg123",
-            "-f", "f32le",
-            "-acodec", "pcm_f32le",
-            "-ar", str(self.samplerate),
-            "-ac", str(self.channels),
-            "-y", tmp_path
+            'ffmpeg',
+            '-ss', str(start_time_seconds),  # Seek before input (fastest)
+            '-i', self._filepath,
+            
+            # MP3-specific optimizations
+            '-c:a', 'copy',  # Try to copy without re-encoding first
+            '-f', 'f32le',   # But force f32le output format
+            '-acodec', 'pcm_f32le',  # Override if copy fails
+            
+            # Performance optimizations
+            '-threads', '0',  # Use all available CPU threads
+            '-fflags', '+fastseek+genpts',  # Fast seeking + generate PTS
+            '-flags', '+low_delay',  # Reduce latency
+            '-probesize', '32',  # Minimal probing (MP3 is well-structured)
+            '-analyzeduration', '0',  # Skip analysis for speed
+            
+            # Audio settings
+            '-ar', str(self.samplerate),
+            '-ac', str(self.channels),
+            '-avoid_negative_ts', 'disabled',  # Faster than make_zero
+            
+            # Minimize overhead
+            '-loglevel', 'panic',  # Even quieter than 'error'
+            '-hide_banner',
+            '-nostats',
+            
+            'pipe:1'
         ]
-
+        
         try:
-            subprocess.run(
+            # Optimized process creation for MP3
+            process = subprocess.Popen(
                 ffmpeg_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,  # Completely suppress stderr
+                stdin=subprocess.DEVNULL,   # No input needed
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS,
                 startupinfo=self._process_startupinfo,
-                check=True
+                bufsize=self.chunk_size * 4 * self.channels * 16,  # Even larger buffer
+                close_fds=True  # Reduce overhead
             )
-
-            # Now safe to mmap
-            mm = np.memmap(tmp_path, dtype=np.float32, mode="r")
-            frames = mm.size // self.channels
-            audio_data = mm.reshape(frames, self.channels)
-
-            frame_idx = 0
-            while not self._stop_event.is_set() and frame_idx < frames:
+            
+            self._current_process = process
+            bytes_per_frame = 4 * self.channels
+            chunk_size_bytes = self.chunk_size * bytes_per_frame
+            
+            # Pre-allocate larger read buffer for better throughput
+            read_buffer = bytearray(chunk_size_bytes * 2)  # Double buffer
+            
+            while not self._stop_event.is_set():
+                # More aggressive buffer management
                 if self._buffer.is_full:
-                    sleep(0.02)
+                    sleep(0.001)  # Faster response
                     continue
-
-                chunk = audio_data[frame_idx:frame_idx + self.chunk_size]
-                frame_idx += len(chunk)
-
-                if len(chunk) == 0:
+                elif self._buffer.fill_ratio > 0.9:  # Higher threshold
+                    sleep(0.002)
+                    continue
+                
+                # Read larger chunks when possible
+                target_bytes = chunk_size_bytes * 2 if self._buffer.fill_ratio < 0.5 else chunk_size_bytes
+                bytes_read = process.stdout.readinto(read_buffer[:target_bytes])
+                
+                if not bytes_read:
                     break
-                if not self._buffer.append(chunk):
-                    sleep(0.001)
-
-        except Exception as e:
-            ll.error(f"Error in ffmpeg memmap reader: {e}")
-
+                
+                # Process in optimal chunk sizes
+                for offset in range(0, bytes_read, chunk_size_bytes):
+                    chunk_bytes = min(chunk_size_bytes, bytes_read - offset)
+                    if chunk_bytes < bytes_per_frame:  # Skip incomplete frames
+                        break
+                        
+                    chunk = np.frombuffer(read_buffer[offset:offset + chunk_bytes], dtype=np.float32)
+                    frames_read = chunk.size // self.channels
+                    chunk = chunk[:frames_read * self.channels].reshape(frames_read, self.channels)
+                    
+                    # Handle mono to stereo conversion
+                    if chunk.shape[1] == 1 and self.channels == 2:
+                        chunk = np.repeat(chunk, 2, axis=1)
+                    
+                    if not self._buffer.append(chunk):
+                        break  # Buffer full, break inner loop
+                        
+                if self._stop_event.is_set():
+                    break
+                    
         finally:
-            try:
-                del mm
-                gc.collect()
-                os.unlink(tmp_path)
-            except Exception as cleanup_e:
-                ll.debug(f"Cleanup issue for {tmp_path}: {cleanup_e}")
+            if self._current_process and self._current_process.poll() is None:
+                try:
+                    self._current_process.terminate()
+                    self._current_process.wait(timeout=0.1)  # Shorter timeout
+                except:
+                    try:
+                        self._current_process.kill()
+                    except:
+                        pass
+            self._current_process = None
 
     def _read_with_ffmpeg(self):
         """Optimized FFmpeg-based reading"""

@@ -233,8 +233,14 @@ class RadioClient:
             os.makedirs(os.path.dirname(self.temp_song_file), exist_ok=True)
             
             headers = {'Range': 'bytes=0-'} # Request the entire file
-            response = requests.get(url, headers=headers, stream=True, timeout=10) # Added timeout for download
-            response.raise_for_status()
+            for attempt in range(3): # Retry up to 3 times
+                try:
+                    response = requests.get(url, headers=headers, stream=True, timeout=10) # Added timeout for download
+                    response.raise_for_status()
+                    break
+                except:
+                    ll.error(f"Failed to download song from {url}; Attempt {attempt + 1}/3")
+                    time.sleep(1)
 
             with open(self.temp_song_file, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
