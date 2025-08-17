@@ -1,14 +1,13 @@
 import os, sys, ctypes, subprocess, psutil
 
 class Administrator:
-    def __init__(self, require_admin=True, lower_priority=True):
+    def __init__(self, require_admin=True):
         """When require_admin is True → prompt for UAC.
         If lower_priority is True → set BELOW_NORMAL priority so GTA gets more CPU love.
         """
+        self.lower_process_priority()
         if require_admin and not self.is_admin():
             self.elevate()
-        elif lower_priority:
-            self.lower_process_priority()
 
     def is_admin(self) -> bool:
         try:
