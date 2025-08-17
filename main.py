@@ -11,6 +11,7 @@ except:
 
 if not DevMode:
     Administrator()
+    AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
     AutoDependencies().install()
 
 try:
@@ -27,9 +28,6 @@ OutputRedirector(enable_dual_logging = DevMode)
 ll.debug(f"Executing With Developer Mode: {DevMode}")
 
 #######################
-
-if not DevMode:
-    AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
 
 import tkinter as tk
 

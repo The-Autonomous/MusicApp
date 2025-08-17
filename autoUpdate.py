@@ -14,7 +14,7 @@ except:
 
 ### Logging Handler ###
 
-ll = log_loader("Auto Update")
+ll = log_loader("Auto Update", debugging = True)
 
 #######################
 

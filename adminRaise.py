@@ -52,3 +52,6 @@ class Administrator:
             print("✅ Process priority lowered (BELOW_NORMAL).")
         except Exception as e:
             print(f"⚠️ Failed to lower process priority: {e}")
+
+if __name__ == '__main__':
+    Administrator()
