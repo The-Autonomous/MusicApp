@@ -110,7 +110,7 @@ class RadioClient:
 
                 server_pos = data['location']
 
-                is_paused = data['title'].endswith("***[]*Paused")
+                is_paused = data['paused']
 
                 # Handle pause/unpause state transitions
                 if is_paused and not self._paused:
@@ -184,18 +184,20 @@ class RadioClient:
             response.raise_for_status()
             content = response.text
             title_match = re.search(r"<title>(.*?)</title>", content)
+            paused_match = re.search(r"<paused>(.*?)</paused>", content)
             location_match = re.search(r"<location>(.*?)</location>", content)
             duration_match = re.search(r"<duration>(.*?)</duration>", content)
             url_match = re.search(r"<url>(.*?)</url>", content)
             buffered_at_match = re.search(r"<buffered_at>(.*?)</buffered_at>", content)
 
-            if title_match and location_match and duration_match and url_match and buffered_at_match:
+            if title_match and paused_match and location_match and duration_match and url_match and buffered_at_match:
                 title = title_match.group(1)
                 location = float(location_match.group(1))
                 duration = float(duration_match.group(1))
+                paused = bool(paused_match.group(1) == 'True')
                 url = url_match.group(1)
                 buffered_at = float(buffered_at_match.group(1))
-                return {'title': title, 'location': location, 'duration': duration, 'url': url, 'buffered_at': buffered_at}
+                return {'title': title, 'paused': paused, 'location': location, 'duration': duration, 'url': url, 'buffered_at': buffered_at}
             return None
         except requests.exceptions.Timeout:
             ll.warn("Request to radio host timed out.")

@@ -47,13 +47,12 @@ class RadioHost:
         # Routes
         @self.app.route('/')
         def index():
-            # Get the base filename for serving
-            song_filename = os.path.basename(self.current_data['mp3_path'])
             # Construct the full URL for the song
             song_url = f"http://{self._get_local_ip()}:{port}/song"
 
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
+                f"<paused>{self.MusicPlayer.pause_event.is_set()}</paused>"
                 f"<location>{get_pos()}</location>"
                 f"<duration>{self.current_data['duration']}</duration>" # Added duration
                 f"<url>{song_url}</url>" # Added song URL
