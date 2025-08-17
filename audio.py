@@ -1,4 +1,4 @@
-import subprocess, json, gc, weakref, os
+import subprocess, json, gc, weakref, os, tempfile
 from threading import Event, Thread, Lock, RLock
 from typing import Optional, Union
 from time import sleep, monotonic
@@ -89,7 +89,7 @@ class AudioPlayerRoot:
         # Core audio settings
         self.samplerate = 22050
         self.channels = 2
-        self.chunk_size = 8192  # Optimized chunk size
+        self.chunk_size = 8192
         self.buffer_size_seconds = buffer_size_seconds
         self.eq = AudioEQ(self.samplerate, self.channels)
         self.echo = None  # off by default
@@ -468,6 +468,12 @@ class AudioPlayerRoot:
             ll.error(f"Error in audio callback: {e}")
             outdata.fill(0.0)
 
+    #def _get_file_extension(self, filepath: str) -> str:
+    #    """
+    #    Extracts the file extension from a given file path.
+    #    """
+    #    return os.path.splitext(filepath)[1]
+
     def _read_audio_chunks_optimized(self):
         """Optimized audio reading with better memory management"""
         try:
@@ -477,7 +483,7 @@ class AudioPlayerRoot:
             is_mp3 = self._filepath.lower().endswith(('.mp3', '.m4a', '.aac'))
             
             if is_mp3:
-                self._read_with_ffmpeg()
+                self._read_with_ffmpeg_memmap()
             else:
                 self._read_with_soundfile()
                 
@@ -488,17 +494,76 @@ class AudioPlayerRoot:
             if not self._stop_event.is_set() and len(self._buffer) == 0:
                 self._stop_event.set()
 
+    def _read_with_ffmpeg_memmap(self):
+        """FFmpeg decode → temporary .f32 file → numpy memmap"""
+        start_time_seconds = self._position_frames / self.samplerate
+
+        # Make a temp file (auto-cleanup when closed/deleted)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".f32")
+        tmp_path = tmp.name
+        tmp.close()
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-ss", str(start_time_seconds),
+            "-i", self._filepath,
+            "-vn", "-sn", "-dn",
+            "-c:a", "mp3_mpg123",
+            "-f", "f32le",
+            "-acodec", "pcm_f32le",
+            "-ar", str(self.samplerate),
+            "-ac", str(self.channels),
+            "-y",  # overwrite
+            tmp_path
+        ]
+
+        # Decode whole file/segment to PCM
+        subprocess.run(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            startupinfo=self._process_startupinfo
+        )
+
+        # Memory-map the raw float32 PCM
+        dtype = np.float32
+        bytes_per_frame = 4 * self.channels
+        mm = np.memmap(tmp_path, dtype=dtype, mode="r")
+        frames = mm.size // self.channels
+        audio_data = mm.reshape(frames, self.channels)
+
+        # Now feed into your buffer in chunks (like _read_with_soundfile)
+        frame_idx = 0
+        while not self._stop_event.is_set() and frame_idx < frames:
+            if self._buffer.is_full:
+                sleep(0.02)
+                continue
+
+            chunk = audio_data[frame_idx:frame_idx + self.chunk_size]
+            frame_idx += len(chunk)
+
+            if len(chunk) == 0:
+                break
+            if not self._buffer.append(chunk):
+                sleep(0.001)
+
+        del mm  # release mmap (temp file stays until deleted)
+        os.unlink(tmp_path)  # cleanup file
+
     def _read_with_ffmpeg(self):
         """Optimized FFmpeg-based reading"""
         start_time_seconds = self._position_frames / self.samplerate
         
         ffmpeg_cmd = [
-            'ffmpeg', '-ss', str(start_time_seconds), '-i', self._filepath,
-            '-loglevel', 'panic', '-f', 'f32le', '-acodec', 'pcm_f32le',
+            'ffmpeg',
+            '-ss',str(start_time_seconds), '-i', self._filepath,
+            '-loglevel', 'panic',
+            '-f', 'f32le',
+            '-acodec', 'pcm_f32le',
             '-ar', str(self.samplerate), '-ac', str(self.channels),
             '-avoid_negative_ts', 'make_zero',  # Optimize timestamp handling
-            #'-threads', '1',  # Limit to single thread for lower CPU usage
-            '-preset', 'fast',  # Minimize CPU usage
+            #'-c:a', f'{self._get_file_extension(self._filepath)}_nvdec',
             'pipe:1'
         ]
         
@@ -509,7 +574,7 @@ class AudioPlayerRoot:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 startupinfo=self._process_startupinfo,
-                bufsize=self.chunk_size * 4 * self.channels * 8  # Larger buffer
+                bufsize=self.chunk_size * 4 * self.channels * 64  # Larger buffer
             )
             
             self._current_process = process
