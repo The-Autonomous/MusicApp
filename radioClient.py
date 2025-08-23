@@ -17,7 +17,7 @@ ll = log_loader("Radio Client")
 
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
-        self.client_data = {'radio_text': '', 'radio_duration': [0, 0]} # [current position, total song duration]
+        self.client_data = {'radio_text': '', 'radio_text_clean': '', 'radio_duration': [0, 0]} # [current position, total song duration]
         self._running = Event()
         self._paused = False
         self._repeat = False
@@ -44,6 +44,8 @@ class RadioClient:
         self._download_start_time = None  # When we started downloading
         self._server_time_at_download = None  # Server's buffered_at when we started downloading
 
+    def get_client_data(self):
+        return self.client_data
 
     def generate_static(self, duration_ms: int = 500) -> np.ndarray:
         """
@@ -116,6 +118,7 @@ class RadioClient:
         """
         Update the client data with the current song title and state.
         """
+        self.client_data['radio_text_clean'] = title
         self.client_data['radio_text'] = f"{title} {'*=*' if self._paused else ''} {"*+*" if self._repeat else ""}"
         self.client_data['radio_duration'][1] = duration
         
@@ -140,33 +143,38 @@ class RadioClient:
         
         try:
             # Validate EQ data ranges
-            validated_eq = {}
-            for freq, val in eq_data.items():
-                try:
-                    freq_int = int(freq)
-                    val_float = float(val)
-                    if 20 <= freq_int <= 20000 and -12 <= val_float <= 12:
-                        validated_eq[freq_int] = val_float
-                except (ValueError, TypeError):
-                    ll.warn(f"Invalid EQ data: {freq}:{val}")
-                    continue
+            validated_eq = {
+                int(freq): float(val) for freq, val in eq_data.items()
+                if 20 <= int(freq) <= 15999 and -12 <= float(val) <= 12 and int(freq) != 16000
+            }
             
             if not validated_eq:
                 return
-            
+
             # Store original state on first application
             if not self._has_stored_original:
                 self._store_original_eq_state()
                 self._has_stored_original = True
+
+            current_eq = self.AudioPlayer.eq.get_gains() if hasattr(self.AudioPlayer, 'eq') and hasattr(self.AudioPlayer.eq, 'get_gains') else {}
             
-            # Apply host EQ directly to AudioPlayer
+            # This is the key change: create a new dictionary from current_eq with only the relevant keys
+            verified_current_eq = {
+                freq: gain for freq, gain in current_eq.items() if freq in validated_eq
+            }
+            
+            # Apply the volume update if necessary
+            if self.AudioPlayer.volume != volume and hasattr(self.AudioPlayer, 'set_volume') and 0 <= volume <= 1:
+                self.AudioPlayer.set_volume(volume)
+
+            if validated_eq == verified_current_eq:
+                #ll.debug("Skipping EQ and Volume update: settings are the same as current for all verified bands.")
+                return
+
+            # Apply the EQ update if necessary
             if hasattr(self.AudioPlayer, 'eq') and self.AudioPlayer.eq:
                 for freq, gain_db in validated_eq.items():
                     self.AudioPlayer.eq.set_gain(freq, gain_db)
-            
-            # Apply host volume directly to AudioPlayer
-            if hasattr(self.AudioPlayer, 'set_volume') and 0 <= volume <= 1:
-                self.AudioPlayer.set_volume(volume)
                 
         except Exception as e:
             ll.error(f"Error applying host EQ: {e}")
@@ -185,18 +193,13 @@ class RadioClient:
                     self._original_eq_state = self.AudioPlayer.eq.get_gains().copy()
                 else:
                     # Fallback: manually get common bands
-                    for freq in [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]:
+                    for freq in [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000]:
                         if hasattr(self.AudioPlayer.eq, 'get_band'):
                             gain = self.AudioPlayer.eq.get_band(freq, (0.0, 1.0))
                             self._original_eq_state[freq] = gain[0] if isinstance(gain, tuple) else gain
             
             # Store original volume
-            if hasattr(self.AudioPlayer, 'get_volume'):
-                self._original_volume = self.AudioPlayer.get_volume()
-            elif hasattr(self.AudioPlayer, 'current_volume'):
-                self._original_volume = self.AudioPlayer.current_volume
-            else:
-                self._original_volume = 0.5  # Default fallback
+            self._original_volume = self.AudioPlayer.volume
                 
             ll.debug(f"Stored original EQ state: {len(self._original_eq_state)} bands, volume: {self._original_volume}")
             
@@ -280,7 +283,7 @@ class RadioClient:
                     self._paused = False
 
                 # Handle song change
-                if data['title'] != self.client_data['radio_text'] and not self._repeat:
+                if data['title'] != self.client_data['radio_text_clean'] and not self._repeat:
                     self._total_pause_duration_for_current_song = 0.0
                     self._pause_start_time = None
                     self._paused = False
@@ -321,7 +324,7 @@ class RadioClient:
 
                 # Update display position
                 self.client_data['radio_duration'][0] = client_pos
-
+                
             except requests.exceptions.ConnectionError:
                 ll.warn(
                     f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s..."
@@ -381,6 +384,7 @@ class RadioClient:
 
     def _handle_song_change(self, data):
         ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
+        
         # Update client data
         self._update_radio_title(data['title'], data['duration'])
 

@@ -926,12 +926,10 @@ class GhostOverlay:
         # Disable/enable knobs and update their appearance
         for knob in self.all_eq_knobs:
             knob.disable(is_disabled)
-            print(f"Setting knob {knob} to {'disabled' if is_disabled else 'enabled'}.")
             
         # Disable/enable preset menu
         if self.eq_preset_menu:
             self.eq_preset_menu.config(state="disabled" if is_disabled else "normal")
-            print(f"Setting preset menu to {'disabled' if is_disabled else 'enabled'}.")
 
     def show_eq_overlay(self):
         """ Pops a draggable EQ + Echo overlay with rotary knobs. Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer. """

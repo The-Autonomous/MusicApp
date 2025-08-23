@@ -822,6 +822,7 @@ class MusicPlayer:
             self.radio_client.stopListening()
         except:
             pass
+        # Possibly important I dont know lol I just removed it and everything fixed lol ##
         del self.radio_client
         self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
         
@@ -864,7 +865,7 @@ class MusicPlayer:
             didReset = True
             CycleType = self.current_player_mode.is_set()
         self.current_player_mode.set() if CycleType else self.current_player_mode.clear()
-        self.resetRadio()
+        #self.resetRadio()
         self.set_lyrics(False)
         pauseType = self.pause_event.is_set()
         if CycleType:
@@ -929,23 +930,23 @@ class MusicPlayer:
                 
         while True:
             self.current_player_mode.wait()
-            while True:
-                try:
-                    listeningIp = self.current_radio_ip
-                    self.current_radio_id = ""
-                    self.radio_client.listenTo(listeningIp, lyric_callback)
-                    ll.print(f"Listening To {listeningIp}.")
-                    break
-                except Exception as e:
-                    ll.error(f"Radio met unexpected exception {e}")
-                    break
+            self.resetRadio()
+            try:
+                listeningIp = self.current_radio_ip
+                self.current_radio_id = ""
+                self.radio_client.listenTo(listeningIp, lyric_callback)
+                ll.print(f"Listening To {listeningIp}.")
+            except Exception as e:
+                ll.error(f"Radio met unexpected exception {e}")
+                break
             
             self.set_lyrics(False)
             
             while True:
                 if not self.current_player_mode.is_set() or listeningIp != self.current_radio_ip:
+                    ll.print("Exiting Radio Loop.")
                     break
-                RadioData = self.radio_client.client_data
+                RadioData = self.radio_client.get_client_data()
                 self.set_duration(*RadioData['radio_duration'])
                 self.set_screen(*RadioData['radio_text'].split("![]!"))
                 sleep(1)
