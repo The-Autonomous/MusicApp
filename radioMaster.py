@@ -49,11 +49,15 @@ class RadioHost:
         def index():
             # Construct the full URL for the song
             song_url = f"http://{self._get_local_ip()}:{port}/song"
+            eq_data = self.MusicPlayer.get_bands() if hasattr(self.MusicPlayer, 'get_bands') else {}
+            eq_string = ','.join(f"{k}:{v}" for k,v in eq_data.items())
 
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
                 f"<paused>{self.MusicPlayer.pause_event.is_set()}</paused>"
                 f"<repeat>{self.MusicPlayer.repeat_event.is_set()}</repeat>"
+                f"<eq>{eq_string}</eq>"
+                f"<volume>{self.MusicPlayer.current_volume}</volume>"
                 f"<location>{get_pos()}</location>"
                 f"<duration>{self.current_data['duration']}</duration>" # Added duration
                 f"<url>{song_url}</url>" # Added song URL

@@ -1,4 +1,4 @@
-import re, threading, os
+import re, threading, os, sys, signal
 from typing import List, Optional, Tuple
 
 try:
@@ -187,3 +187,94 @@ class MusicOverlayController:
 
     def start(self):
         threading.Thread(target=self.player.core_handler, daemon=True).start()
+        
+class ProgramShutdown:
+    """
+    Singleton class to handle complete program shutdown from anywhere.
+    Can be called from any thread or process.
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        
+        self._initialized = True
+        self.root = None
+        self.cleanup_callbacks = []
+        self.shutdown_event = threading.Event()
+        
+    def register_root(self, root):
+        """Register the main Tkinter root window"""
+        self.root = root
+        
+    def register_cleanup(self, callback):
+        """Register a cleanup function to be called before shutdown"""
+        self.cleanup_callbacks.append(callback)
+    
+    def shutdown(self, exit_code: int = 0, reason: str = ""):
+        """
+        Complete program shutdown that works from any thread.
+        
+        Args:
+            exit_code: Exit code for the program (0 = normal, non-zero = error)
+            reason: Optional reason for shutdown (for logging)
+        """
+        print(f"🔴 Initiating shutdown: {reason}" if reason else "🔴 Initiating shutdown")
+        
+        # Set shutdown event for any threads monitoring it
+        self.shutdown_event.set()
+        
+        # Run cleanup callbacks
+        for callback in self.cleanup_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+        
+        # Handle Tkinter shutdown
+        if self.root:
+            try:
+                # Schedule GUI destruction on main thread
+                self.root.after(0, self._destroy_gui)
+                # Give it a moment to process
+                threading.Timer(0.5, self._force_exit, args=[exit_code]).start()
+            except:
+                # If Tkinter is already destroyed or errored
+                self._force_exit(exit_code)
+        else:
+            self._force_exit(exit_code)
+    
+    def _destroy_gui(self):
+        """Destroy Tkinter GUI (must run on main thread)"""
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except:
+            pass
+    
+    def _force_exit(self, exit_code: int):
+        """Force exit using multiple methods"""
+        try:
+            # Method 1: Clean Python exit
+            sys.exit(exit_code)
+        except SystemExit:
+            # Method 2: OS-level exit
+            os._exit(exit_code)
+        except:
+            # Method 3: Signal (Unix/Linux/Mac)
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except:
+                # Method 4: Forceful OS exit
+                os._exit(exit_code)

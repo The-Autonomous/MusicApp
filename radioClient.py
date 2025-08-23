@@ -26,6 +26,10 @@ class RadioClient:
         self._ip = ip
         self._callback = None
         self._handled = False
+        self._accept_host_eq = True
+        self._original_eq_state = None  # Will store original EQ when we start accepting
+        self._original_volume = None  # Will store original volume
+        self._has_stored_original = False  # Track if we've saved the original state
         self.update_interval = 0.5
         self.sync_threshold = 1.0 # Threshold for re-syncing client position to server position
         self.temp_song_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache.mp3")
@@ -96,7 +100,17 @@ class RadioClient:
                 return False
 
     def stopListening(self):
+        """
+        Enhanced stop that restores local EQ before clearing the running flag.
+        """
+        # Restore local EQ if we were accepting host EQ
+        if self._accept_host_eq:
+            self._restore_local_eq()
+            self._accept_host_eq = False  # Reset to not accepting
+        
+        # Clear the running flag to stop the update loop
         self._running.clear()
+        ll.debug("Stopped listening and restored local EQ")
 
     def _update_radio_title(self, title: str, duration: float = 0.0):
         """
@@ -104,6 +118,132 @@ class RadioClient:
         """
         self.client_data['radio_text'] = f"{title} {'*=*' if self._paused else ''} {"*+*" if self._repeat else ""}"
         self.client_data['radio_duration'][1] = duration
+        
+    def _apply_host_eq(self, eq_data, volume):
+        """
+        Apply host's EQ settings, storing original values on first application.
+        Hot-patches the audio without modifying saved user preferences.
+        """
+        # Skip if client hasn't opted in or no EQ data
+        if not self._accept_host_eq or not eq_data:
+            return
+        
+        # Grace period: Skip EQ updates for 1.5 seconds after song starts
+        if self._current_song_start_time and \
+           (monotonic() - self._current_song_start_time) < 1.5:
+            return
+        
+        # Skip during active downloads to prevent glitches
+        if self._download_start_time and \
+           (monotonic() - self._download_start_time) < 2.0:
+            return
+        
+        try:
+            # Validate EQ data ranges
+            validated_eq = {}
+            for freq, val in eq_data.items():
+                try:
+                    freq_int = int(freq)
+                    val_float = float(val)
+                    if 20 <= freq_int <= 20000 and -12 <= val_float <= 12:
+                        validated_eq[freq_int] = val_float
+                except (ValueError, TypeError):
+                    ll.warn(f"Invalid EQ data: {freq}:{val}")
+                    continue
+            
+            if not validated_eq:
+                return
+            
+            # Store original state on first application
+            if not self._has_stored_original:
+                self._store_original_eq_state()
+                self._has_stored_original = True
+            
+            # Apply host EQ directly to AudioPlayer
+            if hasattr(self.AudioPlayer, 'eq') and self.AudioPlayer.eq:
+                for freq, gain_db in validated_eq.items():
+                    self.AudioPlayer.eq.set_gain(freq, gain_db)
+            
+            # Apply host volume directly to AudioPlayer
+            if hasattr(self.AudioPlayer, 'set_volume') and 0 <= volume <= 1:
+                self.AudioPlayer.set_volume(volume)
+                
+        except Exception as e:
+            ll.error(f"Error applying host EQ: {e}")
+    
+    def _store_original_eq_state(self):
+        """
+        Store the current local EQ and volume settings before applying host settings.
+        Only called once when starting to accept host EQ.
+        """
+        try:
+            # Store original EQ bands
+            if hasattr(self.AudioPlayer, 'eq') and self.AudioPlayer.eq:
+                self._original_eq_state = {}
+                # Get all available bands from the EQ
+                if hasattr(self.AudioPlayer.eq, 'get_gains'):
+                    self._original_eq_state = self.AudioPlayer.eq.get_gains().copy()
+                else:
+                    # Fallback: manually get common bands
+                    for freq in [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]:
+                        if hasattr(self.AudioPlayer.eq, 'get_band'):
+                            gain = self.AudioPlayer.eq.get_band(freq, (0.0, 1.0))
+                            self._original_eq_state[freq] = gain[0] if isinstance(gain, tuple) else gain
+            
+            # Store original volume
+            if hasattr(self.AudioPlayer, 'get_volume'):
+                self._original_volume = self.AudioPlayer.get_volume()
+            elif hasattr(self.AudioPlayer, 'current_volume'):
+                self._original_volume = self.AudioPlayer.current_volume
+            else:
+                self._original_volume = 0.5  # Default fallback
+                
+            ll.debug(f"Stored original EQ state: {len(self._original_eq_state)} bands, volume: {self._original_volume}")
+            
+        except Exception as e:
+            ll.error(f"Error storing original EQ state: {e}")
+    
+    def _restore_local_eq(self):
+        """
+        Restore local EQ settings when disconnecting from host or disabling host EQ.
+        """
+        try:
+            if not self._has_stored_original:
+                return  # Nothing to restore
+            
+            # Restore original EQ values
+            if self._original_eq_state and hasattr(self.AudioPlayer, 'eq') and self.AudioPlayer.eq:
+                for freq, original_gain in self._original_eq_state.items():
+                    self.AudioPlayer.eq.set_gain(freq, original_gain)
+                ll.debug(f"Restored {len(self._original_eq_state)} EQ bands to original values")
+            
+            # Restore original volume
+            if self._original_volume is not None and hasattr(self.AudioPlayer, 'set_volume'):
+                self.AudioPlayer.set_volume(self._original_volume)
+                ll.debug(f"Restored volume to {self._original_volume}")
+            
+            # Clear stored state
+            self._original_eq_state = None
+            self._original_volume = None
+            self._has_stored_original = False
+            
+        except Exception as e:
+            ll.error(f"Error restoring local EQ: {e}")
+    
+    def set_accept_host_eq(self, accept: bool):
+        """
+        Toggle whether to accept host's EQ settings.
+        Automatically restores local EQ when disabling.
+        """
+        if self._accept_host_eq == accept:
+            return  # No change
+        
+        if not accept and self._accept_host_eq:
+            # Switching from accepting to not accepting - restore local
+            self._restore_local_eq()
+        
+        self._accept_host_eq = accept
+        ll.debug(f"Host EQ acceptance set to: {accept}")
         
     def _update_loop(self):
         while self._running.is_set():
@@ -115,6 +255,9 @@ class RadioClient:
                     sleep(self.update_interval)
                     continue
 
+                if self._accept_host_eq:
+                    self._apply_host_eq(data['eq'], data['volume'])
+                    
                 server_pos = data['location']
 
                 is_paused = data['paused']
@@ -207,7 +350,16 @@ class RadioClient:
             duration = float(extract(r"<duration>(.*?)</duration>", "0") or 0)
             url = extract(r"<url>(.*?)</url>", "/song")
             buffered_at = float(extract(r"<buffered_at>(.*?)</buffered_at>", "0") or 0)
+            eq_string = extract(r"<eq>(.*?)</eq>", "")
+            volume = float(extract(r"<volume>(.*?)</volume>", "1.0"))
 
+            eq_data = {}
+            if len(eq_string) > 0:
+                for pair in eq_string.split(','):
+                    if ':' in pair:
+                        freq, val = pair.split(':')
+                        eq_data[int(freq)] = float(val)
+                        
             return {
                 "title": title,
                 "repeat": repeat,
@@ -216,6 +368,8 @@ class RadioClient:
                 "duration": duration,
                 "url": url,
                 "buffered_at": buffered_at,
+                "eq": eq_data,
+                "volume": volume
             }
 
         except requests.exceptions.Timeout:

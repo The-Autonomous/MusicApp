@@ -32,14 +32,19 @@ import tkinter as tk
 
 try:
     from ghost import GhostOverlay
-    from playerUtils import MusicOverlayController
+    from playerUtils import MusicOverlayController, ProgramShutdown
 except ImportError:
     from .ghost import GhostOverlay
-    from .playerUtils import MusicOverlayController
+    from .playerUtils import MusicOverlayController, ProgramShutdown
 
 def main():
     root = tk.Tk()
     root.withdraw()
+    
+    # Create and register shutdown handler #
+    shutdown_handler = ProgramShutdown()
+    shutdown_handler.register_root(root)
+    
     overlay = GhostOverlay(root)
     controller = MusicOverlayController(overlay)
     controller.start()

@@ -1,4 +1,4 @@
-import ctypes, psutil, os
+import ctypes, os
 import tkinter as tk
 from tkinter import font, messagebox, ttk
 from threading import Lock, RLock, Thread
@@ -10,12 +10,10 @@ import json
 
 try:
     from log_loader import log_loader
-    from adminRaise import Administrator
     from playerUtils import TitleCleaner
     from audio_eq import EQKnob, PercentKnob, VolumeSlider
 except ImportError:
     from .log_loader import log_loader
-    from .adminRaise import Administrator
     from .playerUtils import TitleCleaner
     from .audio_eq import EQKnob, PercentKnob, VolumeSlider
     
@@ -111,30 +109,6 @@ class SettingsHandler:
             self._settings = {}
             self._save()
 
-def kill_all_python_processes(include_current: bool = True):
-    my_pid = os.getpid()
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
-        pid = proc.info['pid']
-        if pid == my_pid and not include_current:
-            continue
-        name = (proc.info['name'] or "").lower()
-        exe  = (os.path.basename(proc.info.get('exe') or "")).lower()
-        cmd  = " ".join(proc.info.get('cmdline') or []).lower()
-        if any(keyword in name for keyword in ('python',)) \
-           or any(keyword in exe  for keyword in ('python',)) \
-           or cmd.startswith('python'):
-            try:
-                proc.terminate()
-                proc.wait(timeout=1) # Reduced timeout for faster attempts
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            except psutil.TimeoutExpired:
-                try:
-                    proc.kill()
-                    proc.wait(timeout=1) # Wait after kill as well
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-
 class RoundedCanvas(tk.Canvas):
     minimum_steps = 10  # lower values give pixelated corners
 
@@ -221,6 +195,60 @@ class MouseTracker:
                 ll.warn("Warning: pynput listener thread did not terminate cleanly.")
 
 class GhostOverlay:
+    
+    EQ_PRESETS = {
+        # Neutral
+        "Flat":                              [ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+        
+        # Warm/Smooth Presets
+        "Warm & Smooth":                     [-3, -2, -1,  0,  2,  2,  1,  0, -2, -3],
+        "Lounge":                            [-3, -2, -1,  0,  2,  3,  2,  0, -1, -3],
+        "Vintage Tape":                      [-2, -1,  0,  1,  2,  2,  1,  0, -1, -4],
+        "Lo-fi Chill":                       [-5, -4, -2,  0,  1,  2,  1, -1, -3, -6],
+        
+        # Vocal/Speech Enhancement
+        "Vocal Clarity":                     [-4, -4, -2,  0,  3,  5,  4,  2, -2, -4],
+        "Speech Boost":                      [-5, -4, -2,  0,  3,  5,  4,  2,  0, -2],
+        "Podcast":                           [-8, -6, -4, -2,  0,  2,  4,  5,  6,  8],
+        
+        # Genre-Specific Presets
+        "Hip-Hop Punch":                     [ 6,  6,  4,  2, -2, -3,  1,  3,  2, -1],
+        "Pop Hits":                          [ 4,  3,  1,  0, -1,  1,  3,  4,  3,  2],
+        "Rock Arena":                        [ 4,  3,  2,  1,  0,  2,  3,  4,  3,  1],
+        "Rock Metal":                        [ 5,  4,  3,  1,  0,  2,  4,  5,  4,  2],
+        "Funk Groove":                       [ 3,  2,  1,  0,  1,  3,  4,  3,  2,  1],
+        "Classical":                         [-2, -1,  0,  1,  3,  3,  2,  1,  0, -1],
+        "Jazz Club":                         [-1,  0,  1,  2,  3,  2,  1,  0, -1, -2],
+        "Acoustic":                          [-2, -1,  0,  1,  3,  4,  3,  1,  0, -1],
+        
+        # Electronic/Dance Presets
+        "Dance Club":                        [ 5,  4,  2,  0, -2,  0,  3,  5,  4,  3],
+        "EDM Festival":                      [ 7,  6,  4,  1, -1,  0,  3,  5,  6,  4],
+        
+        # Bass-Heavy Presets
+        "Crazy Bass":                        [10,  8,  5,  0, -5, -6, -2,  3,  5,  4],
+        "I Like Screaming":                  [ 8,  6,  4,  1, -3,  0,  4,  7,  6,  5],
+        
+        # Frequency Shaping
+        "Treble Boost":                      [-5, -3,  0,  3,  5,  5,  4,  2,  0, -2],
+        "Bass & Treble":                     [ 6,  4,  2,  0, -4, -5,  0,  2,  4,  6],
+        "V Shape":                           [10,  8,  5,  0, -5, -6,  0,  5,  8, 10],
+        "Inverted V":                        [-6, -5, -3,  0,  3,  3,  0, -3, -5, -6],
+        
+        # Frequency Cuts
+        "Bass Cut":                          [-12,-12,-12,-12, 0,  0,  0,  0,  0,  0],
+        "Treble Cut":                        [ 0,  0,  0,  0,-12,-12,-12,-12,-12,-12],
+        
+        # Special/Utility Presets
+        "Night Mode":                        [ -6, -6, -4, -2, 0,  1,  1,  0, -1, -3],
+        "Make Me Sleep":                     [-12,-10, -8, -5, 0,  1,  2,  1, -3, -8],
+        
+        # Experimental/Fun Presets
+        "Loudness :D":                       [12, 12, 12, 12, 12, 12, 12, 12, 12, 12],
+        "Every Other":                       [-6,  6, -6,  6, -6,  6, -6,  6, -6,  6],
+        "AI Generated These Could You Tell": [ 2,  3,  1,  0, -1,  1,  3,  4,  3,  2],
+    }
+    
     def __init__(self, root):
         ### Root ###
         self.root = root
@@ -413,8 +441,8 @@ class GhostOverlay:
             },
             {
                 'id': 'kill_all_python',
-                'required': ['right alt', 'ctrl'], # Kept as per original
-                'action': kill_all_python_processes, # Ensure current isn't killed if not intended
+                'required': ['right alt', 'ctrl'],
+                'action': self.close_application,
                 'hint': "EMERGENCY: Close Player & Python Tasks", # Clarified hint
                 'modifiable': False # Critical, potentially disruptive
             },
@@ -958,43 +986,10 @@ class GhostOverlay:
         fmax = 16000
         
         preset_var = tk.StringVar(value="Flat")
+        
         # ── preset values ─────────────────────────────────────────────────
-        def db(*vals): return list(vals)
-        presets = {
-            "Flat": db( 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-            "Warm & Smooth": db(-3,-2,-1, 0, 2, 2, 1, 0,-2,-3),
-            "Vocal Clarity": db(-4,-4,-2, 0, 3, 5, 4, 2,-2,-4),
-            "Night Mode": db(-6,-6,-4,-2, 0, 1, 1, 0,-1,-3),
-            "Hip-Hop Punch": db( 6, 6, 4, 2,-2,-3, 1, 3, 2,-1),
-            "Crazy Bass": db(10, 8, 5, 0,-5,-6,-2, 3, 5, 4),
-            "Treble Boost": db(-5,-3, 0, 3, 5, 5, 4, 2, 0,-2),
-            "Pop Hits": db( 4, 3, 1, 0,-1, 1, 3, 4, 3, 2),
-            "Dance Club": db( 5, 4, 2, 0,-2, 0, 3, 5, 4, 3),
-            "I Like Screaming": db( 8, 6, 4, 1,-3, 0, 4, 7, 6, 5),
-            "Rock Arena": db( 4, 3, 2, 1, 0, 2, 3, 4, 3, 1),
-            "Rock Metal": db( 5, 4, 3, 1, 0, 2, 4, 5, 4, 2), 
-            "Funk Groove": db( 3, 2, 1, 0, 1, 3, 4, 3, 2, 1),
-            "Classical": db(-2,-1, 0, 1, 3, 3, 2, 1, 0,-1),
-            "Jazz Club": db(-1, 0, 1, 2, 3, 2, 1, 0,-1,-2),
-            "EDM Festival": db( 7, 6, 4, 1,-1, 0, 3, 5, 6, 4),
-            "Lo-fi Chill": db(-5,-4,-2, 0, 1, 2, 1,-1,-3,-6),
-            "Vintage Tape": db(-2,-1, 0, 1, 2, 2, 1, 0,-1,-4),
-            "Loudness :D": db(12,12,12,12,12,12,12,12,12,12),
-            "Every Other": db(-6, 6,-6, 6,-6, 6,-6, 6,-6, 6),
-            "Bass Cut": db(-12,-12,-12,-12, 0, 0, 0, 0, 0, 0),
-            "Treble Cut": db( 0, 0, 0, 0,-12,-12,-12,-12,-12,-12),
-            "V Shape": db(10, 8, 5, 0,-5,-6, 0, 5, 8,10),
-            "Inverted V": db(-6,-5,-3, 0, 3, 3, 0,-3,-5,-6),
-            "Podcast": db(-8,-6,-4,-2, 0, 2, 4, 5, 6, 8),
-            "Speech Boost": db(-5,-4,-2, 0, 3, 5, 4, 2, 0,-2),
-            "Bass & Treble": db( 6, 4, 2, 0,-4,-5, 0, 2, 4, 6),
-            "Lounge": db(-3,-2,-1, 0, 2, 3, 2, 0,-1,-3),
-            "Acoustic": db(-2,-1, 0, 1, 3, 4, 3, 1, 0,-1),
-            "Make Me Sleep": db(-12,-10,-8,-5, 0, 1, 2, 1,-3,-8),
-            "AI Generated These Could You Tell": db( 2, 3, 1, 0,-1, 1, 3, 4, 3, 2),
-        }
-        presets["Custom"] = None
-        preset_map = { tuple(vals): name for name, vals in presets.items() if vals is not None }
+        self.EQ_PRESETS["Custom"] = None
+        preset_map = { tuple(vals): name for name, vals in self.EQ_PRESETS.items() if vals is not None }
 
         def knob_changed(gain, freq):
             _eq_target.set_band(freq, gain)
@@ -1019,14 +1014,14 @@ class GhostOverlay:
         # ── presets ───────────────────────────────────────────────────────
         def apply_preset(name):
             if name == "Custom": return
-            for f, g in zip(bands, presets[name]):
+            for f, g in zip(bands, self.EQ_PRESETS[name]):
                 self.eq_knobs[f].gain = g
                 self.eq_knobs[f]._draw()
                 if f < fmax:
                     _eq_target.set_band(f, g)
             preset_var.set(name)
 
-        preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *presets.keys(), command=apply_preset, style="Neon.TMenubutton")
+        preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *self.EQ_PRESETS.keys(), command=apply_preset, style="Neon.TMenubutton")
         preset_menu["menu"].config(tearoff=0, bg="#272b33", fg="#ddd", activebackground="#313640", activeforeground="#00e8d0", relief="flat")
         card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
         self.eq_preset_menu = preset_menu # Store reference
@@ -1093,7 +1088,27 @@ class GhostOverlay:
             style="Neon.TCheckbutton"
         )
         self.gaming_mode_checkbox.pack(padx=10, pady=(5, 0))
-
+        
+        sync_frame = ttk.Frame(card, style="Neon.TFrame")
+        sync_frame.place(relx=0.5, rely=0.93, anchor="n")
+        
+        if hasattr(self.MusicPlayer, 'radio_client'):  # Is client
+            self._accept_eq_var = tk.BooleanVar(
+                value=getattr(self.MusicPlayer.radio_client, '_accept_host_eq', False)
+            )
+            
+            def toggle_host_eq():
+                # Use the setter method to properly handle state changes
+                self.MusicPlayer.radio_client.set_accept_host_eq(self._accept_eq_var.get())
+            
+            ttk.Checkbutton(
+                sync_frame,
+                text="Use Radio Host's Settings",
+                variable=self._accept_eq_var,
+                command=toggle_host_eq,
+                style="Neon.TCheckbutton"
+            ).pack()
+            
         # ── make draggable & closable ───────────────────────────────────
         def start_mv(e): win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
         def do_mv(e):    win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
@@ -1528,9 +1543,12 @@ class GhostOverlay:
             "Reboot Overlay",
             "Are you sure you want to reboot the Music Player?\nThis will restart the everything and you may lose the song you are actively listening to!"
         ):
-            if hasattr(self, 'MusicPlayer'):
-                self.MusicPlayer.pause(True) # True to pause
-            kill_all_python_processes(False) # False to not kill the main process
+            try:
+                from adminRaise import Administrator
+            except:
+                from .adminRaise import Administrator
+                
+            ll.debug("Rebooting overlay and music player...")
             Administrator.elevate(True)
 
 #####################################################################################################
@@ -1944,6 +1962,11 @@ class GhostOverlay:
                 self.radio_metric['current_ip'] = '' # No IPs available
                 ll.warn("No radio IPs available to select.")
         # No automatic display update here, _trigger_radio_station will handle it after attempting connection.
+        
+    def close_application(self):
+        """Properly close the entire application"""
+        self.root.destroy()   # Destroy GUI first
+        os._exit(0)          # Force exit all threads/processes
 
 #####################################################################################################
 
