@@ -53,6 +53,7 @@ class RadioHost:
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
                 f"<paused>{self.MusicPlayer.pause_event.is_set()}</paused>"
+                f"<repeat>{self.MusicPlayer.repeat_event.is_set()}</repeat>"
                 f"<location>{get_pos()}</location>"
                 f"<duration>{self.current_data['duration']}</duration>" # Added duration
                 f"<url>{song_url}</url>" # Added song URL

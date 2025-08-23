@@ -23,7 +23,15 @@ class DownloadPopup:
     def __init__(self):
         pass
     
-    def popup_process(self, close_event, progress_value):
+    def popup_process(self, close_event, progress_value, current_song):
+        """
+        Display download progress popup.
+        
+        Args:
+            close_event: multiprocessing.Event to signal closing
+            progress_value: multiprocessing.Value (float) for progress 0.0-1.0
+            current_song: SharedString instance with current song name
+        """
         root = tk.Tk()
         root.overrideredirect(True)
         root.attributes('-topmost', True)
@@ -44,10 +52,12 @@ class DownloadPopup:
         frame = tk.Frame(canvas, bg="#1c1c1c")
         frame.place(relwidth=0.95, relheight=0.9, relx=0.025, rely=0.05)
 
-        label = tk.Label(frame, text="Downloading Music...", fg="#00FFAA", bg="#1c1c1c", font=("Segoe UI", 12, "bold"))
+        label = tk.Label(frame, text="Downloading Music...", fg="#00FFAA", bg="#1c1c1c", 
+                        font=("Segoe UI", 12, "bold"))
         label.pack(pady=(10, 0))
 
-        percent_label = tk.Label(frame, text="0%", fg="#AAAAAA", bg="#1c1c1c", font=("Segoe UI", 10))
+        percent_label = tk.Label(frame, text="0% ~ Waiting...", fg="#AAAAAA", bg="#1c1c1c", 
+                                font=("Segoe UI", 10))
         percent_label.pack()
 
         style = ttk.Style()
@@ -60,7 +70,8 @@ class DownloadPopup:
                         darkcolor="#00FFAA",
                         thickness=10)
 
-        progress = ttk.Progressbar(frame, mode="determinate", length=280, style="Custom.Horizontal.TProgressbar")
+        progress = ttk.Progressbar(frame, mode="determinate", length=280, 
+                                  style="Custom.Horizontal.TProgressbar")
         progress.pack(pady=(5, 10))
         progress['maximum'] = 100
 
@@ -68,18 +79,32 @@ class DownloadPopup:
             if close_event.is_set():
                 root.destroy()
             else:
+                # Get progress value
                 value = max(0, min(1, progress_value.value)) * 100
                 progress['value'] = value
-                percent_label.config(text=f"{int(value)}%")
+                
+                # Get current song name from SharedString
+                song_name = current_song.get()
+                
+                # Update label
+                if song_name:
+                    # Truncate song name if too long for display
+                    display_name = song_name[:20] + "..." if len(song_name) > 20 else song_name
+                    percent_label.config(text=f"{int(value)}% ~ {display_name}")
+                else:
+                    percent_label.config(text=f"{int(value)}% ~ Waiting...")
+                
                 root.after(100, update_progress)
 
-        root.after(100, update_progress())
+        # Start update loop
+        root.after(100, update_progress)
         root.mainloop()
 
 class ytHandle:
-    def __init__(self, max_workers=8, sponsorblock_categories=None):
+    def __init__(self, max_workers=8, sponsorblock_categories=None, video_name_callback=None):
         self._check_dependencies()
         self.max_workers = max_workers
+        self.video_name_callback = video_name_callback
         self.max_filename_length = 120
         self.sponsorblock_categories = sponsorblock_categories or [
             'sponsor', 'intro', 'outro', 'selfpromo', 
@@ -310,6 +335,7 @@ class ytHandle:
 
         try:
             ll.debug(f"⏬ Starting: {track['safe_name']}")
+            self.video_name_callback(track['safe_name']) if self.video_name_callback else None
             
             # Use cached options and set output template
             ydl_opts = self._get_cached_ydl_opts().copy()

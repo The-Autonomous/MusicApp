@@ -98,107 +98,126 @@ class RadioClient:
     def stopListening(self):
         self._running.clear()
 
+    def _update_radio_title(self, title: str, duration: float = 0.0):
+        """
+        Update the client data with the current song title and state.
+        """
+        self.client_data['radio_text'] = f"{title} {'*=*' if self._paused else ''} {"*+*" if self._repeat else ""}"
+        self.client_data['radio_duration'][1] = duration
+        
     def _update_loop(self):
         while self._running.is_set():
-            server_pos = -1.0
-            data = None # Initialize data to None
+            server_pos, data = -1.0, None
             try:
                 data = self._fetch_data()
                 if not data:
+                    ll.warn("No data received from radio host. Retrying...")
                     sleep(self.update_interval)
                     continue
 
                 server_pos = data['location']
 
                 is_paused = data['paused']
+                self._repeat = data['repeat']
 
                 # Handle pause/unpause state transitions
                 if is_paused and not self._paused:
                     self.AudioPlayer.pause()
-                    self._pause_start_time = monotonic() # Mark the start of THIS pause
+                    self._pause_start_time = monotonic()
                     self._paused = True
+
                 elif not is_paused and self._paused:
                     self.AudioPlayer.unpause()
                     if self._pause_start_time is not None:
-                        self._total_pause_duration_for_current_song += (monotonic() - self._pause_start_time)
+                        # Add total duration of that completed pause
+                        self._total_pause_duration_for_current_song += (
+                            monotonic() - self._pause_start_time
+                        )
                     self._pause_start_time = None
                     self._paused = False
 
-                self._repeat = data['title'].endswith(" *+*")
-
-                # Check for song change
+                # Handle song change
                 if data['title'] != self.client_data['radio_text'] and not self._repeat:
-                    # New song detected
-                    self._total_pause_duration_for_current_song = 0.0 # Reset for new song
-                    self._pause_start_time = None # Ensure this is also reset
-                    self._paused = False # Ensure client is not marked as paused when new song starts
-                    self._current_song_start_time = None # Indicate no playback until _download_and_play sets it
-                    self._current_song_start_server_pos = 0.0 # Reset server start pos
-                    self._handle_song_change(data) # Call updated method
+                    self._total_pause_duration_for_current_song = 0.0
+                    self._pause_start_time = None
+                    self._paused = False
+                    self._current_song_start_time = None
+                    self._current_song_start_server_pos = 0.0
+                    self._handle_song_change(data)
 
-                # Update client_data radio_text and total duration regardless of song change
-                self.client_data['radio_text'] = data['title'] if not is_paused else f"{data['title']} *=*"
-                self.client_data['radio_duration'][1] = data['duration']
+                # Update title/duration
+                self._update_radio_title(data['title'], data['duration'])
 
-                # Calculate client_pos based on local playback and server sync
-                client_pos = 0.0
-                if self._current_song_start_time is not None:
-                    # Calculate elapsed time on client, accounting for pauses
-                    elapsed_active_time = (monotonic() - self._current_song_start_time) - self._total_pause_duration_for_current_song
-                    if self._paused and self._pause_start_time is not None:
-                        # If currently paused, subtract the duration of the *current, ongoing* pause from the elapsed time
-                        # to get the position as if the song is paused.
-                        elapsed_active_time -= (monotonic() - self._pause_start_time)
-
+                # Playback position logic
+                client_pos = self.client_data['radio_duration'][0]  # keep last known by default
+                if self._current_song_start_time is not None and not self._paused:
+                    elapsed_active_time = (
+                        (monotonic() - self._current_song_start_time)
+                        - self._total_pause_duration_for_current_song
+                    )
                     client_pos = self._current_song_start_server_pos + elapsed_active_time
 
-                    # Clamping client_pos to song duration:
+                    # Clamp
                     if data['duration'] > 0:
                         client_pos = min(client_pos, data['duration'])
-                        client_pos = max(client_pos, 0.0) # Ensure it doesn't go below 0
+                        client_pos = max(client_pos, 0.0)
 
-                    # Re-sync logic: If client position deviates too much from server position
-                    # This is crucial for handling repeated songs or desynchronization
-                    if abs(client_pos - server_pos) > self.sync_threshold and abs(client_pos - server_pos) <= data['duration'] - self.sync_threshold:
-                        ll.debug(f"🔄 Resyncing due to drift: Client {client_pos:.2f}s, Server {server_pos:.2f}s (Diff: {abs(client_pos - server_pos):.2f}s)")
+                    # Re-sync if drift detected
+                    if (
+                        abs(client_pos - server_pos) > self.sync_threshold
+                        and abs(client_pos - server_pos)
+                        <= data['duration'] - self.sync_threshold
+                    ):
+                        ll.debug(
+                            f"🔄 Resyncing due to drift: "
+                            f"Client {client_pos:.2f}s, Server {server_pos:.2f}s "
+                            f"(Diff: {abs(client_pos - server_pos):.2f}s)"
+                        )
                         self._resync_playback(data['url'], server_pos, data['buffered_at'])
-                        # After resync, client_pos will be updated on the next loop iteration based on new _current_song_start_time
-                        # For this iteration, we can just use the server_pos or re-calculate.
-                        client_pos = server_pos # Assume instant sync for this display update
+                        client_pos = server_pos  # snap after resync
 
-                self.client_data['radio_duration'][0] = client_pos # Update displayed current position
+                # Update display position
+                self.client_data['radio_duration'][0] = client_pos
 
             except requests.exceptions.ConnectionError:
-                ll.warn(f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s...")
+                ll.warn(
+                    f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s..."
+                )
                 self.AudioPlayer.pause()
-                self._paused = True # Mark as paused if connection is lost
+                self._paused = True
             except Exception as e:
                 ll.error(f"Error in _update_loop: {e}")
-                # Consider adding self.stopListening() if critical error
 
             sleep(self.update_interval)
-
+            
     def _fetch_data(self):
         try:
             response = requests.get(f"http://{self._ip}:8080", timeout=self.update_interval)
             response.raise_for_status()
             content = response.text
-            title_match = re.search(r"<title>(.*?)</title>", content)
-            paused_match = re.search(r"<paused>(.*?)</paused>", content)
-            location_match = re.search(r"<location>(.*?)</location>", content)
-            duration_match = re.search(r"<duration>(.*?)</duration>", content)
-            url_match = re.search(r"<url>(.*?)</url>", content)
-            buffered_at_match = re.search(r"<buffered_at>(.*?)</buffered_at>", content)
 
-            if title_match and paused_match and location_match and duration_match and url_match and buffered_at_match:
-                title = title_match.group(1)
-                location = float(location_match.group(1))
-                duration = float(duration_match.group(1))
-                paused = bool(paused_match.group(1) == 'True')
-                url = url_match.group(1)
-                buffered_at = float(buffered_at_match.group(1))
-                return {'title': title, 'paused': paused, 'location': location, 'duration': duration, 'url': url, 'buffered_at': buffered_at}
-            return None
+            def extract(pattern, default):
+                match = re.search(pattern, content)
+                return match.group(1) if match else default
+
+            title = extract(r"<title>(.*?)</title>", "Unknown Song")
+            paused = extract(r"<paused>(.*?)</paused>", "False") == "True"
+            repeat = extract(r"<repeat>(.*?)</repeat>", "False") == "True"
+            location = float(extract(r"<location>(.*?)</location>", "0") or 0)
+            duration = float(extract(r"<duration>(.*?)</duration>", "0") or 0)
+            url = extract(r"<url>(.*?)</url>", "/song")
+            buffered_at = float(extract(r"<buffered_at>(.*?)</buffered_at>", "0") or 0)
+
+            return {
+                "title": title,
+                "repeat": repeat,
+                "paused": paused,
+                "location": location,
+                "duration": duration,
+                "url": url,
+                "buffered_at": buffered_at,
+            }
+
         except requests.exceptions.Timeout:
             ll.warn("Request to radio host timed out.")
             return None
@@ -209,8 +228,7 @@ class RadioClient:
     def _handle_song_change(self, data):
         ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
         # Update client data
-        self.client_data['radio_text'] = data['title']
-        self.client_data['radio_duration'][1] = data['duration'] # Update total duration
+        self._update_radio_title(data['title'], data['duration'])
 
         # FIXED: Record timing when we start the download/play process
         self._download_start_time = monotonic()
@@ -250,11 +268,8 @@ class RadioClient:
                     f.write(chunk)
             ll.debug(f"Download complete: {self.temp_song_file}")
 
-            # FIXED: Calculate the correct start position accounting for download time
-            download_completion_time = monotonic()
-            
             # Calculate how much time has elapsed since we got the server data
-            time_elapsed_during_download = download_completion_time - self._download_start_time
+            time_elapsed_during_download = monotonic() - self._download_start_time
             
             # Calculate the corrected start position
             # The server was at 'server_location' when we got the data
@@ -295,9 +310,6 @@ class RadioClient:
     def _resync_playback(self, url, new_server_location, buffered_at):
         ll.debug(f"Resyncing playback to {new_server_location:.2f}s using existing temp file.")
         
-        # FIXED: Calculate timing for resync just like in _download_and_play
-        resync_time = monotonic()
-        
         # Since we're resyncing, we don't have download time, but we need to account 
         # for any time that may have passed since the server reported this position
         # For resync, we can assume minimal delay and use the server position directly
@@ -315,6 +327,6 @@ class RadioClient:
         self._current_song_start_time = self.AudioPlayer.radio_play(
             filepath=self.temp_song_file, 
             start_pos=corrected_resync_pos, 
-            buffer_time=None  # FIXED: Don't pass server's buffered_at
+            buffer_time=None
         )
         self._current_song_start_server_pos = corrected_resync_pos

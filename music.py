@@ -1,5 +1,6 @@
-import os, random, platform, ast, requests, json, multiprocessing
+import os, random, platform, ast, requests, json, multiprocessing, ctypes
 from functools import lru_cache
+from multiprocessing import Array as MPArray
 from threading import Event, Thread, Lock
 from mutagen.mp3 import MP3
 from mutagen import File
@@ -44,6 +45,80 @@ _PLACEHOLDER_MASK = _REPARSE | _OFFLINE | _RECALL_OPEN
 
 _SKIP_TIME_LENGTH_MAX = 15 * 60    # Skip 15 Minutes
 _SKIP_TIME_LENGTH_MIN = 15         # Skip 15 Seconds
+
+#####################################################################################################
+
+class SharedString:
+    """
+    A thread-safe, process-safe shared string implementation using multiprocessing.Array
+    This is the most efficient way to share strings between processes.
+    """
+    
+    def __init__(self, initial_value="", max_size=256):
+        """
+        Initialize a shared string.
+        
+        Args:
+            initial_value: Starting string value
+            max_size: Maximum bytes the string can hold (default 256)
+        """
+        self.max_size = max_size
+        self._array = MPArray(ctypes.c_char, max_size)
+        self._lock = multiprocessing.Lock()
+        
+        # Set initial value
+        if initial_value:
+            self.set(initial_value)
+        else:
+            # Initialize with null bytes
+            for i in range(max_size):
+                self._array[i] = b'\x00'
+    
+    def set(self, value: str) -> None:
+        """
+        Set the shared string value.
+        Thread-safe and process-safe.
+        """
+        with self._lock:
+            # Encode string to bytes, truncate if needed
+            encoded = value.encode('utf-8', errors='ignore')
+            if len(encoded) >= self.max_size:
+                encoded = encoded[:self.max_size - 1]
+            
+            # Clear the array first
+            for i in range(self.max_size):
+                self._array[i] = b'\x00'
+            
+            # Write the encoded bytes
+            for i, byte in enumerate(encoded):
+                self._array[i] = bytes([byte])
+            
+            # Ensure null termination
+            self._array[len(encoded)] = b'\x00'
+    
+    def get(self) -> str:
+        """
+        Get the current string value.
+        Thread-safe and process-safe.
+        """
+        with self._lock:
+            # Find the null terminator
+            result_bytes = []
+            for i in range(self.max_size):
+                if self._array[i] == b'\x00':
+                    break
+                result_bytes.append(self._array[i])
+            
+            # Convert bytes to string
+            if result_bytes:
+                return b''.join(result_bytes).decode('utf-8', errors='ignore')
+            return ""
+    
+    def __str__(self):
+        return self.get()
+    
+    def __repr__(self):
+        return f"SharedString(value='{self.get()}', max_size={self.max_size})"
 
 #####################################################################################################
 
@@ -125,7 +200,8 @@ class MusicPlayer:
         self.close_event = multiprocessing.Event()
         self.downloadPopup = DownloadPopup()
         self.progress_value = multiprocessing.Value('d', 0.0)  # 'd' = double precision float
-        self.popup_proc = multiprocessing.Process(target=self.downloadPopup.popup_process, args=(self.close_event, self.progress_value,))
+        self.current_video = SharedString(max_size=20)
+        self.popup_proc = multiprocessing.Process(target=self.downloadPopup.popup_process, args=(self.close_event, self.progress_value, self.current_video))
         self.popup_proc.start()
         
         # Movement Debounce
@@ -139,7 +215,7 @@ class MusicPlayer:
         self.set_ips = set_ips
 
         # Initialize YouTube
-        self.ytHandle = ytHandle()
+        self.ytHandle = ytHandle(video_name_callback=self.current_video.set)
         self.songDownloadThreads = []
         
         # Initialize Lyric Handler
@@ -682,7 +758,7 @@ class MusicPlayer:
         """Figures out if the duration is the right length to be kept. True if yes False if no"""
         return (duration >= _SKIP_TIME_LENGTH_MIN) and (duration <= _SKIP_TIME_LENGTH_MAX)
     
-    @lru_cache(maxsize=256)          # cache a whole playlist worth of hits
+    @lru_cache(maxsize=256)
     def verify_file_ok(self, path: str) -> None:
         """
         One fast stat call:
@@ -858,6 +934,7 @@ class MusicPlayer:
                     listeningIp = self.current_radio_ip
                     self.current_radio_id = ""
                     self.radio_client.listenTo(listeningIp, lyric_callback)
+                    ll.print(f"Listening To {listeningIp}.")
                     break
                 except Exception as e:
                     ll.error(f"Radio met unexpected exception {e}")
@@ -871,9 +948,10 @@ class MusicPlayer:
                 RadioData = self.radio_client.client_data
                 self.set_duration(*RadioData['radio_duration'])
                 self.set_screen(*RadioData['radio_text'].split("![]!"))
-                sleep(0.5)
+                sleep(1)
             try:
                 self.radio_client.stopListening()
+                ll.print(f"Stopped listening To {listeningIp}.")
             except:
                 pass
 
@@ -954,12 +1032,11 @@ class MusicPlayer:
                     else:
                         start_pos = 0.0
                         AudioPlayer.play() # pygame.mixer.music.play()
-                        # Add a small delay or mixer busy check here
-                        self.hold_thread_until_mixer() # <--- Add this call!
+                        self.hold_thread_until_mixer()
                         start_time = time() # Reset start_time after mixer is ready
 
                     # Now update the screen, after the music has actually started
-                    self.set_screen(song['artist'], self.get_display_title()) # <--- Move this line here
+                    self.set_screen(song['artist'], self.get_display_title())
 
                     total_duration = song["duration"]
                     
@@ -971,7 +1048,7 @@ class MusicPlayer:
                         self.radio_master.initSong(
                             title = fullTitle,
                             mp3_song_file_path = song['path'],
-                            current_mixer = AudioPlayer, # FUTURE FIX
+                            current_mixer = AudioPlayer,
                             current_song_lyrics = self.current_song_lyrics
                         )
                             
@@ -984,17 +1061,17 @@ class MusicPlayer:
                             self.radio_master.initSong(
                                 title = fullTitle,
                                 mp3_song_file_path = song['path'],
-                                current_mixer = AudioPlayer, # FUTURE FIX
+                                current_mixer = AudioPlayer,
                                 current_song_lyrics = self.current_song_lyrics
                             )
                             pause_start = time()
-                            AudioPlayer.pause() # pygame.mixer.music.pause()
+                            AudioPlayer.pause()
                             self.save_playback_state()
                             while self.pause_event.is_set():
                                 if self.skip_flag.is_set(): break
                                 sleep(0.25)
                             paused_duration += time() - pause_start
-                            AudioPlayer.unpause() # pygame.mixer.music.unpause()
+                            AudioPlayer.unpause()
                         self.song_elapsed_seconds = time() - start_time - paused_duration
                         self.set_duration(self.song_elapsed_seconds, total_duration)
                         self.set_screen(song['artist'], self.get_display_title())
@@ -1008,7 +1085,7 @@ class MusicPlayer:
                     ll.error(e)
                     sleep(1)
                 finally:
-                    AudioPlayer.stop() # pygame.mixer.music.stop()
+                    AudioPlayer.stop()
                     self.current_song = None
                     self.song_elapsed_seconds = 0.0
 
