@@ -1092,12 +1092,12 @@ class GhostOverlay:
         
         if hasattr(self.MusicPlayer, 'radio_client'):  # Is client
             self._accept_eq_var = tk.BooleanVar(
-                value=getattr(self.MusicPlayer.radio_client, '_accept_host_eq', False)
+                value=self.MusicPlayer.accepting_radio_eq()
             )
             
             def toggle_host_eq():
                 # Use the setter method to properly handle state changes
-                self.MusicPlayer.radio_client.set_accept_host_eq(self._accept_eq_var.get())
+                self.MusicPlayer.set_accepting_radio_eq(self._accept_eq_var.get())
             
             ttk.Checkbutton(
                 sync_frame,

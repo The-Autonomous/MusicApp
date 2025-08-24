@@ -227,6 +227,13 @@ class MusicPlayer:
         self.meta = {}
         self.load_meta_cache()
         
+        # Radio system
+        self.full_radio_ip_list = []
+        self.current_radio_ip = "0.0.0.0"
+        self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
+        self.radio_master = RadioHost(self)
+        self.radio_scanner = SimpleRadioScan()
+        
         # Cache & Shuffler
         self.shuffler = SmartShuffler()
         self.initializer_thread = Thread(target=self.initialize_cache, args=(directories,), daemon=True)
@@ -242,13 +249,6 @@ class MusicPlayer:
         self.current_volume = 0.1
         self.navigating_history = False
 
-        # Radio system
-        self.full_radio_ip_list = []
-        self.current_radio_ip = "192.168.1.205"
-        self.radio_client = RadioClient(AudioPlayer, ip=self.current_radio_ip)
-        self.radio_master = RadioHost(self)
-        self.radio_scanner = SimpleRadioScan()
-
 #####################################################################################################
 
     def get_gaming_mode(self) -> bool:
@@ -257,6 +257,19 @@ class MusicPlayer:
         In gaming mode, audio processing is bypassed for lower latency.
         """
         return AudioPlayer._gaming_mode
+    
+    def accepting_radio_eq(self) -> bool:
+        """
+        Return whether the player is currently accepting EQ settings from the radio host.
+        """
+        return getattr(self.radio_client, "_accept_radio_eq", False)
+    
+    def set_accepting_radio_eq(self, accept: bool):
+        """
+        Enable or disable accepting EQ settings from the radio host.
+        """
+        self.radio_client._accept_radio_eq = accept
+        ll.debug(f"Accepting radio EQ set to: {accept}")
     
     def toggle_gaming_mode(self, enable: bool):
         """
@@ -482,7 +495,10 @@ class MusicPlayer:
                 "path": self.current_song["path"],
                 "elapsed": self.song_elapsed_seconds,
                 "paused": False if self.current_player_mode.is_set() else self.pause_event.is_set(),
-                "repeat": self.repeat_event.is_set()
+                "repeat": self.repeat_event.is_set(),
+                "volume": self.current_volume,
+                "gaming_mode": self.get_gaming_mode(),
+                "accept_radio_eq": self.accepting_radio_eq()
             }
             try:
                 with save_playback_lock:
@@ -503,6 +519,13 @@ class MusicPlayer:
                 elapsed = state.get("elapsed", 0)
                 paused = state.get("paused", False)
                 repeat = state.get("repeat", False)
+                volume = state.get("volume", 0.1)
+                gaming_mode = state.get("gaming_mode", True)
+                accept_radio_eq = state.get("accept_radio_eq", True)
+                
+                self.set_volume(volume, True)
+                self.toggle_gaming_mode(gaming_mode)
+                self.set_accepting_radio_eq(accept_radio_eq)
                 
                 if path and os.path.exists(path):
                     # Find the song dict in cache
@@ -921,9 +944,10 @@ class MusicPlayer:
                             ll.debug(f"Lyrics downloaded.")
                             break
                         else:
-                            sleep(1)
-                    except:
-                        sleep(1)
+                            sleep(2)
+                    except Exception as E:
+                        ll.error(f"Radio Lyric Download Error {E} on attempt {attemptCount}/{attemptTries}")
+                        sleep(2)
                 return_lyrics = ast.literal_eval(lyric_data.content.decode('utf-8'))
                 if len(return_lyrics) > 0:
                     self.set_lyrics(True, "🎵")

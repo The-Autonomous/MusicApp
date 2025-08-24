@@ -5,11 +5,14 @@ from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 from itertools import islice
+from tkinter import messagebox
 
 try:
     from log_loader import log_loader, OutputRedirector
+    from adminRaise import Administrator
 except:
     from .log_loader import log_loader, OutputRedirector
+    from .adminRaise import Administrator
 
 ### Logging Handler ###
 
@@ -182,30 +185,34 @@ class RadioHost:
             return response
 
         if not fake_load:
-            if not ip:
-                self._free_port(port)
-                host = self._get_local_ip()
-            else:
-                host = ip
-            self._server_thread = threading.Thread(
-                target=serve,
-                args=(self.app,),
-                kwargs={
-                    'host': host, 
-                    'port': port,
-                    'threads': 2,  # Reduce from default 4-6 threads
-                    'connection_limit': 10,  # Limit concurrent connections
-                    'cleanup_interval': 15,  # Cleanup inactive connections every 15s
-                    'channel_timeout': 120,  # Timeout for inactive channels
-                    'log_untrusted_proxy_headers': False,  # Reduce logging overhead
-                    'send_bytes': 8192,  # Optimize buffer size
-                    'recv_bytes': 8192,
-                    'asyncore_use_poll': True,  # Use poll instead of select (Linux/Mac)
-                },
-                daemon=True
-            )
-            self._server_thread.start()
-            ll.debug(f"Serving on http://{host}:{port}")
+            try:
+                if not ip:
+                    if not self._free_port(port):
+                        port = 9000
+                    host = self._get_local_ip()
+                else:
+                    host = ip
+                self._server_thread = threading.Thread(
+                    target=serve,
+                    args=(self.app,),
+                    kwargs={
+                        'host': host, 
+                        'port': port,
+                        'threads': 2,  # Reduce from default 4-6 threads
+                        'connection_limit': 10,  # Limit concurrent connections
+                        'cleanup_interval': 15,  # Cleanup inactive connections every 15s
+                        'channel_timeout': 120,  # Timeout for inactive channels
+                        'log_untrusted_proxy_headers': False,  # Reduce logging overhead
+                        'send_bytes': 8192,  # Optimize buffer size
+                        'recv_bytes': 8192,
+                        'asyncore_use_poll': True,  # Use poll instead of select (Linux/Mac)
+                    },
+                    daemon=True
+                )
+                self._server_thread.start()
+                ll.debug(f"Serving on http://{host}:{port}")
+            except Exception as e:
+                ll.error(f"Failed to start server on port {port}: {e}")
 
     def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
         """Call whenever you load a new track."""
@@ -246,6 +253,7 @@ class RadioHost:
 
     def _free_port(self, port):
         """Kill any process listening on `port` (requires admin/sudo)."""
+        processesToStop = []
         for conn in psutil.net_connections(kind='tcp'):
             if conn.laddr and conn.laddr.port == port and conn.status == psutil.CONN_LISTEN:
                 pid = conn.pid
@@ -253,13 +261,32 @@ class RadioHost:
                     continue
                 try:
                     p = psutil.Process(pid)
-                    ll.debug(f"Killing PID {pid} ({p.name()}) on port {port}")
-                    p.terminate()
-                    p.wait(timeout=1.0)
-                except psutil.TimeoutExpired:
-                    p.kill()
+                    processesToStop.append(p)
                 except Exception:
                     pass
+        if len(processesToStop) > 0:
+            if Administrator(False).is_admin():
+                for p in processesToStop:
+                    try:
+                        p.terminate()
+                        p.wait(3)
+                        ll.debug(f"✅ Successfully terminated PID {pid} ({p.name()}) on port {port}")
+                    except psutil.NoSuchProcess:
+                        ll.debug(f"✅ Process PID {pid} already terminated.")
+                    except psutil.TimeoutExpired:
+                        ll.debug(f"⚠️ Timeout expired while waiting for PID {pid} to terminate. Killing it.")
+                        try:
+                            p.kill()
+                            p.wait(3)
+                            ll.debug(f"✅ Successfully killed PID {pid} ({p.name()}) on port {port}")
+                        except Exception as e:
+                            ll.error(f"❌ Failed to kill PID {pid}: {e}")
+                    except Exception as e:
+                        ll.error(f"❌ Failed to terminate PID {pid}: {e}")
+            else:
+                ll.debug(f"Running without admin rights! I cannot free the occupied ports!")
+                return False
+        return True
 
 # Example usage:
 if __name__ == '__main__':
