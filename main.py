@@ -23,7 +23,6 @@ if not DevMode:
 ### Logging Handler ###
 
 ll = log_loader("Main", debugging = False)
-OutputRedirector(enable_dual_logging = DevMode)
 ll.debug(f"Executing With Developer Mode: {DevMode}")
 
 #######################
@@ -51,4 +50,5 @@ def main():
     root.mainloop()
 
 if __name__ == '__main__':
-    main()
+    with OutputRedirector(enable_dual_logging = DevMode) as log_redirector:
+        main()

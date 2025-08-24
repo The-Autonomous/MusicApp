@@ -212,10 +212,12 @@ class RadioClient:
         """
         try:
             if not self._has_stored_original:
+                ll.debug("No original EQ state stored; nothing to restore.")
                 return  # Nothing to restore
             
             # Restore original EQ values
             if self._original_eq_state and hasattr(self.AudioPlayer, 'eq') and self.AudioPlayer.eq:
+                ll.debug(f"Restoring {len(self._original_eq_state)} EQ bands to original values")
                 for freq, original_gain in self._original_eq_state.items():
                     self.AudioPlayer.eq.set_gain(freq, original_gain)
                 ll.debug(f"Restored {len(self._original_eq_state)} EQ bands to original values")
@@ -239,6 +241,7 @@ class RadioClient:
         Automatically restores local EQ when disabling.
         """
         if self._accept_host_eq == accept:
+            ll.debug("Host EQ acceptance state unchanged; no action taken.")
             return  # No change
         
         if not accept and self._accept_host_eq:
@@ -288,7 +291,7 @@ class RadioClient:
                     self._paused = False
 
                 # Handle song change
-                if data['title'] != self.client_data['radio_text_clean'] and not self._repeat:
+                if data['title'] != self.client_data['radio_text_clean']:
                     self._total_pause_duration_for_current_song = 0.0
                     self._pause_start_time = None
                     self._paused = False

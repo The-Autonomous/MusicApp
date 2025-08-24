@@ -973,9 +973,8 @@ class MusicPlayer:
             try:
                 listeningIp = self.current_radio_ip
                 self.current_radio_id = ""
-                self.set_screen("Radio", "Connecting...")
+                self.set_screen("Radio", f"Connecting To {listeningIp}...")
                 self.radio_client.listenTo(listeningIp, lyric_callback)
-                sleep(1)
                 ll.print(f"Listening To {listeningIp}.")
             except Exception as e:
                 ll.error(f"Radio met unexpected exception {e}")
