@@ -23,7 +23,7 @@ if not DevMode:
 ### Logging Handler ###
 
 ll = log_loader("Main", debugging = False)
-OutputRedirector(enable_dual_logging = DevMode)
+OutputRedirector(enable_dual_logging = True)#DevMode)
 ll.debug(f"Executing With Developer Mode: {DevMode}")
 
 #######################

@@ -5,7 +5,6 @@ from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 from itertools import islice
-from tkinter import messagebox
 
 try:
     from log_loader import log_loader, OutputRedirector

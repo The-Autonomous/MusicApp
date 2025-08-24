@@ -4,8 +4,8 @@ import requests
 from urllib.parse import urljoin
 import tkinter as tk
 from tkinter import messagebox
-import shutil
 from datetime import datetime
+import zipfile
 
 try:
     from log_loader import log_loader
@@ -14,7 +14,7 @@ except:
 
 ### Logging Handler ###
 
-ll = log_loader("Auto Update", debugging = True)
+ll = log_loader("Auto Update", debugging=True)
 
 #######################
 
@@ -78,6 +78,32 @@ class AutoUpdater:
             
         return files
 
+    def create_backup_zip(self):
+        """
+        Creates a single, timestamped zip file of all .py files in the local directory.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_zip_name = f"backup_{timestamp}.zip"
+        backup_zip_path = os.path.join(self.backup_dir, backup_zip_name)
+        
+        try:
+            with zipfile.ZipFile(backup_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(self.local_dir):
+                    # Exclude the backup directory itself
+                    if self.backup_dir in root:
+                        continue
+                    for file in files:
+                        if file.endswith('.py'):
+                            file_path = os.path.join(root, file)
+                            # Get the relative path to be stored in the zip
+                            relative_path = os.path.relpath(file_path, self.local_dir)
+                            zipf.write(file_path, relative_path)
+            ll.debug(f"💾 Created backup archive: {backup_zip_name}")
+            return True
+        except Exception as e:
+            ll.error(f"❌ Error creating backup zip: {e}")
+            return False
+
     def fetch_and_update(self, path):
         """
         Fetch a remote file, compare to local, backup + update if different or missing.
@@ -113,31 +139,11 @@ class AutoUpdater:
                 needs_update = True  # If we can't read it, assume it needs updating
 
         if needs_update:
-            # Create backup path preserving directory structure
-            backup_path = os.path.join(self.backup_dir, path.replace('/', os.sep))
-            backup_dir = os.path.dirname(backup_path)
-            
-            # Create backup directory structure if it doesn't exist
-            if not os.path.exists(backup_dir):
-                os.makedirs(backup_dir, exist_ok=True)
-            
-            # Backup existing file if it exists
-            if os.path.isfile(local_path):
-                try:
-                    # Add timestamp to backup filename to avoid conflicts
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    backup_name = f"{os.path.splitext(os.path.basename(backup_path))[0]}_{timestamp}.py"
-                    backup_path = os.path.join(backup_dir, backup_name)
-                    shutil.copy2(local_path, backup_path)
-                    ll.debug(f"💾 Backed up old {path} to {backup_path}")
-                except Exception as e:
-                    ll.error(f"❌ Error backing up {path}: {e}")
-
             # Create local directory structure if it doesn't exist
             local_dir = os.path.dirname(local_path)
             if not os.path.exists(local_dir):
                 os.makedirs(local_dir, exist_ok=True)
-
+                
             # Write new file
             try:
                 with open(local_path, 'w', encoding='utf-8') as f:
@@ -168,6 +174,9 @@ class AutoUpdater:
         
         # Reset the updated files list
         self.files_updated = []
+        
+        # Create a single backup archive before any updates
+        self.create_backup_zip()
         
         for path in py_files:
             self.fetch_and_update(path)
