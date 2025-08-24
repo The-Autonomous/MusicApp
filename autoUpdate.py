@@ -7,13 +7,15 @@ from tkinter import messagebox
 from datetime import datetime
 import zipfile
 
+# Try to import log_loader from the local directory or from the parent directory
 try:
     from log_loader import log_loader
-except:
+except ImportError:
     from .log_loader import log_loader
 
 ### Logging Handler ###
 
+# Initialize the log loader with a name and debugging enabled
 ll = log_loader("Auto Update", debugging=True)
 
 #######################
@@ -41,14 +43,17 @@ class AutoUpdater:
         self.files_updated = []  # Track which files were actually updated
 
     def show_rate_limit_alert(self):
+        """
+        Displays a warning message box to the user about exceeding the GitHub API rate limit.
+        """
         root = tk.Tk()
         root.withdraw()
         messagebox.showwarning("Update Warning", "GitHub rate limit exceeded. You may be running an older version.")
         root.destroy()
 
-    def list_py_files(self, path=""):
+    def list_files(self, path=""):
         """
-        Recursively list all .py files under given path in repo.
+        Recursively lists all .py and .html files under a given path in the repository.
         """
         url = f"{self.api_base}/{path}" if path else self.api_base
         params = {'ref': self.branch}
@@ -58,7 +63,7 @@ class AutoUpdater:
             
             # Rate-limit detection
             if resp.status_code == 403 and 'X-RateLimit-Remaining' in resp.headers and resp.headers['X-RateLimit-Remaining'] == '0':
-                ll.warn("❌ Rate limit exceeded. Can't continue updates.")
+                ll.warn("❌ Rate limit exceeded. Cannot continue updates.")
                 self.show_rate_limit_alert()
                 sys.exit(1)
             resp.raise_for_status()
@@ -69,10 +74,10 @@ class AutoUpdater:
         files = []
         try:
             for item in resp.json():
-                if item['type'] == 'file' and item['name'].endswith('.py'):
+                if item['type'] == 'file' and (item['name'].endswith('.py') or item['name'].endswith('.html')):
                     files.append(item['path'])
                 elif item['type'] == 'dir':
-                    files.extend(self.list_py_files(item['path']))
+                    files.extend(self.list_files(item['path']))
         except Exception as e:
             ll.error(f"❌ Error parsing directory contents: {e}")
             
@@ -80,7 +85,7 @@ class AutoUpdater:
 
     def create_backup_zip(self):
         """
-        Creates a single, timestamped zip file of all .py files in the local directory.
+        Creates a single, timestamped zip file of all .py and .html files in the local directory.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_zip_name = f"backup_{timestamp}.zip"
@@ -93,7 +98,7 @@ class AutoUpdater:
                     if self.backup_dir in root:
                         continue
                     for file in files:
-                        if file.endswith('.py'):
+                        if file.endswith('.py') or file.endswith('.html'):
                             file_path = os.path.join(root, file)
                             # Get the relative path to be stored in the zip
                             relative_path = os.path.relpath(file_path, self.local_dir)
@@ -106,7 +111,7 @@ class AutoUpdater:
 
     def fetch_and_update(self, path):
         """
-        Fetch a remote file, compare to local, backup + update if different or missing.
+        Fetches a remote file, compares it to the local version, and updates if different or missing.
         """
         raw_url = urljoin(self.raw_base, path)
         ll.debug(f"🔍 Checking: {path}")
@@ -127,7 +132,7 @@ class AutoUpdater:
         remote_content = r.text
         local_path = os.path.join(self.local_dir, path.replace('/', os.sep))
 
-        # Determine if update needed
+        # Determine if an update is needed
         needs_update = True
         if os.path.isfile(local_path):
             try:
@@ -144,7 +149,7 @@ class AutoUpdater:
             if not os.path.exists(local_dir):
                 os.makedirs(local_dir, exist_ok=True)
                 
-            # Write new file
+            # Write the new file
             try:
                 with open(local_path, 'w', encoding='utf-8') as f:
                     f.write(remote_content)
@@ -160,17 +165,16 @@ class AutoUpdater:
 
     def update(self):
         """
-        For each .py in repo, checks and updates if needed.
-        Then restarts if any updates occurred.
+        Checks and updates each .py and .html file in the repo if needed, then restarts if any updates occurred.
         """
         ll.debug(f"🚀 Starting update check for {self.repo_url}")
         
-        py_files = self.list_py_files()
-        if not py_files:
-            ll.warn("❌ No Python files found in the repo!")
+        all_files = self.list_files()
+        if not all_files:
+            ll.warn("❌ No Python or HTML files found in the repo!")
             return
 
-        ll.debug(f"📋 Found {len(py_files)} Python files to check")
+        ll.debug(f"📋 Found {len(all_files)} files to check")
         
         # Reset the updated files list
         self.files_updated = []
@@ -178,7 +182,7 @@ class AutoUpdater:
         # Create a single backup archive before any updates
         self.create_backup_zip()
         
-        for path in py_files:
+        for path in all_files:
             self.fetch_and_update(path)
 
         if self.files_updated:
