@@ -17,6 +17,14 @@ class OutputRedirector:
         # Ensure directory exists
         os.makedirs(os.path.dirname(os.path.abspath(self.filename)), exist_ok=True)
         
+        # CLEAR THE LOG FILE ON STARTUP
+        try:
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                f.write('')
+        except Exception as e:
+            # If for some reason we can't clear it, just let it be.
+            print(f"Warning: Could not clear log file on startup: {e}", file=sys.__stderr__)
+        
         # Double buffer system
         self.front_buffer = deque()
         self.back_buffer = deque()
