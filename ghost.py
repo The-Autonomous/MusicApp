@@ -280,7 +280,7 @@ class GhostOverlay:
         self._update_scheduled = False
 
         ### Display Info ###
-        self.triggerDebounce = [0, 1.0] # Reduced debounce for faster UI response
+        self.triggerDebounce = [monotonic(), 1.0] # Reduced debounce for faster UI response
         self.text_lock = Lock()
         self.display_lyrics = True
         self.running_lyrics = False

@@ -151,6 +151,7 @@ class MusicOverlayController:
             set_ips=self._update_ips,
         )
         overlay.MusicPlayer = self.player
+        self.start()
     
     def load_playlists(self, file_path: str = 'Playlists.txt') -> List[str]:
         """

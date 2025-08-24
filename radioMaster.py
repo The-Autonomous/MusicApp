@@ -174,7 +174,7 @@ class RadioHost:
 
         @self.app.route('/lyrics')
         def serve_lyrics():
-            return self.current_data['lyrics'] or "No lyrics available"
+            return self.current_data['lyrics'] or "[]"
 
         @self.app.after_request
         def add_no_cache_headers(response):

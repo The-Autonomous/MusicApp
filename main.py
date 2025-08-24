@@ -46,8 +46,7 @@ def main():
     shutdown_handler.register_root(root)
     
     overlay = GhostOverlay(root)
-    controller = MusicOverlayController(overlay)
-    controller.start()
+    MusicOverlayController(overlay)
     overlay.set_text("Initializing...")
     root.mainloop()
 

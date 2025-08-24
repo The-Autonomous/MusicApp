@@ -136,3 +136,15 @@ class SimpleRadioScan:
         and stop.
         """
         asyncio.run(self.scanner.getFirstIp(callback))
+        
+if __name__ == "__main__":
+    def print_result(ip, title, location):
+        print(f"Found Radio - IP: {ip}, Title: {title}, Location: {location}")
+
+    scanner = SimpleRadioScan(timeout=3.0, concurrency=100, debug=True)
+    
+    print("Scanning for all radios...")
+    scanner.scan_all(print_result)
+    
+    print("\nScanning for first radio...")
+    scanner.scan_first(print_result)

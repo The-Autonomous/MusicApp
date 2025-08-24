@@ -498,7 +498,8 @@ class MusicPlayer:
                 "repeat": self.repeat_event.is_set(),
                 "volume": self.current_volume,
                 "gaming_mode": self.get_gaming_mode(),
-                "accept_radio_eq": self.accepting_radio_eq()
+                "accept_radio_eq": self.accepting_radio_eq(),
+                "current_radio_ip": self.current_radio_ip
             }
             try:
                 with save_playback_lock:
@@ -522,6 +523,7 @@ class MusicPlayer:
                 volume = state.get("volume", 0.1)
                 gaming_mode = state.get("gaming_mode", True)
                 accept_radio_eq = state.get("accept_radio_eq", True)
+                self.current_radio_ip = state.get("current_radio_ip", "0.0.0.0")
                 
                 self.set_volume(volume, True)
                 self.toggle_gaming_mode(gaming_mode)
@@ -902,7 +904,6 @@ class MusicPlayer:
             didReset = True
             CycleType = self.current_player_mode.is_set()
         self.current_player_mode.set() if CycleType else self.current_player_mode.clear()
-        #self.resetRadio()
         self.set_lyrics(False)
         pauseType = self.pause_event.is_set()
         if CycleType:
@@ -940,7 +941,7 @@ class MusicPlayer:
                     try:
                         lyric_data = requests.get(unformatted_return_lyrics, timeout=2)
                         lyric_data.raise_for_status()
-                        if lyric_data.content != "b''":
+                        if lyric_data.content != "b''" and len(lyric_data.content) > 12:
                             ll.debug(f"Lyrics downloaded.")
                             break
                         else:
@@ -957,14 +958,14 @@ class MusicPlayer:
                         if not self.current_player_mode.is_set():
                             self.set_lyrics(False)
                             break
-                        while AudioPlayer.get_pos() + return_dilation < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
+                        while self.radio_client.get_client_data()['radio_duration'][0] < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
                             if not self.current_player_mode.is_set() or not local_song_id == self.current_radio_id:
                                 break
-                            sleep(0.1)
+                            sleep(0.25)
                         self.set_lyrics(True, lyric_pair[1])
                 self.set_lyrics(False)
             except Exception as E:
-                ll.error(f"Radio Lyric Callback Error With Data: {unformatted_return_lyrics} And Dilation {return_dilation:.2f}s And Error {E}")
+                ll.error(f"Radio Lyric Callback Error With Data: {unformatted_return_lyrics} And Dilation {return_dilation:.2f}s And Error {E} With Return_Lyrics {return_lyrics if 'return_lyrics' in locals() else 'N/A'}")
                 
         while True:
             self.current_player_mode.wait()
@@ -972,7 +973,9 @@ class MusicPlayer:
             try:
                 listeningIp = self.current_radio_ip
                 self.current_radio_id = ""
+                self.set_screen("Radio", "Connecting...")
                 self.radio_client.listenTo(listeningIp, lyric_callback)
+                sleep(1)
                 ll.print(f"Listening To {listeningIp}.")
             except Exception as e:
                 ll.error(f"Radio met unexpected exception {e}")
@@ -1038,7 +1041,7 @@ class MusicPlayer:
                             while self.song_elapsed_seconds < lyric_pair[0]: # While Less Than Required Time For Lyrics To Show
                                 if not local_song_id == self.current_song_id:
                                     break
-                                sleep(0.5)
+                                sleep(0.25)
                             self.set_lyrics(True, lyric_pair[1])
                     else:
                         self.set_lyrics(False)
@@ -1082,18 +1085,8 @@ class MusicPlayer:
                     # Ensure start_time reflects our position
                     start_time = time() - start_pos
                     paused_duration = 0
-                    
-                    if current_rotation_count == 0:
-                        self.radio_master.initSong(
-                            title = fullTitle,
-                            mp3_song_file_path = song['path'],
-                            current_mixer = AudioPlayer,
-                            current_song_lyrics = self.current_song_lyrics
-                        )
-                            
-                    current_rotation_count = (current_rotation_count + 1) % max_current_rotation # Add One Else Loop Back
-                    
                     last_save_time = 0
+                    
                     while time() - start_time - paused_duration < total_duration:
                         if self.skip_flag.is_set(): break
                         if self.pause_event.is_set():
@@ -1111,6 +1104,16 @@ class MusicPlayer:
                                 sleep(0.25)
                             paused_duration += time() - pause_start
                             AudioPlayer.unpause()
+
+                        if current_rotation_count % max_current_rotation == 0:
+                            self.radio_master.initSong(
+                                title = fullTitle,
+                                mp3_song_file_path = song['path'],
+                                current_mixer = AudioPlayer,
+                                current_song_lyrics = str(self.current_song_lyrics)
+                            )
+                            
+                        current_rotation_count += 0.5 # Add One Else Loop Back
                         self.song_elapsed_seconds = time() - start_time - paused_duration
                         self.set_duration(self.song_elapsed_seconds, total_duration)
                         self.set_screen(song['artist'], self.get_display_title())

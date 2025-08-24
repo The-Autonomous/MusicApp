@@ -249,6 +249,7 @@ class RadioClient:
         ll.debug(f"Host EQ acceptance set to: {accept}")
         
     def _update_loop(self):
+        first_run = True
         while self._running.is_set():
             server_pos, data = -1.0, None
             try:
@@ -264,7 +265,11 @@ class RadioClient:
                 server_pos = data['location']
 
                 is_paused = data['paused']
-                self._repeat = data['repeat']
+                if first_run: # Horrid Spaghetti to ensure first run sets repeat state
+                    self._repeat = False
+                    first_run = False
+                else:
+                    self._repeat = data['repeat']
 
                 # Handle pause/unpause state transitions
                 if is_paused and not self._paused:
@@ -338,6 +343,7 @@ class RadioClient:
             
     def _fetch_data(self):
         try:
+            if self._ip == "0.0.0.0": return None
             response = requests.get(f"http://{self._ip}:8080", timeout=self.update_interval)
             response.raise_for_status()
             content = response.text
@@ -443,7 +449,7 @@ class RadioClient:
             self._current_song_start_time = self.AudioPlayer.radio_play(
                 filepath=self.temp_song_file, 
                 start_pos=corrected_start_pos, 
-                buffer_time=None  # FIXED: Don't pass server's buffered_at
+                buffer_time=None
             )
             
             self._current_song_start_server_pos = corrected_start_pos # Record the corrected starting point
