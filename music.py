@@ -43,8 +43,9 @@ _PLACEHOLDER_MASK = _REPARSE | _OFFLINE | _RECALL_OPEN
 
 #####################################################################################################
 
-_SKIP_TIME_LENGTH_MAX = 15 * 60    # Skip 15 Minutes
-_SKIP_TIME_LENGTH_MIN = 15         # Skip 15 Seconds
+_SKIP_TIME_LENGTH_MAX = 15 * 60     # Skip 15 Minutes
+_SKIP_TIME_LENGTH_MIN = 15          # Skip 15 Seconds
+_RESTART_THRESHOLD_SECONDS = 3      # If song isnt within 3 seconds of the start restart instead of skipping
 
 #####################################################################################################
 
@@ -717,7 +718,19 @@ class MusicPlayer:
     def skip_previous(self):
         if self.before_move() == False:
             return
-        if self.current_index > 0:
+
+        # We're in "navigation mode" if the user has already gone back at least once,
+        # which we can tell by checking if the forward_stack has any songs.
+        in_navigation_mode = bool(self.forward_stack)
+
+        # The time-based restart should only apply when NOT in navigation mode.
+        if not in_navigation_mode and self.song_elapsed_seconds > _RESTART_THRESHOLD_SECONDS:
+            # We're in normal playback and past the time threshold, so just restart the current song.
+            if self.current_song:
+                self._queue_song(self.current_song)
+
+        # This block handles both navigating backward and the initial "previous" press before the time threshold.
+        elif self.current_index > 0:
             self.navigating_history = True
             self.forward_stack.append(self.shuffler.history[self.current_index])
             self.current_index -= 1
@@ -726,11 +739,12 @@ class MusicPlayer:
             if prev_song:
                 self._queue_song(prev_song)
             self.navigating_history = False
+
         else:
-            prev_path = self.shuffler.history[self.current_index]
-            prev_song = next((s for s in self.shuffler.cache if s['path'] == prev_path), None)
-            if prev_song:
-                self._queue_song(prev_song)
+            # If we're at the very first song in history, the only possible action is to restart it.
+            if self.current_song:
+                self._queue_song(self.current_song)
+
         self.after_move()
             
     def set_volume(self, direction: int = 0, set_directly: bool = False):
