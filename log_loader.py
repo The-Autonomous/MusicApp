@@ -232,7 +232,7 @@ class log_loader:
 
 if __name__ == "__main__":
     with OutputRedirector(enable_dual_logging=True) as log_redirector:
-        log_writer = log_loader(proj_name="MyApp", debugging=True)
+        log_writer = log_loader(proj_name="Log Loader Test", debugging=True)
         log_writer.print("Application started.")
         log_writer.warn("This is a warning message.")
         log_writer.debug("This is a debug message.")

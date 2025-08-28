@@ -1,6 +1,7 @@
 import os
 
-DevMode = os.path.exists(".developer_options.json")
+DevMode = os.path.exists(".developer_options.json") # Enable developer mode
+FastLoad = os.path.exists(".fast_load.json") # Enable fast load mode
 
 try:
     from adminRaise import Administrator
@@ -15,7 +16,7 @@ except:
 
 ### Install Handler ###
 
-if not DevMode:
+if not DevMode and not FastLoad:
     AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
     Administrator()
     AutoDependencies().install()
@@ -45,7 +46,7 @@ def main():
     shutdown_handler.register_root(root)
     
     overlay = GhostOverlay(root)
-    MusicOverlayController(overlay)
+    MusicOverlayController(overlay, fast_load=FastLoad)
     overlay.set_text("Initializing...")
     root.mainloop()
 

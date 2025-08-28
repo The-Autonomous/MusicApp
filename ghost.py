@@ -45,6 +45,116 @@ LWA_ALPHA = 0x00000002 # Use this flag with SetLayeredWindowAttributes for alpha
 
 ll = log_loader("Ghost", debugging = False)
 
+### Theming ###
+
+class ThemeManager:
+    """ Centralized class for managing UI theme, colors, and fonts. """
+    def __init__(self):
+        self.COLORS = {
+            "window_bg": "#1d1f24",
+            "frame_bg": "#23272e",
+            "entry_bg": "#2c313a",
+            "text": "#e0e0e0",
+            "text_dark": "#aaaaaa",
+            "placeholder": "#888888",
+            "accent": "#00ffd5",
+            "accent_active": "#00bfa5",
+            "danger": "#ff4d4d",
+            "danger_active": "#ff1a1a",
+            "warning": "#ffae42",
+            "warning_active": "#ff8c00",
+            "button": "#555555",
+            "button_active": "#777777",
+            "border": "#555555",
+            "transparent": "gray1"
+        }
+
+        self.FONTS = {
+            "main": font.Font(family='Segoe UI', size=14, weight='bold'),
+            "time": font.Font(family='Segoe UI', size=12),
+            "lyrics": font.Font(family='Segoe UI', size=11, weight='normal', slant='italic'),
+            "ui_title": ("Segoe UI", 20, "bold"),
+            "ui_normal": ("Segoe UI", 13),
+            "ui_list": ("Segoe UI", 12),
+            "ui_small_italic": ("Segoe UI", 10, "italic"),
+            "fixed_width": ("Consolas", 12),
+            "icon": ("Arial Unicode MS", 11)
+        }
+
+    def apply_ttk_styles(self, root):
+        """ Applies all necessary ttk styles for the application. """
+        style = ttk.Style(root)
+        style.theme_use("clam")
+
+        # --- General Widgets ---
+        style.configure("TFrame", background=self.COLORS["frame_bg"])
+        style.configure("Accent.TFrame", background=self.COLORS["window_bg"])
+        style.configure("TLabel", background=self.COLORS["frame_bg"], foreground=self.COLORS["text"], font=self.FONTS["ui_normal"])
+        style.configure("Header.TLabel", foreground=self.COLORS["accent"], font=self.FONTS["ui_title"])
+        style.configure("Status.TLabel", foreground=self.COLORS["warning"], font=self.FONTS["ui_small_italic"])
+        
+        # --- Buttons ---
+        style.configure("TButton",
+            font=self.FONTS["ui_normal"],
+            background=self.COLORS["button"],
+            foreground=self.COLORS["text"],
+            relief="flat",
+            padding=8,
+            borderwidth=0
+        )
+        style.map("TButton",
+            background=[("active", self.COLORS["button_active"])]
+        )
+        
+        style.configure("Accent.TButton",
+            background=self.COLORS["accent"],
+            foreground=self.COLORS["frame_bg"],
+        )
+        style.map("Accent.TButton",
+            background=[("active", self.COLORS["accent_active"])]
+        )
+        
+        style.configure("Danger.TButton",
+            background=self.COLORS["danger"],
+            foreground=self.COLORS["text"],
+        )
+        style.map("Danger.TButton",
+            background=[("active", self.COLORS["danger_active"])]
+        )
+        
+        style.configure("Warning.TButton",
+            background=self.COLORS["warning"],
+            foreground="#000000",
+        )
+        style.map("Warning.TButton",
+            background=[("active", self.COLORS["warning_active"])]
+        )
+
+        # --- Checkbutton ---
+        style.configure("TCheckbutton",
+            background=self.COLORS["window_bg"],
+            foreground=self.COLORS["text"],
+            relief="flat",
+            indicatorcolor=self.COLORS["entry_bg"],
+            font=self.FONTS["ui_normal"]
+        )
+        style.map("TCheckbutton",
+            indicatorcolor=[("selected", self.COLORS["accent"])],
+            background=[("active", self.COLORS["frame_bg"])]
+        )
+
+        # --- OptionMenu ---
+        style.configure("TMenubutton",
+            background=self.COLORS["entry_bg"],
+            foreground=self.COLORS["text"],
+            relief="flat",
+            padding=(8, 4, 12, 4)
+        )
+        style.map("TMenubutton",
+            background=[("active", self.COLORS["button"])],
+            arrowcolor=[("active", self.COLORS["accent"]), ("!disabled", self.COLORS["text_dark"])]
+        )
+
 ### Utilities ###
 
 class SettingsHandler:
@@ -141,7 +251,6 @@ class MouseTracker:
         # Initialize the pynput listener.
         # Crucially, set daemon=True. This means the thread will automatically exit
         # when the main program exits, even if you forget to call .stop().
-        # However, it's still good practice to explicitly call .stop() for clean shutdown.
         self.listener = mouse.Listener(
             on_click=self._on_click,
             daemon=True # This makes the thread a daemon thread
@@ -252,6 +361,9 @@ class GhostOverlay:
     def __init__(self, root):
         ### Root ###
         self.root = root
+        self.theme = ThemeManager()
+        self.theme.apply_ttk_styles(self.root)
+        
         self.window = None
         self.canvas = None
         self._last_position = None
@@ -266,9 +378,6 @@ class GhostOverlay:
         self.gaming_mode_checkbox = None
         
         ### Music Player ###
-        self.main_font = font.Font(family='Helvetica', size=14, weight='bold')
-        self.time_font = font.Font(family='Times', size=12)
-        self.lyrics_font = font.Font(family='Helvetica', size=11, weight='normal', slant='italic') # Adjusted lyrics font
         self.overlay_text_padding = 15
         self.overlay_corner_radius = 15
         self.canvas_items = {
@@ -714,21 +823,14 @@ class GhostOverlay:
             self.show_key_hints()
             
     def show_key_hints(self, force_state: bool = None):
-        """ Show a popup with all key hints and their actions. 
-        If force_state is True, it will always show the popup.
-        If force_state is False, it will close the popup if it's already open.
-        If force_state is None, it will toggle the popup visibility.
-        """
-        # Toggle if already open
+        """ Show a popup with all key hints and their actions. """
         def close_popup(event=None):
             if self.key_hints_popup:
-                try:
-                    self.key_hints_popup.destroy()
-                except Exception:
-                    pass
+                try: self.key_hints_popup.destroy()
+                except Exception: pass
                 self.key_hints_popup = None
         
-        if force_state == False:
+        if force_state is False:
             close_popup()
             return
         elif self.key_hints_popup and self.key_hints_popup.winfo_exists() and force_state is not True:
@@ -738,61 +840,32 @@ class GhostOverlay:
         self.key_hints_popup = tk.Toplevel(self.root)
         self.key_hints_popup.withdraw()
         self.key_hints_popup.overrideredirect(True)
-        self.key_hints_popup.configure(bg="#1e1e1e")
+        self.key_hints_popup.configure(bg=self.theme.COLORS["window_bg"])
         self.key_hints_popup.attributes("-topmost", True)
 
-        self.key_hints_name = "✨ Music Player Controls ✨"
-
-        # Main container frame with padding
-        main_frame = tk.Frame(self.key_hints_popup, bg="#2e2e2e", bd=3, relief="ridge")
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        main_frame = ttk.Frame(self.key_hints_popup, style="TFrame", padding=20)
+        main_frame.pack(fill="both", expand=True)
 
         self.key_hints_popup.bind("<Escape>", close_popup)
-        # Bind FocusOut robustly: only close if focus is not in a child widget
-        def on_focus_out(event):
-            # If focus is not in the popup or any of its children, close
-            widget = event.widget
-            try:
-                # Get the widget that now has focus
-                focus_widget = widget.focus_get()
-                if focus_widget is None or not str(focus_widget).startswith(str(self.key_hints_popup)):
-                    close_popup()
-            except Exception:
-                close_popup()
-        self.key_hints_popup.bind("<FocusOut>", on_focus_out)
-
-        title_label = tk.Label(
-            main_frame,
-            text=self.key_hints_name,
-            font=("Segoe UI", 20, "bold"),
-            bg="#2e2e2e",
-            fg="#00ffd5"
-        )
+        
+        title_label = ttk.Label(main_frame, text="✨ Music Player Controls ✨", style="Header.TLabel")
         title_label.pack(pady=(0, 15), anchor="center")
 
-        separator = tk.Frame(main_frame, height=2, bg="#555555")
+        separator = tk.Frame(main_frame, height=2, bg=self.theme.COLORS["border"])
         separator.pack(fill="x", pady=(0, 15))
 
-        # Scrollable hint list area
-        list_container = tk.Frame(main_frame, bg="#2e2e2e")
+        list_container = ttk.Frame(main_frame)
         list_container.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(list_container, bg="#2e2e2e", highlightthickness=0)
-        scrollbar = tk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg="#2e2e2e")
+        canvas = tk.Canvas(list_container, bg=self.theme.COLORS["frame_bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
 
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        # Mouse wheel scrolling support
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-                
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -801,73 +874,56 @@ class GhostOverlay:
             keys_display = " + ".join(k.upper() for k in action['required'])
             hint_text = action['hint']
 
-            action_row_frame = tk.Frame(scrollable_frame, bg="#2e2e2e")
+            action_row_frame = ttk.Frame(scrollable_frame, style="TFrame")
             action_row_frame.pack(fill="x", pady=2, padx=5)
 
-            label_text = f"{keys_display:<20} →  {hint_text}"
-            tk.Label(
-                action_row_frame,
-                text=label_text,
-                font=("Consolas", 12),
-                bg="#2e2e2e",
-                fg="#ffffff",
-                anchor="w",
-                justify=tk.LEFT,
-                wraplength=600
-            ).pack(side="left", padx=(10, 5), fill="x", expand=True)
+            # Use grid for better alignment
+            action_row_frame.columnconfigure(0, weight=1)
+            action_row_frame.columnconfigure(1, weight=3)
+            action_row_frame.columnconfigure(2, weight=0)
+
+            key_label = ttk.Label(action_row_frame, text=keys_display, font=self.theme.FONTS["fixed_width"], anchor="w")
+            key_label.grid(row=0, column=0, sticky="ew", padx=(10, 5))
+
+            hint_label = ttk.Label(action_row_frame, text=f"→  {hint_text}", anchor="w", wraplength=400)
+            hint_label.grid(row=0, column=1, sticky="ew", padx=5)
 
             if action.get('modifiable'):
-                tk.Button(
+                edit_btn = ttk.Button(
                     action_row_frame,
                     text="⚙️",
-                    font=("Arial Unicode MS", 11),
-                    bg="#555555",
-                    fg="#ffffff",
-                    activebackground="#777777",
-                    relief="flat",
+                    style="TButton",
                     command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
-                ).pack(side="right", padx=(0, 10))
+                )
+                edit_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
+            
+            # Hover effect
+            widgets_in_row = [action_row_frame, key_label, hint_label]
+            if action.get('modifiable'): widgets_in_row.append(edit_btn)
+            
+            def on_enter(e, widgets=widgets_in_row):
+                for w in widgets: w.configure(style="Hover.TFrame" if isinstance(w, ttk.Frame) else "Hover.TLabel")
+            def on_leave(e, widgets=widgets_in_row):
+                for w in widgets: w.configure(style="TFrame" if isinstance(w, ttk.Frame) else "TLabel")
+            
+            action_row_frame.bind("<Enter>", on_enter)
+            action_row_frame.bind("<Leave>", on_leave)
 
-        # Modification status label
-        self.modification_status_label = tk.Label(
-            scrollable_frame,
-            text="",
-            font=("Segoe UI", 10, "italic"),
-            fg="yellow",
-            bg="#2e2e2e",
-            anchor="w",
-            justify=tk.LEFT,
-            wraplength=580
-        )
+
+        self.modification_status_label = ttk.Label(scrollable_frame, text="", style="Status.TLabel", anchor="w", justify=tk.LEFT, wraplength=580)
         self.modification_status_label.pack(pady=(10, 5), padx=10, anchor="w")
 
-        # Buttons section
-        buttons_frame = tk.Frame(main_frame, bg="#2e2e2e")
+        buttons_frame = ttk.Frame(main_frame)
         buttons_frame.pack(fill="x", pady=(15, 0), padx=10)
+        buttons_frame.columnconfigure(0, weight=1)
+        buttons_frame.columnconfigure(1, weight=1)
 
-        reset_btn = tk.Button(
-            buttons_frame,
-            text="Reset Bindings",
-            command=self._confirm_reset_bindings,
-            font=("Segoe UI", 12, "bold"),
-            bg="#ffae42", fg="#000000",
-            activebackground="#ff8c00", activeforeground="#000000",
-            relief="raised", bd=2, padx=10, pady=5
-        )
-        reset_btn.pack(side="left", fill="x", expand=True, padx=5)
+        reset_btn = ttk.Button(buttons_frame, text="Reset Bindings", command=self._confirm_reset_bindings, style="Warning.TButton")
+        reset_btn.grid(row=0, column=0, sticky="ew", padx=5)
 
-        close_btn = tk.Button(
-            buttons_frame,
-            text="✖ Close",
-            command=self.key_hints_popup.destroy,
-            font=("Segoe UI", 13, "bold"),
-            bg="#ff4d4d", fg="#ffffff",
-            activebackground="#ff1a1a", activeforeground="#ffffff",
-            relief="raised", bd=2, padx=10, pady=5
-        )
-        close_btn.pack(side="right", fill="x", expand=True, padx=5)
+        close_btn = ttk.Button(buttons_frame, text="✖ Close", command=close_popup, style="Danger.TButton")
+        close_btn.grid(row=0, column=1, sticky="ew", padx=5)
 
-        # Smooth Drag Fix
         def start_move(e):
             self.key_hints_popup._offset_x = e.x_root - self.key_hints_popup.winfo_rootx()
             self.key_hints_popup._offset_y = e.y_root - self.key_hints_popup.winfo_rooty()
@@ -881,21 +937,16 @@ class GhostOverlay:
         title_label.bind("<B1-Motion>", do_move)
         main_frame.bind("<Button-1>", start_move)
         main_frame.bind("<B1-Motion>", do_move)
-
-        # Set a MINIMUM size to prevent "tiny box"
+        
         self.key_hints_popup.update_idletasks()
-        width = max(720, self.key_hints_popup.winfo_width())
-        height = max(500, self.key_hints_popup.winfo_height())
-
-        screen_width = self.key_hints_popup.winfo_screenwidth()
-        screen_height = self.key_hints_popup.winfo_screenheight()
-        x_coord = (screen_width // 2) - (width // 2)
-        y_coord = (screen_height // 2) - (height // 2)
+        width = max(720, self.key_hints_popup.winfo_reqwidth())
+        height = max(500, self.key_hints_popup.winfo_reqheight())
+        x_coord = (self.key_hints_popup.winfo_screenwidth() // 2) - (width // 2)
+        y_coord = (self.key_hints_popup.winfo_screenheight() // 2) - (height // 2)
 
         self.key_hints_popup.geometry(f"{width}x{height}+{x_coord}+{y_coord}")
         self.key_hints_popup.deiconify()
         self.key_hints_popup.lift()
-        #self.key_hints_popup.after_idle(self.key_hints_popup.attributes, "-topmost", False)
 
 #####################################################################################################
 
@@ -932,34 +983,15 @@ class GhostOverlay:
             self.eq_preset_menu.config(state="disabled" if is_disabled else "normal")
 
     def show_eq_overlay(self):
-        """ Pops a draggable EQ + Echo overlay with rotary knobs. Works with AudioEQ ±12 dB and AudioEcho on self.MusicPlayer. """
-        # ── raise if already open ─────────────────────────────────────────┐
+        """ Pops a draggable EQ + Echo overlay with rotary knobs. """
         if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
             self._eq_window.deiconify(); self._eq_window.lift(); return
-        # ── locate audio engine ───────────────────────────────────────────┘
+            
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
             ll.warn("No MusicPlayer with EQ/echo found."); return
-        bands = sorted(_eq_target.get_bands().keys()) # [31‥16 000]
-        # ── theme / style (run once per Tk) ───────────────────────────────
-        style = ttk.Style(self.root)
-        style.theme_use("clam") # unlock colours
-        
-        # Check if the styles are already defined to prevent re-creation
-        if "Neon.TFrame" not in style.element_names():
-            style.configure("Neon.TFrame", background="#1d1f24")
-            style.configure("Neon.TLabel", background="#1d1f24", foreground="#d0d0d0", font=("Segoe UI", 9))
-            
-            style.configure("Neon.TMenubutton", background="#272b33", foreground="#ddd", relief="flat", padding=(6,2,10,2))
-            style.map("Neon.TMenubutton", background=[("active", "#313640")], arrowcolor=[("active", "#00e8d0"), ("!disabled", "#aaa")])
-            style.configure("Neon.Menu", background="#272b33", foreground="#ddd", relief="flat")
-            
-            style.configure("Neon.TCheckbutton", background="#1d1f24", foreground="#ddd", relief="flat", indicatorcolor="#272b33")
-            style.map("Neon.TCheckbutton", 
-                      indicatorcolor=[("selected", "#00e8d0")],
-                      background=[("active", "#313640")]
-            )
-        # ── window shell ──────────────────────────────────────────────────
+        bands = sorted(_eq_target.get_bands().keys())
+
         win = tk.Toplevel(self.root); win.overrideredirect(True)
         win.attributes("-topmost", True); win.configure(bg="#000")
         self._eq_window = win
@@ -968,15 +1000,16 @@ class GhostOverlay:
         max_cols = max(1, (screen_w - 100)//per_knob)
         rows = ceil(len(bands) / max_cols)
         w = min(len(bands), max_cols)*per_knob + 40
-        h = rows*110 + 190 # rows + echo + presets
+        h = rows*110 + 190
         x = self.window.winfo_x() + self.window.winfo_width()//2 - w//2
         y = self.window.winfo_y() + self.window.winfo_height() + 20
         win.geometry(f"{w}x{h}+{x}+{y}")
-        card = tk.Canvas(win, width=w, height=h, bg="#1d1f24", highlightthickness=0)
+        
+        card = tk.Canvas(win, width=w, height=h, bg=self.theme.COLORS["window_bg"], highlightthickness=0)
         card.pack(fill="both", expand=True)
-        card.create_rectangle(0, 0, w, h, fill="#1d1f24", outline="")
-        # ── EQ knob grid ──────────────────────────────────────────────────
-        grid = ttk.Frame(card, style="Neon.TFrame")
+        card.create_rectangle(0, 0, w, h, fill=self.theme.COLORS["window_bg"], outline="")
+        
+        grid = ttk.Frame(card, style="Accent.TFrame")
         grid.place(relx=0.5, rely=0.05, anchor="n")
         
         self.eq_knobs = {}
@@ -985,7 +1018,6 @@ class GhostOverlay:
         
         preset_var = tk.StringVar(value="Flat")
         
-        # ── preset values ─────────────────────────────────────────────────
         self.EQ_PRESETS["Custom"] = None
         preset_map = { tuple(vals): name for name, vals in self.EQ_PRESETS.items() if vals is not None }
 
@@ -994,22 +1026,20 @@ class GhostOverlay:
             current = tuple(_eq_target.get_band(f) for f in bands)
             preset_var.set(preset_map.get(current, "Custom"))
 
-        # ── knobs ─────────────────────────────────────────────────────────
         for i, freq in enumerate(bands):
-            col = ttk.Frame(grid, style="Neon.TFrame")
+            col = ttk.Frame(grid, style="Accent.TFrame")
             col.grid(row=i//max_cols, column=i%max_cols, padx=6, pady=2)
             lbl = f"{freq//1000}k" if freq >= 1000 else str(freq)
-            ttk.Label(col, text=lbl, style="Neon.TLabel").pack()
+            ttk.Label(col, background=self.theme.COLORS["window_bg"], text=lbl).pack()
             init = _eq_target.get_band(freq, 0.0)
             if isinstance(init, tuple): init = init[0]
             callback = lambda g, f=freq: knob_changed(g, f)
-            if freq >= fmax: callback = lambda g, f=freq: knob_changed(0, f) # Less sensitive for very high freqs
-            knob = EQKnob(col, radius=26, init_gain=init, callback=callback, bg="#1d1f24")
+            if freq >= fmax: callback = lambda g, f=freq: knob_changed(0, f)
+            knob = EQKnob(col, radius=26, init_gain=init, callback=callback, bg=self.theme.COLORS["window_bg"])
             knob.pack()
             self.eq_knobs[freq] = knob
             self.all_eq_knobs.append(knob)
 
-        # ── presets ───────────────────────────────────────────────────────
         def apply_preset(name):
             if name == "Custom": return
             for f, g in zip(bands, self.EQ_PRESETS[name]):
@@ -1019,271 +1049,166 @@ class GhostOverlay:
                     _eq_target.set_band(f, g)
             preset_var.set(name)
 
-        preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *self.EQ_PRESETS.keys(), command=apply_preset, style="Neon.TMenubutton")
-        preset_menu["menu"].config(tearoff=0, bg="#272b33", fg="#ddd", activebackground="#313640", activeforeground="#00e8d0", relief="flat")
+        preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *self.EQ_PRESETS.keys(), command=apply_preset, style="TMenubutton")
+        preset_menu["menu"].config(tearoff=0, bg=self.theme.COLORS["entry_bg"], fg=self.theme.COLORS["text"],
+                                   activebackground=self.theme.COLORS["button"], activeforeground=self.theme.COLORS["accent"], relief="flat")
         card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
-        self.eq_preset_menu = preset_menu # Store reference
+        self.eq_preset_menu = preset_menu
         preset_var.set(preset_map.get(tuple(_eq_target.get_band(f) for f in bands), "Custom"))
 
-        # ── Echo section ──────────────────────────────────────────────────
-        echo_frame = ttk.Frame(card, style="Neon.TFrame")
+        echo_frame = ttk.Frame(card, style="Accent.TFrame")
         echo_frame.place(relx=0.5, rely=0.63, anchor="n")
 
         delay_init = getattr(_eq_target, "echo", None)
         delay_ms   = delay_init.delay_ms if delay_init else 0
         wet_pct    = int(delay_init.wet*100) if delay_init else 0
 
-        ttk.Label(echo_frame, text="Echo", style="Neon.TLabel",
-                font=("Segoe UI", 9, "bold")).grid(row=0, column=0,
-                                                    columnspan=2, pady=(0,3))
+        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Echo", font=(self.theme.FONTS["ui_normal"][0], 9, "bold")).grid(row=0, column=0, columnspan=2, pady=(0,3))
 
         def update_echo(_=None):
             if delay_ms == 0 and wet_pct == 0:
                 _eq_target.disable_echo()
             elif not getattr(_eq_target, "echo", None):
-                _eq_target.enable_echo(delay_ms=delay_ms,
-                                    wet=wet_pct/100, feedback=0.35)
+                _eq_target.enable_echo(delay_ms=delay_ms, wet=wet_pct/100, feedback=0.35)
             else:
                 _eq_target.set_echo(delay_ms=delay_ms, wet=wet_pct/100)
 
-        delay_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
-                                init_gain=delay_ms,
-                                callback=lambda v: (globals().update(delay_ms=int(max(0,v))),
-                                                    update_echo())[1])
-        ttk.Label(echo_frame, text="Delay ms", style="Neon.TLabel"
-                ).grid(row=1, column=0, padx=6, pady=2)
+        delay_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=delay_ms, callback=lambda v: (globals().update(delay_ms=int(max(0,v))), update_echo())[1])
+        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Delay ms").grid(row=1, column=0, padx=6, pady=2)
         delay_knob.grid(row=2, column=0, padx=6)
         self.all_eq_knobs.append(delay_knob)
 
-        wet_knob = PercentKnob(echo_frame, radius=20, bg="#1d1f24",
-                            init_gain=wet_pct,
-                            callback=lambda v: (globals().update(wet_pct=int(max(0,v))),
-                                                update_echo())[1])
-        ttk.Label(echo_frame, text="Wet %", style="Neon.TLabel"
-                ).grid(row=1, column=1, padx=6, pady=2)
+        wet_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=wet_pct, callback=lambda v: (globals().update(wet_pct=int(max(0,v))), update_echo())[1])
+        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Wet %").grid(row=1, column=1, padx=6, pady=2)
         wet_knob.grid(row=2, column=1, padx=6)
         self.all_eq_knobs.append(wet_knob)
         
-        volume_knob = VolumeSlider(echo_frame, width=120, height=24, bg="#1d1f24", init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
-        ttk.Label(echo_frame, text="Volume %", style="Neon.TLabel"
-                ).grid(row=1, column=2, padx=6, pady=2)
+        volume_knob = VolumeSlider(echo_frame, width=120, height=24, bg=self.theme.COLORS["window_bg"], init_volume=int(_eq_target.get_volume() * 100), callback=lambda v: _eq_target.set_volume(v / 100, True))
+        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Volume %").grid(row=1, column=2, padx=6, pady=2)
         volume_knob.grid(row=2, column=2, padx=6)
 
-        # ── Gaming Mode Section (New) ───────────────────────────────
         def toggle_gaming_mode_command():
-            current_state = self._gaming_mode_bool_var.get()
-            self.set_gaming_mode(current_state)
+            self.set_gaming_mode(self._gaming_mode_bool_var.get())
 
-        gaming_mode_frame = ttk.Frame(card, style="Neon.TFrame")
+        gaming_mode_frame = ttk.Frame(card, style="Accent.TFrame")
         gaming_mode_frame.place(relx=0.1, rely=0.88, anchor="n")
         
         self._gaming_mode_bool_var = tk.BooleanVar(value=self.get_gaming_mode())
-        self.gaming_mode_checkbox = ttk.Checkbutton(
-            gaming_mode_frame,
-            text="Gaming Mode",
-            variable=self._gaming_mode_bool_var,
-            command=toggle_gaming_mode_command,
-            style="Neon.TCheckbutton"
-        )
+        self.gaming_mode_checkbox = ttk.Checkbutton(gaming_mode_frame, text="Gaming Mode", variable=self._gaming_mode_bool_var, command=toggle_gaming_mode_command, style="TCheckbutton")
         self.gaming_mode_checkbox.pack(padx=10, pady=(5, 0))
         
-        sync_frame = ttk.Frame(card, style="Neon.TFrame")
-        sync_frame.place(relx=0.5, rely=0.93, anchor="n")
+        sync_frame = ttk.Frame(card, style="Accent.TFrame")
+        sync_frame.place(relx=0.1, rely=0.78, anchor="n")
         
-        if hasattr(self.MusicPlayer, 'radio_client'):  # Is client
-            self._accept_eq_var = tk.BooleanVar(
-                value=self.MusicPlayer.accepting_radio_eq()
-            )
+        if hasattr(self.MusicPlayer, 'radio_client'):
+            self._accept_eq_var = tk.BooleanVar(value=self.MusicPlayer.accepting_radio_eq())
+            def toggle_host_eq(): self.MusicPlayer.set_accepting_radio_eq(self._accept_eq_var.get())
+            ttk.Checkbutton(sync_frame, text="Play Radio EQ", variable=self._accept_eq_var, command=toggle_host_eq, style="TCheckbutton").pack(padx=10, pady=(5, 0))
             
-            def toggle_host_eq():
-                # Use the setter method to properly handle state changes
-                self.MusicPlayer.set_accepting_radio_eq(self._accept_eq_var.get())
-            
-            ttk.Checkbutton(
-                sync_frame,
-                text="Use Radio Host's Settings",
-                variable=self._accept_eq_var,
-                command=toggle_host_eq,
-                style="Neon.TCheckbutton"
-            ).pack()
-            
-        # ── make draggable & closable ───────────────────────────────────
         def start_mv(e): win._dx=e.x_root-win.winfo_x(); win._dy=e.y_root-win.winfo_y()
         def do_mv(e):    win.geometry(f"+{e.x_root-win._dx}+{e.y_root-win._dy}")
         card.bind("<Button-3>", start_mv); card.bind("<B3-Motion>", do_mv)
         win.bind("<Escape>", lambda *_: win.destroy())
         win.bind("<FocusOut>", lambda e: win.destroy() if not win.focus_displayof() else None)
         
-        # ── flush ui & get real sizes ─────────────────────────────────────
         self.root.update_idletasks()
         win.update_idletasks()
-
-        # get real overlay size
-        ow = win.winfo_width()
-        oh = win.winfo_height()
-
-        # get total screen size
-        sw = win.winfo_screenwidth()
-        sh = win.winfo_screenheight()
-
-        # compute position to center on screen
-        x = (sw - ow) // 2
-        y = (sh - oh) // 2
-
-        # finally place it
+        ow, oh = win.winfo_width(), win.winfo_height()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        x, y = (sw - ow) // 2, (sh - oh) // 2
         win.geometry(f"{ow}x{oh}+{x}+{y}")
-        
-        cx = x + (ow // 2)
-        cy = y + (oh // 2)
-
-        # move mouse cursor to overlay center (Windows)
-        ctypes.windll.user32.SetCursorPos(cx, cy)
-        self._update_eq_ui_state() # Call new helper to set initial state
+        ctypes.windll.user32.SetCursorPos(x + (ow // 2), y + (oh // 2))
+        self._update_eq_ui_state()
         
 #####################################################################################################
 
     def show_search_overlay(self):
         if self.display_radio: return
         
-        # Close existing search overlay if open
-        self.show_key_hints(force_state=False)  # Close key hints if open
+        self.show_key_hints(force_state=False)
         
         if hasattr(self, 'search_overlay'):
             self.close_search_overlay(self._was_main_overlay_open_before_search)
-            if hasattr(self, 'search_overlay'):
-                del self.search_overlay  # Clean up the old overlay
+            if hasattr(self, 'search_overlay'): del self.search_overlay
             return
 
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
-        if self._was_main_overlay_open_before_search:
-            self.close_overlay()
+        if self._was_main_overlay_open_before_search: self.close_overlay()
 
-        # --- Theme ---
-        BG_WINDOW = "#23272e"
-        BG_FRAME = "#23272e"
-        BG_SEARCH = "#2c313a"
-        FG_TEXT = "#e0e0e0"
-        FG_PLACEHOLDER = "#888"
-        ACCENT = "#00ffd5"
-        BORDER = "#AAA"
+        BG_WINDOW = self.theme.COLORS["window_bg"]
+        BG_FRAME = self.theme.COLORS["frame_bg"]
+        BG_SEARCH = self.theme.COLORS["entry_bg"]
+        FG_TEXT = self.theme.COLORS["text"]
+        FG_PLACEHOLDER = self.theme.COLORS["placeholder"]
+        ACCENT = self.theme.COLORS["accent"]
+        
         ENTRY_RADIUS = 18
         OVERLAY_RADIUS = 28
         LIST_RADIUS = 18
-        FONT_NORMAL = ("Segoe UI", 13)
-        FONT_LIST = ("Segoe UI", 12)
-        FONT_CLOSE = ("Segoe UI", 13, "bold")
 
-        # --- Overlay Window ---
         self.search_overlay = tk.Toplevel(self.root)
         self.search_overlay.withdraw()
         self.search_overlay.overrideredirect(True)
         self.search_overlay.configure(bg=BG_WINDOW)
         self.search_overlay.attributes("-topmost", True)
 
-        # --- Rounded Canvas for Overlay Background (fully rounded) ---
         overlay_canvas = RoundedCanvas(self.search_overlay, bg=BG_WINDOW, highlightthickness=0, bd=0)
         overlay_canvas.pack(fill="both", expand=True)
         width, height = 440, 360
-        overlay_canvas.create_rounded_box(
-            0, 0, width, height, radius=OVERLAY_RADIUS, color=BG_FRAME
-        )
+        overlay_canvas.create_rounded_box(0, 0, width, height, radius=OVERLAY_RADIUS, color=BG_FRAME)
 
-        # --- Main Frame (on top of canvas) ---
-        main_frame = tk.Frame(self.search_overlay, bg=BG_FRAME)
+        main_frame = ttk.Frame(self.search_overlay, style="TFrame")
         main_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-        # --- Shared padding ---
         PAD_X = 28
 
-        # --- Search Bar Frame ---
-        search_bar_frame = tk.Frame(main_frame, bg=BG_FRAME)
+        search_bar_frame = ttk.Frame(main_frame)
         search_bar_frame.pack(fill="x", pady=(28, 0), padx=PAD_X)
 
-        # --- Search Entry with Fully Rounded Background ---
         entry_canvas = RoundedCanvas(search_bar_frame, height=36, bg=BG_FRAME, highlightthickness=0, bd=0)
         entry_canvas.pack(fill="x", expand=True, side="left")
         entry_canvas.update_idletasks()
         entry_w = search_bar_frame.winfo_reqwidth() or 320
         entry_h = 36
         entry_canvas.config(width=entry_w, height=entry_h)
-        entry_canvas.create_rounded_box(
-            0, 0, entry_w, entry_h, radius=ENTRY_RADIUS, color=BG_SEARCH
-        )
+        entry_canvas.create_rounded_box(0, 0, entry_w, entry_h, radius=ENTRY_RADIUS, color=BG_SEARCH)
 
-        # --- Entry Widget (on top of rounded canvas) ---
         search_var = tk.StringVar()
         search_entry = tk.Entry(
-            entry_canvas,
-            font=FONT_NORMAL,
-            bg=BG_SEARCH,
-            fg=FG_TEXT,
-            insertbackground=FG_TEXT,
-            textvariable=search_var,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
+            entry_canvas, font=self.theme.FONTS["ui_normal"], bg=BG_SEARCH, fg=FG_TEXT,
+            insertbackground=FG_TEXT, textvariable=search_var, relief="flat", borderwidth=0, highlightthickness=0,
         )
-        # Place entry inside the rounded rectangle
         search_entry.place(x=14, y=4, relwidth=0.80, height=entry_h-8)
 
-        # --- Close Button (inside entry, right-aligned) ---
-        def close_search():
-            self.close_search_overlay(self._was_main_overlay_open_before_search)
-        close_btn = tk.Label(
-            entry_canvas,
-            text="✕",
-            font=FONT_CLOSE,
-            bg=BG_SEARCH,
-            fg="#aaa",
-            cursor="hand2"
-        )
+        def close_search(): self.close_search_overlay(self._was_main_overlay_open_before_search)
+        
+        close_btn = tk.Label(entry_canvas, text="✕", font=self.theme.FONTS["ui_normal"], bg=BG_SEARCH, fg="#aaa", cursor="hand2")
         close_btn.place(relx=0.90, y=6, width=24, height=24)
-        def on_close_enter(e): close_btn.config(fg="#fff")
-        def on_close_leave(e): close_btn.config(fg="#aaa")
         close_btn.bind("<Button-1>", lambda e: close_search())
-        close_btn.bind("<Enter>", on_close_enter)
-        close_btn.bind("<Leave>", on_close_leave)
+        close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#fff"))
+        close_btn.bind("<Leave>", lambda e: close_btn.config(fg="#aaa"))
 
-        # --- Padding between search and results ---
-        tk.Frame(main_frame, height=18, bg=BG_FRAME).pack(fill="x")
+        ttk.Frame(main_frame, height=18).pack(fill="x")
 
-        # --- Results Listbox with Fully Rounded Background ---
-        results_frame = tk.Frame(main_frame, bg=BG_FRAME)
+        results_frame = ttk.Frame(main_frame)
         results_frame.pack(fill="both", expand=True, padx=PAD_X, pady=(0, 18))
 
-        # Calculate list_h to fill the remaining space, accounting for paddings and search bar height
-        list_h = height - (2 * PAD_X) - entry_h - 18  # PAD_X top, PAD_X bottom, entry_h, padding between search/results, bottom padding
+        list_h = height - (2 * PAD_X) - entry_h - 18
         list_canvas = RoundedCanvas(results_frame, height=list_h, bg=BG_FRAME, highlightthickness=0, bd=0)
         list_canvas.pack(fill="both", expand=True, side="left")
         list_canvas.update_idletasks()
         list_w = results_frame.winfo_reqwidth() or (width - 2*PAD_X)
         list_canvas.config(width=list_w, height=list_h)
-        list_canvas.create_rounded_box(
-            0, 0, list_w, list_h, radius=LIST_RADIUS, color=BG_SEARCH
-        )
+        list_canvas.create_rounded_box(0, 0, list_w, list_h, radius=LIST_RADIUS, color=BG_SEARCH)
 
-        # --- Listbox Widget (on top of rounded canvas) ---
         results_list = tk.Listbox(
-            list_canvas,
-            font=FONT_LIST,
-            bg=BG_SEARCH,
-            fg=FG_TEXT,
-            selectmode="single",
-            height=8,
-            activestyle="none",
-            selectbackground=ACCENT,
-            selectforeground="#23272e",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            highlightbackground=BG_SEARCH,
-            highlightcolor=ACCENT,
-            bd=0
+            list_canvas, font=self.theme.FONTS["ui_list"], bg=BG_SEARCH, fg=FG_TEXT, selectmode="single",
+            height=8, activestyle="none", selectbackground=ACCENT, selectforeground="#23272e",
+            relief="flat", borderwidth=0, highlightthickness=0, highlightbackground=BG_SEARCH,
+            highlightcolor=ACCENT, bd=0
         )
-        # Place listbox inside the rounded rectangle
         results_list.place(x=10, y=8, width=list_w-20, height=list_h-16)
 
-        # --- Results Data ---
         current_results = []
 
         def update_search(*args):
@@ -1304,8 +1229,7 @@ class GhostOverlay:
             selection = results_list.curselection()
             if selection and current_results:
                 index = selection[0]
-                if results_list.get(index).strip() == "No results found.":
-                    return
+                if results_list.get(index).strip() == "No results found.": return
                 if 0 <= index < len(current_results):
                     _, path = current_results[index]
                     self.MusicPlayer.play_song(path)
@@ -1319,46 +1243,32 @@ class GhostOverlay:
                 if results_list.size() > 0:
                     if not results_list.curselection():
                         if results_list.get(0).strip() != "No results found.":
-                            results_list.selection_set(0)
-                            results_list.activate(0)
-                            results_list.see(0)
+                            results_list.selection_set(0); results_list.activate(0); results_list.see(0)
                 handle_selection()
                 return "break"
             elif event.keysym == "Down":
                 if results_list.size() > 0:
                     current_selection = results_list.curselection()
                     next_index = 0
-                    if current_selection:
-                        next_index = min(current_selection[0] + 1, results_list.size() - 1)
-                    if results_list.get(next_index).strip() == "No results found." and next_index == 0 and results_list.size() == 1:
-                        pass
+                    if current_selection: next_index = min(current_selection[0] + 1, results_list.size() - 1)
+                    if results_list.get(next_index).strip() == "No results found." and next_index == 0 and results_list.size() == 1: pass
                     else:
-                        results_list.selection_clear(0, tk.END)
-                        results_list.selection_set(next_index)
-                        results_list.activate(next_index)
-                        results_list.see(next_index)
+                        results_list.selection_clear(0, tk.END); results_list.selection_set(next_index)
+                        results_list.activate(next_index); results_list.see(next_index)
                 return "break"
             elif event.keysym == "Up":
                 if results_list.size() > 0:
                     current_selection = results_list.curselection()
                     prev_index = results_list.size() - 1
-                    if current_selection:
-                        prev_index = max(current_selection[0] - 1, 0)
-                    results_list.selection_clear(0, tk.END)
-                    results_list.selection_set(prev_index)
-                    results_list.activate(prev_index)
-                    results_list.see(prev_index)
+                    if current_selection: prev_index = max(current_selection[0] - 1, 0)
+                    results_list.selection_clear(0, tk.END); results_list.selection_set(prev_index)
+                    results_list.activate(prev_index); results_list.see(prev_index)
                 return "break"
 
         def handle_key_in_listbox(event):
-            if event.keysym == "Return":
-                handle_selection()
-                return "break"
-            elif event.keysym == "Escape":
-                self.close_search_overlay(self._was_main_overlay_open_before_search)
-                return "break"
+            if event.keysym == "Return": handle_selection(); return "break"
+            elif event.keysym == "Escape": self.close_search_overlay(self._was_main_overlay_open_before_search); return "break"
 
-        # --- Bindings ---
         search_var.trace_add("write", update_search)
         search_entry.bind("<Key>", handle_key_in_entry)
         results_list.bind("<Double-Button-1>", handle_selection)
@@ -1366,12 +1276,8 @@ class GhostOverlay:
         results_list.bind("<Escape>", handle_key_in_listbox)
         self.search_overlay.bind("<Escape>", lambda e: self.close_search_overlay(self._was_main_overlay_open_before_search))
 
-        # --- Mouse wheel scrolling for results ---
-        def _on_mousewheel(event):
-            results_list.yview_scroll(int(-1*(event.delta/120)), "units")
-        results_list.bind("<MouseWheel>", _on_mousewheel)
+        results_list.bind("<MouseWheel>", lambda e: results_list.yview_scroll(int(-1*(e.delta/120)), "units"))
 
-        # --- Overlay Placement ---
         self.search_overlay.update_idletasks()
         x = (self.search_overlay.winfo_screenwidth() // 2) - (width // 2)
         y = (self.search_overlay.winfo_screenheight() // 2) - (height // 2)
@@ -1386,52 +1292,35 @@ class GhostOverlay:
             x = search_entry.winfo_rootx() + search_entry.winfo_width() // 2
             y = search_entry.winfo_rooty() + search_entry.winfo_height() // 2
             mouse_controller = mouse.Controller()
-            mouse_controller.position = (x, y)
-            mouse_controller.press(mouse.Button.left)
-            mouse_controller.release(mouse.Button.left)
+            mouse_controller.position = (x, y); mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
             search_entry.focus_set()
         
         self.search_overlay.after_idle(focus_entry_with_click)
 
-        # --- Make overlay draggable by clicking anywhere on overlay_canvas or main_frame ---
-        def start_move(event):
-            self.search_overlay._drag_start_x = event.x_root - self.search_overlay.winfo_x()
-            self.search_overlay._drag_start_y = event.y_root - self.search_overlay.winfo_y()
-        def do_move(event):
-            x = event.x_root - self.search_overlay._drag_start_x
-            y = event.y_root - self.search_overlay._drag_start_y
-            self.search_overlay.geometry(f"+{x}+{y}")
-        overlay_canvas.bind("<Button-1>", start_move)
-        overlay_canvas.bind("<B1-Motion>", do_move)
-        main_frame.bind("<Button-1>", start_move)
-        main_frame.bind("<B1-Motion>", do_move)
+        def start_move(event): self.search_overlay._drag_start_x = event.x_root - self.search_overlay.winfo_x(); self.search_overlay._drag_start_y = event.y_root - self.search_overlay.winfo_y()
+        def do_move(event): self.search_overlay.geometry(f"+{event.x_root - self.search_overlay._drag_start_x}+{event.y_root - self.search_overlay._drag_start_y}")
+        overlay_canvas.bind("<Button-1>", start_move); overlay_canvas.bind("<B1-Motion>", do_move)
+        main_frame.bind("<Button-1>", start_move); main_frame.bind("<B1-Motion>", do_move)
 
         def check_mouse_outside_overlay():
             if self.search_overlay and self.search_overlay.winfo_exists():
-                x1 = self.search_overlay.winfo_rootx()
-                y1 = self.search_overlay.winfo_rooty()
-                x2 = x1 + self.search_overlay.winfo_width()
-                y2 = y1 + self.search_overlay.winfo_height()
+                x1, y1 = self.search_overlay.winfo_rootx(), self.search_overlay.winfo_rooty()
+                x2, y2 = x1 + self.search_overlay.winfo_width(), y1 + self.search_overlay.winfo_height()
                 margin = 50
-                mx = self.search_overlay.winfo_pointerx()
-                my = self.search_overlay.winfo_pointery()
-                if (mx < x1 - margin or mx > x2 + margin or
-                    my < y1 - margin or my > y2 + margin):
+                mx, my = self.search_overlay.winfo_pointerx(), self.search_overlay.winfo_pointery()
+                if (mx < x1 - margin or mx > x2 + margin or my < y1 - margin or my > y2 + margin):
                     self.close_search_overlay(self._was_main_overlay_open_before_search)
                 else:
-                    # Check again after a short delay
                     self.search_overlay.after(100, check_mouse_outside_overlay)
 
-        # Start the polling loop after the overlay is shown
         self.search_overlay.after(100, check_mouse_outside_overlay)
 
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
-            self.search_overlay.grab_release() # Release grab before destroying
+            self.search_overlay.grab_release()
             self.search_overlay.destroy()
             self.search_overlay = None
-            if restore_main_overlay:
-                self.open_overlay()
+            if restore_main_overlay: self.open_overlay()
             
 #####################################################################################################
 
@@ -1466,26 +1355,23 @@ class GhostOverlay:
             self.MusicPlayer.repeat()
             
     def _trigger_lyrics_toggle(self):
-        # This toggles the *display* of lyrics if they are available for the current song
-        # It does not control fetching or processing, just visibility on the overlay
         self.display_lyrics = not self.display_lyrics
-        if self.window and self.running_lyrics: # Only update if lyrics are conceptually "on"
+        if self.window and self.running_lyrics:
             self.root.after(0, self.update_display)
                 
     def _trigger_radio_toggle(self): # Enable/Disable Radio Mode
         if hasattr(self, 'MusicPlayer') and monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1] and self.playerState:
             self.triggerDebounce[0] = monotonic()
             self.display_radio = not self.display_radio
-            # self.MusicPlayer.toggle_loop_cycle(self.display_radio) # Assuming this controls radio mode in player
             ll.debug(f"Radio mode toggled: {'ON' if self.display_radio else 'OFF'}")
             if hasattr(self.MusicPlayer, 'toggle_loop_cycle'):
                  self.MusicPlayer.toggle_loop_cycle(self.display_radio)
             if self.window:
-                self.root.after(0, self.update_display) # Update display to reflect radio state if needed
+                self.root.after(0, self.update_display)
             
     def _trigger_radio_station(self, atmpt = 0, max_loop = 5): # Scan for next station
-        if hasattr(self, 'MusicPlayer') and self.display_radio and self.playerState: # Only if radio mode is ON
-            if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]: # Debounce scan attempts
+        if hasattr(self, 'MusicPlayer') and self.display_radio and self.playerState:
+            if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]:
                 self.triggerDebounce[0] = monotonic()
                 ll.print("Scanning for radio station...")
                 self.set_radio_channel()
@@ -1506,7 +1392,6 @@ class GhostOverlay:
                     ll.warn("MusicPlayer not initialized yet. Cannot open overlay properly.")
                     return
                 try:
-                    # Always schedule on main thread
                     self.root.after(0, self.open_overlay)
                 except tk.TclError as e:
                     ll.warn(f"Could not open overlay yet (TclError): {e}")
@@ -1520,13 +1405,13 @@ class GhostOverlay:
             
             if self.playerState: # Transitioning to ON
                 ll.print("Player enabled. Opening overlay.")
-                self.open_overlay() # Open overlay if not already open
+                self.open_overlay()
                 if hasattr(self, 'MusicPlayer'):
                     self.MusicPlayer.pause(True) # True to unpause/play
             else: # Transitioning to OFF
                 ll.print("Player disabled. Closing overlay and pausing music.")
                 if hasattr(self, 'MusicPlayer'):
-                    if self.display_radio: # If radio was on, turn it off conceptually
+                    if self.display_radio:
                         self.display_radio = False
                         self.MusicPlayer.toggle_loop_cycle(self.display_radio)
                     self.MusicPlayer.pause(False) # False to pause
@@ -1552,35 +1437,18 @@ class GhostOverlay:
 #####################################################################################################
 
     def toggle_overlay_clickthrough(self, mode: bool):
-        """Toggle Whether The Mouse Ignores The Display Or Not
-        - True: Disable Mouse Clicking Of The Overlay
-        - False: Enable Mouse Clicking Of The Overlay
-        """
+        """Toggle Whether The Mouse Ignores The Display Or Not"""
         hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
         current_style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         
-        if mode:
-            # Enable click-through
-            new_style = current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT
-        else:
-            # Disable click-through
-            new_style = current_style & ~ WS_EX_TRANSPARENT
+        if mode: new_style = current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+        else: new_style = current_style & ~ WS_EX_TRANSPARENT
         
         ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style)
 
     def parse_mouse_over_overlay(self):
-        if not self.window or not self.window.winfo_exists():
-            return
+        if not self.window or not self.window.winfo_exists(): return
         if self.mouseEvents.is_right_mouse_down():
-            ## Get current mouse position
-            ## Get window geometry (x, y, width, height)
-            ##  Calculate rectangle bounds:
-            ##  a = top-left (window_x, window_y)
-            ##  b = bottom-right (window_x + width, window_y + height)
-            #a_x, a_y = window_x, window_y
-            #b_x, b_y = window_x + window_width, window_y + window_height
-            ## Check if mouse is inside window
-            #if self.calc_pos(*currentPosition, a_x, a_y, b_x, b_y):
             currentPosition = self.mouseEvents.mouse_pos()
             self.clickThroughState = False
             self.toggle_overlay_clickthrough(self.clickThroughState)
@@ -1592,39 +1460,32 @@ class GhostOverlay:
                 self._win_start_y = self.window.winfo_y()
                 
                 if self.window and self.window.winfo_exists():
-                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) # Get the actual window handle
-                    # Try to bring the window to the foreground and activate it
+                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
                     ctypes.windll.user32.SetActiveWindow(hwnd)
-                    ctypes.windll.user32.SetFocus(hwnd) # Explicitly set focus
-                    ctypes.windll.user32.BringWindowToTop(hwnd) # Ensure it's on top of other windows
+                    ctypes.windll.user32.SetFocus(hwnd)
+                    ctypes.windll.user32.BringWindowToTop(hwnd)
                     
-                    # Just incase that didn't work force right click and left click twice to simulate the window to foreground over context windows
                     mouse_controller = mouse.Controller()
-                    mouse_controller.press(mouse.Button.right)
-                    mouse_controller.release(mouse.Button.right)
-                    mouse_controller.press(mouse.Button.left)
-                    mouse_controller.release(mouse.Button.left)
+                    mouse_controller.press(mouse.Button.right); mouse_controller.release(mouse.Button.right)
+                    mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
                     mouse_controller.press(mouse.Button.right)
         else:
             if not self.clickThroughState and not self._overlay_dragging:
                 self.clickThroughState = True
                 self.toggle_overlay_clickthrough(self.clickThroughState)
-                try:
-                    self.root.after(100, self.keep_overlay_on_top)
-                except:
-                    ll.error("Couldn't Load Root After.")
+                try: self.root.after(100, self.keep_overlay_on_top)
+                except: ll.error("Couldn't Load Root After.")
                     
-    def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):  # Increased from 60
+    def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):
         """Loop To Handle Draggability - OPTIMIZED FOR GAMING"""
-        thread_tick_size = 0.25  # Increased from 0.1 (4x less frequent)
+        thread_tick_size = 0.25
         ticks_per_second = int(1 / thread_tick_size) 
         time_dial = int(time_dilation_for_key_reset * ticks_per_second)
         time_tick = 0
         
         while True:
             try:
-                # Only check mouse when actually needed
                 if self.window and self.window.winfo_exists():
                     self.parse_mouse_over_overlay()
             except Exception as E:
@@ -1635,25 +1496,20 @@ class GhostOverlay:
                 ll.debug(f"Resetting Key Events")
                 self.background_key_reset()
             
-            # Less frequent topmost updates
-            if time_tick % (ticks_per_second * 5) == 0:  # Every 5 seconds instead of every second
+            if time_tick % (ticks_per_second * 5) == 0:
                 self.keep_overlay_on_top()
             
             sleep(thread_tick_size)
 
 #####################################################################################################
 
-    def toggle_lyrics(self, state: bool): # Master toggle for lyrics processing/fetching (conceptual)
-        if self.running_lyrics == state: return # No change
+    def toggle_lyrics(self, state: bool):
+        if self.running_lyrics == state: return
 
         with self.text_lock:
             self.running_lyrics = state
-            if not state: # If turning lyrics off
-                self.player_metric['player_lyrics'] = "" # Clear current lyrics
+            if not state: self.player_metric['player_lyrics'] = ""
         
-        # This method controls the 'conceptual' state of lyrics being active.
-        # The display_lyrics flag (toggled by user via hotkey) controls visibility.
-        # Update display if overlay is open, to show/hide the lyrics section.
         if self.window and self.window.winfo_exists():
             self.root.after(0, self.update_display)
 
@@ -1662,95 +1518,69 @@ class GhostOverlay:
         words = text.split()
         if not words: return ""
 
-        lines = []
-        current_line = ""
+        lines, current_line = [], ""
         for word in words:
-            if not current_line:
-                current_line = word
-            elif len(current_line) + 1 + len(word) <= max_chars_line:
-                current_line += " " + word
-            else:
-                lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
+            if not current_line: current_line = word
+            elif len(current_line) + 1 + len(word) <= max_chars_line: current_line += " " + word
+            else: lines.append(current_line); current_line = word
+        if current_line: lines.append(current_line)
         
-        if len(lines) > 2 : # If more than 2 lines after basic wrap, try to force to 2
-            # A simple split, might not be ideal for all cases
+        if len(lines) > 2 :
             midpoint_char = len(text) // 2
-            split_point = text.rfind(' ', 0, midpoint_char + len(text)//4) # Look for space around middle
-            if split_point == -1: # No space found, hard split
-                 split_point = midpoint_char
-            
-            line1 = text[:split_point].strip()
-            line2 = text[split_point:].strip()
-            return f"{line1}\n{line2}" if line2 else line1 # Avoid trailing newline if line2 is empty
+            split_point = text.rfind(' ', 0, midpoint_char + len(text)//4)
+            if split_point == -1: split_point = midpoint_char
+            line1, line2 = text[:split_point].strip(), text[split_point:].strip()
+            return f"{line1}\n{line2}" if line2 else line1
         
         return "\n".join(lines)
     
 #####################################################################################################
 
     def display_overlay(self):
-        while not hasattr(self, 'MusicPlayer'):
-            sleep(1)
+        while not hasattr(self, 'MusicPlayer'): sleep(1)
         self.root.after(0, self.open_overlay)
 
     def keep_overlay_on_top_init(self):
         self.root.bind("<FocusIn>", self.keep_overlay_on_top)
         self.root.bind("<FocusOut>", self.keep_overlay_on_top)
-        #self.root.after(1, self.keep_overlay_on_top_loop)  # schedule again after 1 ms
 
     def keep_overlay_on_top(self, event = None):
         """Keep the overlay window on top of all other windows."""
         try:
-            if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
-                # Only set topmost if it's not already topmost
-                if not self.window.attributes('-topmost'):
-                    self.window.attributes('-topmost', True)
+            if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn' and not self.window.attributes('-topmost'):
+                self.window.attributes('-topmost', True)
             
-            # Skip other windows if they don't exist
-            if hasattr(self, 'key_hints_popup') and self.key_hints_popup and self.key_hints_popup.winfo_exists():
-                if not self.key_hints_popup.attributes('-topmost'):
-                    self.key_hints_popup.attributes('-topmost', True)
-        except tk.TclError:
-            pass  # Window destroyed, ignore
+            if hasattr(self, 'key_hints_popup') and self.key_hints_popup and self.key_hints_popup.winfo_exists() and not self.key_hints_popup.attributes('-topmost'):
+                self.key_hints_popup.attributes('-topmost', True)
+        except tk.TclError: pass
 
 #####################################################################################################
 
     def center_window(self):
-        if not (self.window and self.window.winfo_exists()):
-            return
-        self.window.update_idletasks() # Ensure dimensions are calculated
-        width = self.window.winfo_width()
-        height = self.window.winfo_height()
-        # If width/height are still 1, it means it hasn't drawn yet. Try again.
+        if not (self.window and self.window.winfo_exists()): return
+        self.window.update_idletasks()
+        width, height = self.window.winfo_width(), self.window.winfo_height()
         if width <= 1 or height <= 1: 
             self.root.after(100, self.center_window)
             return
         
-        screen_width = self.window.winfo_screenwidth()
-        # screen_height = self.window.winfo_screenheight() # Not used for y
-        x = (screen_width - width) // 2
-        self.window.geometry(f'+{x}+20') # Default y=20 from top
+        x = (self.window.winfo_screenwidth() - width) // 2
+        self.window.geometry(f'+{x}+20')
         self._last_position = (x, 20)
 
     def _create_canvas_items_if_needed(self, init_draw = False):
         if self.canvas_items.get('bg') is None or init_draw == True:
-            # Create items and store their IDs
-            
             self.canvas_items['bg'] = self.canvas.create_rounded_box(0, 0, 1, 1, radius=15, color=self.bg_color)
-            self.canvas_items['player_text'] = self.canvas.create_text(0, 0, font=self.main_font, fill='#FFFFFF', anchor=tk.N, justify=tk.CENTER)
-            self.canvas_items['duration_text'] = self.canvas.create_text(0, 0, font=self.time_font, fill='#AAAAAA', anchor=tk.N, justify=tk.CENTER)
-            self.canvas_items['lyrics_text'] = self.canvas.create_text(0, 0, font=self.lyrics_font, fill='#E0E0E0', anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['player_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["main"], fill=self.theme.COLORS["text"], anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['duration_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["time"], fill=self.theme.COLORS["text_dark"], anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['lyrics_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["lyrics"], fill=self.theme.COLORS["text"], anchor=tk.N, justify=tk.CENTER)
 
     def open_overlay(self):
         if hasattr(self, 'search_overlay'):
             self.close_search_overlay(self._was_main_overlay_open_before_search)
-            try:
-                del self.search_overlay
-            except AttributeError:
-                pass
-        if self.window and self.window.winfo_exists(): # Already open
+            try: del self.search_overlay
+            except AttributeError: pass
+        if self.window and self.window.winfo_exists():
             self.window.lift()
             return
 
@@ -1758,57 +1588,43 @@ class GhostOverlay:
         self.window.overrideredirect(True)
         self.window.attributes('-alpha', 0.7)
         self.window.attributes('-topmost', True)
-        # Using a common color that's unlikely to be in content for transparency
-        # 'gray1' is very dark, almost black. Ensure it's not your background.
-        transparent_color = 'gray1' # Or another unique color
+        
+        transparent_color = self.theme.COLORS["transparent"]
         self.window.attributes('-transparentcolor', transparent_color) 
-        self.window.config(bg=transparent_color) # Set window bg to transparent color
+        self.window.config(bg=transparent_color)
         self.toggle_overlay_clickthrough(self.clickThroughState)
 
         self.canvas = RoundedCanvas(self.window, bg=transparent_color, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
-        self.update_display(init_draw=True) # Initial draw
+        self.update_display(init_draw=True)
         
-        if self._last_position:
-            x, y = self._last_position
-            self.window.geometry(f"+{x}+{y}")
-        else:
-            self.root.after(0, self.center_window) # Delay centering slightly for dimensions to finalize
+        if self._last_position: self.window.geometry(f"+{self._last_position[0]}+{self._last_position[1]}")
+        else: self.root.after(0, self.center_window)
 
-        # Drag-to-move handlers
-        self._drag_start_x = 0
-        self._drag_start_y = 0
-        self._win_start_x = 0
-        self._win_start_y = 0
+        self._drag_start_x, self._drag_start_y = 0, 0
+        self._win_start_x, self._win_start_y = 0, 0
         self._overlay_dragging = False
         self._overlay_start_move = None
 
         def start_move(event):
-            self._drag_start_x = event.x_root
-            self._drag_start_y = event.y_root
-            if self.window: # Ensure window exists
+            self._drag_start_x, self._drag_start_y = event.x_root, event.y_root
+            if self.window:
                 self._overlay_dragging = True
-                self._win_start_x = self.window.winfo_x()
-                self._win_start_y = self.window.winfo_y()
-                self._win_start_size_width = self.window.winfo_width()
-                self._win_start_size_height = self.window.winfo_height()
+                self._win_start_x, self._win_start_y = self.window.winfo_x(), self.window.winfo_y()
+                self._win_start_size_width, self._win_start_size_height = self.window.winfo_width(), self.window.winfo_height()
 
         def do_move(event):
-            if self.window: # Ensure window exists
-                dx = event.x_root - self._drag_start_x
-                dy = event.y_root - self._drag_start_y
-                new_x = self._win_start_x + dx
-                new_y = self._win_start_y + dy
+            if self.window:
+                dx, dy = event.x_root - self._drag_start_x, event.y_root - self._drag_start_y
+                new_x, new_y = self._win_start_x + dx, self._win_start_y + dy
                 self.window.geometry(f"+{new_x}+{new_y}")
                 self._last_position = (new_x, new_y)
                 self.mouseEvents.update_window(new_x, new_y, self._win_start_size_width, self._win_start_size_height)
 
-        def do_stop(event):
-            self._overlay_dragging = False
+        def do_stop(event): self._overlay_dragging = False
 
         self._overlay_start_move = start_move
-
         self.canvas.bind("<Button-3>", start_move)
         self.canvas.bind("<B3-Motion>", do_move)
         self.canvas.bind("<ButtonRelease-3>", do_stop)
@@ -1816,58 +1632,52 @@ class GhostOverlay:
     def close_overlay(self):
         if self.window:
             try:
-                current_pos_str = self.window.geometry().split('+')
-                if len(current_pos_str) == 3: # e.g., "WxH+X+Y"
-                    self._last_position = (int(current_pos_str[1]), int(current_pos_str[2]))
-            except (tk.TclError, AttributeError, ValueError): # Window might be already destroyed or malformed string
-                 pass # self._last_position remains as is
+                parts = self.window.geometry().split('+')
+                if len(parts) == 3: self._last_position = (int(parts[1]), int(parts[2]))
+            except (tk.TclError, AttributeError, ValueError): pass
             self.window.destroy()
-            self.window = None
-            self.canvas = None # Clear canvas reference too
-            self.clickThroughState = True # Update clickThroughState
+            self.window, self.canvas = None, None
+            self.clickThroughState = True
             
     def update_display(self, init_draw = False):
-        if not (self.window and self.canvas and self.window.winfo_exists()):
-            return
+        if not (self.window and self.canvas and self.window.winfo_exists()): return
 
         try:
-            # Ensure all canvas items have been created
             self._create_canvas_items_if_needed(init_draw)
 
-            # Wrap main text (song title/artist)
             wrapped_player_text = self.wrap_text(self.player_metric['player_text'], 35)
             num_player_text_lines = wrapped_player_text.count('\n') + 1
 
             display_lyrics_text = ""
             lyrics_visible = self.running_lyrics and self.display_lyrics and self.player_metric['player_lyrics']
             if lyrics_visible:
-                wrapped_lyrics = self.wrap_text(self.player_metric['player_lyrics'], 40)
-                display_lyrics_text = wrapped_lyrics
+                display_lyrics_text = self.wrap_text(self.player_metric['player_lyrics'], 40)
 
-            main_width = max(self.main_font.measure(line) for line in wrapped_player_text.split('\n')) if wrapped_player_text else 0
-            time_width = self.time_font.measure(self.player_metric['player_duration'])
-            lyrics_width = max(self.lyrics_font.measure(line) for line in display_lyrics_text.split('\n')) if display_lyrics_text else 0
+            main_font = self.theme.FONTS["main"]
+            time_font = self.theme.FONTS["time"]
+            lyrics_font = self.theme.FONTS["lyrics"]
+
+            main_width = max(main_font.measure(line) for line in wrapped_player_text.split('\n')) if wrapped_player_text else 0
+            time_width = time_font.measure(self.player_metric['player_duration'])
+            lyrics_width = max(lyrics_font.measure(line) for line in display_lyrics_text.split('\n')) if display_lyrics_text else 0
 
             total_width = max(main_width, time_width, lyrics_width) + 2 * self.overlay_text_padding
             
-            height_for_main_text = self.main_font.metrics("linespace") * num_player_text_lines
-            height_for_time = self.time_font.metrics("linespace")
+            height_for_main_text = main_font.metrics("linespace") * num_player_text_lines
+            height_for_time = time_font.metrics("linespace")
             num_lyrics_lines = display_lyrics_text.count('\n') + 1 if lyrics_visible else 0
-            height_for_lyrics = (self.lyrics_font.metrics("linespace") * num_lyrics_lines) + (self.overlay_text_padding / 2) if lyrics_visible else 0
+            height_for_lyrics = (lyrics_font.metrics("linespace") * num_lyrics_lines) + (self.overlay_text_padding / 2) if lyrics_visible else 0
             total_height = height_for_main_text + height_for_time + height_for_lyrics + (2 * self.overlay_text_padding)
 
-            ### Background ###
             self.canvas.delete(self.canvas_items['bg'])
             self.canvas_items['bg'] = self.canvas.create_rounded_box(0, 0, total_width, total_height, radius=self.overlay_corner_radius, color=self.bg_color)
-            self.canvas.tag_lower(self.canvas_items['bg']) # Ensure it's the bottom layer
+            self.canvas.tag_lower(self.canvas_items['bg'])
             current_y = self.overlay_text_padding
 
-            ### Player Label ###
             self.canvas.itemconfig(self.canvas_items['player_text'], text=wrapped_player_text)
             self.canvas.coords(self.canvas_items['player_text'], total_width / 2, current_y)
             current_y += height_for_main_text + (self.overlay_text_padding / 2)
             
-            ### Player Lyrics ###
             self.canvas.itemconfig(self.canvas_items['duration_text'], text=self.player_metric['player_duration'])
             self.canvas.coords(self.canvas_items['duration_text'], total_width / 2, current_y)
             current_y += height_for_time + (self.overlay_text_padding / 2 if lyrics_visible else 0)
@@ -1878,29 +1688,24 @@ class GhostOverlay:
             else:
                 self.canvas.itemconfig(self.canvas_items['lyrics_text'], state='hidden')
 
-            # Resize window, preserving position
             if self.window and self.window.winfo_exists():
-                current_geometry = self.window.geometry() # "WxH+X+Y"
-                parts = current_geometry.split('+')
-                if len(parts) == 3: # If X and Y are available
-                    x_pos, y_pos = parts[1], parts[2]
-                    self.window.geometry(f'{int(total_width)}x{int(total_height)}+{x_pos}+{y_pos}')
-                else: # Fallback if geometry string is unexpected
+                parts = self.window.geometry().split('+')
+                if len(parts) == 3:
+                    self.window.geometry(f'{int(total_width)}x{int(total_height)}+{parts[1]}+{parts[2]}')
+                else:
                     self.window.geometry(f'{int(total_width)}x{int(total_height)}')
                     
-            self._update_scheduled = False # Reset the flag
+            self._update_scheduled = False
 
-        except tk.TclError as e:
-            pass # Window or canvas likely destroyed
-        except Exception as e:
-            ll.error(f"Unexpected error in update_display: {e}")
+        except tk.TclError as e: pass
+        except Exception as e: ll.error(f"Unexpected error in update_display: {e}")
 
 #####################################################################################################
 
     def schedule_update(self):
         if self.window and not self._update_scheduled:
             self._update_scheduled = True
-            self.root.after(100, self.update_display) # 100ms delay to batch updates
+            self.root.after(100, self.update_display)
             
     def set_text(self, text: str):
         with self.text_lock:
@@ -1914,57 +1719,49 @@ class GhostOverlay:
             seconds = int(seconds % 60)
             return f"{minutes}:{seconds:02d}"
         
-        current_str = format_time(current_seconds)
-        total_str = format_time(total_seconds)
-        full_str = f"{current_str} / {total_str}"
+        full_str = f"{format_time(current_seconds)} / {format_time(total_seconds)}"
         
         with self.text_lock:
-            # Only update if seconds changed (not every millisecond)
-            if self.player_metric['player_duration'] == full_str:
-                return
+            if self.player_metric['player_duration'] == full_str: return
             self.player_metric['player_duration'] = full_str
         self.schedule_update()
 
     def set_lyrics(self, text: str):
-        # This sets the raw lyric string. Wrapping happens in update_display.
         with self.text_lock:
-            self.player_metric['player_lyrics'] = text if text else "" # Ensure it's a string
+            self.player_metric['player_lyrics'] = text if text else ""
         self.schedule_update()
 
 #####################################################################################################
 
     def set_radio_ips(self, ip_list: list):
         with self.text_lock:
-            self.radio_metric['availability'] = list(set(ip_list)) # Ensure unique IPs
+            self.radio_metric['availability'] = list(set(ip_list))
             if not self.radio_metric['availability'] or self.radio_metric['current_ip'] not in self.radio_metric['availability']:
                 self.radio_metric['current_ip'] = self.radio_metric['availability'][0] if self.radio_metric['availability'] else ''
-        if self.window and self.window.winfo_exists() and self.display_radio: # Update if radio is visible
-             self.root.after(0, self.update_display) # To reflect new IP or availability if shown
+        if self.window and self.window.winfo_exists() and self.display_radio:
+             self.root.after(0, self.update_display)
         
     def _get_next_(self, items: list, value):
         if not items: return ''
         try:
             current_index = items.index(value)
             return items[(current_index + 1) % len(items)]
-        except ValueError: # Value not in list, return first item
-            return items[0]
+        except ValueError: return items[0]
     
-    def set_radio_channel(self): # Skips to next available IP
+    def set_radio_channel(self):
         with self.text_lock:
             ip_list = self.radio_metric['availability']
-            if len(ip_list) > 0: # Only change if there are options
-                current_ip = self.radio_metric['current_ip']
-                self.radio_metric['current_ip'] = self._get_next_(ip_list, current_ip)
+            if len(ip_list) > 0:
+                self.radio_metric['current_ip'] = self._get_next_(ip_list, self.radio_metric['current_ip'])
                 ll.print(f"Radio IP set to: {self.radio_metric['current_ip']}")
             else:
-                self.radio_metric['current_ip'] = '' # No IPs available
+                self.radio_metric['current_ip'] = ''
                 ll.warn("No radio IPs available to select.")
-        # No automatic display update here, _trigger_radio_station will handle it after attempting connection.
         
     def close_application(self):
         """Properly close the entire application"""
-        self.root.destroy()   # Destroy GUI first
-        os._exit(0)          # Force exit all threads/processes
+        self.root.destroy()
+        os._exit(0)
 
 #####################################################################################################
 
@@ -2004,7 +1801,7 @@ def main():
             ll.debug("DummyPlayer: Skip Next")
             self.current_song_index = (self.current_song_index + 1) % len(self.playlist)
             self._update_overlay_song_info()
-        def pause(self, force_play=None): # True to play, False to pause, None to toggle
+        def pause(self, force_play=None):
             if force_play is True: self.is_paused = False
             elif force_play is False: self.is_paused = True
             else: self.is_paused = not self.is_paused
@@ -2012,45 +1809,36 @@ def main():
         def up_volume(self): self.volume = min(100, self.volume + 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
         def dwn_volume(self): self.volume = max(0, self.volume - 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
         def repeat(self): self.is_repeating = not self.is_repeating; ll.debug(f"DummyPlayer: Repeat {'On' if self.is_repeating else 'Off'}")
-        def toggle_loop_cycle(self, radio_mode_on: bool): # For radio
+        def toggle_loop_cycle(self, radio_mode_on: bool):
             ll.debug(f"DummyPlayer: Radio mode {'Activated' if radio_mode_on else 'Deactivated'}")
         def set_radio_ip(self, ip:str):
-            if ip: ll.debug(f"DummyPlayer: Attempting to stream from radio IP: {ip}"); return True # Simulate success
-            ll.warn("DummyPlayer: No radio IP to stream from.")
-            return False
+            if ip: ll.debug(f"DummyPlayer: Attempting to stream from radio IP: {ip}"); return True
+            ll.warn("DummyPlayer: No radio IP to stream from."); return False
 
 
     overlay = GhostOverlay(root)
     
-    # --- For testing: Link a dummy player ---
-    # This part would normally be handled by your main application logic
-    # which creates both the music player and the overlay.
     player = DummyMusicPlayer(overlay)
-    overlay.MusicPlayer = player # Allow overlay to call player methods
-    player._update_overlay_song_info() # Set initial song
+    overlay.MusicPlayer = player
+    player._update_overlay_song_info()
 
-    # Simulate song progress for testing duration update
     current_pos = 0
     total_duration = player.playlist[player.current_song_index][2]
     def simulate_progress():
         nonlocal current_pos, total_duration
-        if not player.is_paused and overlay.playerState: # only if playing and player is on
+        if not player.is_paused and overlay.playerState:
             current_pos +=1
-            if current_pos > total_duration:
-                current_pos = 0 # loop song for test
-                # Or call player.skip_next() for playlist behavior
+            if current_pos > total_duration: current_pos = 0
             overlay.set_duration(current_pos, total_duration)
         
-        # Update total_duration if song changed
         new_total_duration = player.playlist[player.current_song_index][2]
         if new_total_duration != total_duration:
             total_duration = new_total_duration
-            current_pos = 0 # Reset progress for new song
+            current_pos = 0
 
         root.after(1000, simulate_progress)
     
     root.after(1000, simulate_progress)
-    # --- End For testing ---
 
     try:
         root.mainloop()
@@ -2059,9 +1847,6 @@ def main():
     finally:
         if overlay.listener and overlay.listener.is_alive():
             overlay.listener.stop()
-        # Consider if kill_all_python_processes is desired on normal exit
-        # kill_all_python_processes(include_current=False) # Example cleanup
-
 
 if __name__ == "__main__":
     main()

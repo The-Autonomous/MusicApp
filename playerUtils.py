@@ -136,7 +136,7 @@ class TitleCleaner:
 
 class MusicOverlayController:
     """Tie MusicPlayer updates to GhostOverlay in a clean, thread-safe way."""
-    def __init__(self, overlay):
+    def __init__(self, overlay, fast_load: bool = False):
         try:
             from music import MusicPlayer, get_auto_directories
         except ImportError:
@@ -149,6 +149,7 @@ class MusicOverlayController:
             set_duration=self._update_duration,
             set_lyrics=self._update_lyrics,
             set_ips=self._update_ips,
+            fast_load=fast_load,
         )
         overlay.MusicPlayer = self.player
         self.start()

@@ -19,6 +19,17 @@ ll = log_loader("YT Download")
 
 #######################
 
+class SilentLogger:
+    """A dummy logger to suppress all yt_dlp output."""
+    def debug(self, msg):
+        pass
+    def warning(self, msg):
+        pass
+    def error(self, msg):
+        pass
+
+#######################
+
 class DownloadPopup:
     def __init__(self):
         pass
@@ -149,6 +160,7 @@ class ytHandle:
                     'preferredquality': '192',  # Fixed quality for consistency
                 }
             ],
+            'logger': SilentLogger(),
             'quiet': True,
             'no_warnings': True,
             'sponsorblock_mark': 'all',

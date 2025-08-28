@@ -190,7 +190,10 @@ class SmartShuffler:
 class MusicPlayer:
     SAVE_STATE_FILE = ".musicapp_state.json"
     
-    def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips):
+    def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips, fast_load: bool = False, fast_load_limit: int = 20):
+        # Fast Load Mode
+        self.fast_load_limit = fast_load_limit
+        
         # Playback control events
         self.skip_flag = Event()
         self.pause_event = Event()
@@ -202,8 +205,9 @@ class MusicPlayer:
         self.downloadPopup = DownloadPopup()
         self.progress_value = multiprocessing.Value('d', 0.0)  # 'd' = double precision float
         self.current_video = SharedString(max_size=20)
-        self.popup_proc = multiprocessing.Process(target=self.downloadPopup.popup_process, args=(self.close_event, self.progress_value, self.current_video))
-        self.popup_proc.start()
+        if not fast_load:
+            self.popup_proc = multiprocessing.Process(target=self.downloadPopup.popup_process, args=(self.close_event, self.progress_value, self.current_video))
+            self.popup_proc.start()
         
         # Movement Debounce
         self.movementDebounce = [False, 0.2]  # [is_moving, debounce_time]
@@ -236,10 +240,10 @@ class MusicPlayer:
         
         # Cache & Shuffler
         self.shuffler = SmartShuffler()
-        self.initializer_thread = Thread(target=self.initialize_cache, args=(directories,), daemon=True)
+        self.initializer_thread = Thread(target=self.initialize_cache, args=(directories,fast_load,), daemon=True)
         self.initializer_thread.start()
         self.songDownloadThreads.append(self.initializer_thread)
-        self.wait_for_yt()
+        if not fast_load: self.wait_for_yt()
 
         # Playback state
         self.current_song = None
@@ -560,11 +564,11 @@ class MusicPlayer:
             self.resume_pending = False
         return False
 
-    def initialize_cache(self, directories):
+    def initialize_cache(self, directories, fast_load: bool = False):
         supported_extensions = ('.mp3', '.wav', '.ogg', '.flac')
         unique_paths = set()  # Track unique paths to avoid duplicates
         for path in directories:
-            if path.startswith('http'):
+            if path.startswith('http') and not fast_load:
                 newThread = Thread(target=self.ytDownload, args=(path, directories,))
                 newThread.start()
                 self.songDownloadThreads.append(newThread)
@@ -601,6 +605,10 @@ class MusicPlayer:
                             'duration': duration
                         })
                         
+                    if fast_load and len(self.shuffler.cache) >= self.fast_load_limit:
+                        ll.debug(f"Fast load: stopping after {self.fast_load_limit} songs")
+                        break
+                        
         # Remove cache entries for files that no longer exist
         removed = set(self.meta) - unique_paths
         for path in removed:
@@ -611,7 +619,7 @@ class MusicPlayer:
         # Save cache
         self.save_meta_cache()
         # Load Playback State
-        self.load_playback_state()
+        if not fast_load: self.load_playback_state()
 
 #####################################################################################################
 
