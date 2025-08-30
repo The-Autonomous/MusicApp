@@ -131,6 +131,134 @@ class ytHandle:
         
         ll.debug(f"Initialized download handler with {max_workers} parallel workers")
 
+    def search_youtube(self, query: str, limit: int = 20):
+        """
+        Searches YouTube for a given query and returns a list of video titles and URLs.
+        """
+        ll.debug(f"Searching YouTube for: '{query}' with a limit of {limit}")
+        search_query = f"ytsearch{limit}:{query}"
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'default_search': 'ytsearch',
+            'extract_flat': True, # Significantly faster as it doesn't fetch full metadata
+            'logger': SilentLogger(),
+        }
+        
+        results = []
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                search_result = ydl.extract_info(search_query, download=False)
+                if 'entries' in search_result:
+                    for entry in search_result['entries']:
+                        # Ensure the entry is a valid video
+                        if entry and entry.get('title') and entry.get('url'):
+                            results.append([entry['title'], entry['url']])
+        except Exception as e:
+            ll.error(f"An error occurred during YouTube search: {e}")
+            return []
+            
+        ll.debug(f"Found {len(results)} results for '{query}'")
+        return results
+
+    def download_single_song_to_cache(self, url: str, youtube_download_permanently: bool = False, target_dir: str = None):
+        """
+        Downloads a single song from a YouTube URL.
+        
+        If youtube_download_permanently is False, it saves to a temporary cache file.
+        If True, it saves to the specified target_dir with a proper name.
+
+        Args:
+            url (str): The YouTube URL.
+            youtube_download_permanently (bool): If True, saves the file permanently.
+            target_dir (str, optional): The directory to save to. Required if youtube_download_permanently is True.
+
+        Returns:
+            str: The full path to the downloaded file, or None on failure.
+        """
+        ll.debug(f"Starting single song download from: {url} with permanency={youtube_download_permanently}")
+
+        # First, extract video info. This is needed for tagging and for the permanent filename.
+        try:
+            with yt_dlp.YoutubeDL({'logger': SilentLogger(), 'quiet': True, 'no_warnings': True}) as ydl:
+                info_dict = ydl.extract_info(url, download=False)
+        except Exception as e:
+            ll.error(f"Failed to extract video info from {url}: {e}")
+            return None
+            
+        output_file_path = None
+        
+        if youtube_download_permanently:
+            if not target_dir:
+                # Fallback to a default directory if none is provided
+                target_dir = self.target_dir if hasattr(self, 'target_dir') else os.path.expanduser("~/MusicPlayerYoutubeDownloads")
+
+            permanent_dir = self._find_valid_directory([target_dir])
+            if not permanent_dir:
+                ll.error(f"Invalid or unwritable target directory provided: {target_dir}")
+                return None
+            
+            track_data = self._clean_track_data_optimized(info_dict)
+            if not track_data:
+                ll.error("Could not extract valid track data to generate a filename.")
+                return None
+            
+            output_file_path = permanent_dir / f"{track_data['safe_name']}.mp3"
+
+            # If the file already exists, skip the download and return the path.
+            if output_file_path.exists():
+                ll.print(f"File already exists, skipping download: {output_file_path}")
+                return str(output_file_path)
+
+        else:
+            # For temporary caching, always use the same file name and overwrite it.
+            output_file_path = Path.cwd() / ".youtubeCached.mp3"
+
+        # Configure downloader options
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': str(output_file_path.with_suffix('')),
+            'overwrites': not youtube_download_permanently,  # Overwrite cache, but not permanent files
+            'logger': SilentLogger(),
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        try:
+            # Download the file
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            if output_file_path.exists():
+                ll.debug(f"Download successful. File at: {output_file_path}")
+                
+                # Create a mock track object for tagging
+                mock_track = {
+                    'title': info_dict.get('title', 'Unknown Title'),
+                    'uploader': info_dict.get('uploader', 'YouTube')
+                }
+                self._set_basic_tags_optimized(output_file_path, mock_track)
+                return str(output_file_path)
+            else:
+                ll.error(f"Download completed, but the output file was not found at {output_file_path}.")
+                return None
+        except Exception as e:
+            ll.error(f"Failed to download or process single YouTube song: {e}")
+            
+            # Only remove a corrupted cache file on error
+            if not youtube_download_permanently and output_file_path and output_file_path.exists():
+                try:
+                    os.remove(output_file_path)
+                except OSError as os_err:
+                    ll.error(f"Could not remove corrupted cache file: {os_err}")
+            return None
+ 
     def _check_dependencies(self):
         try:
             __import__('mutagen')
@@ -172,12 +300,12 @@ class ytHandle:
         ll.debug(f"\n▶ Processing playlist: {url}")
         
         # Early validation and setup
-        target_dir = self._find_valid_directory(possible_directories)
-        if not target_dir:
+        self.target_dir = self._find_valid_directory(possible_directories)
+        if not self.target_dir:
             ll.error("⚠️ No valid download directory found!")
             return []
             
-        ll.debug(f"📂 Using directory: {target_dir}")
+        ll.debug(f"📂 Using directory: {self.target_dir}")
         
         # Parallel directory scanning for existing files
         existing = self._get_existing_filenames_parallel(possible_directories)
@@ -202,7 +330,7 @@ class ytHandle:
             return []
 
         # Optimized parallel downloading with better resource management
-        return self._download_tracks_optimized(new_tracks, target_dir)
+        return self._download_tracks_optimized(new_tracks, self.target_dir)
 
     def _find_valid_directory(self, dirs):
         """Find first writable directory with improved validation"""
@@ -402,4 +530,4 @@ class ytHandle:
             audio.save(v2_version=3)
             
         except Exception as e:
-            ll.debug(f"⚠️ Metadata warning for {path.name}: {str(e)}")
+            ll.debug(f"⚠️ Metadata warning for {Path(path).name}: {str(e)}")

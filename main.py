@@ -48,6 +48,7 @@ def main():
     overlay = GhostOverlay(root)
     MusicOverlayController(overlay, fast_load=FastLoad)
     overlay.set_text("Initializing...")
+    overlay.set_lyrics("Loading...")
     root.mainloop()
 
 if __name__ == '__main__':

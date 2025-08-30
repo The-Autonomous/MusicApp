@@ -1,5 +1,6 @@
-import re, threading, os, sys, signal
+import re, threading, os, sys, signal, platform
 from typing import List, Optional, Tuple
+from pathlib import Path
 
 try:
     from log_loader import log_loader
@@ -138,13 +139,13 @@ class MusicOverlayController:
     """Tie MusicPlayer updates to GhostOverlay in a clean, thread-safe way."""
     def __init__(self, overlay, fast_load: bool = False):
         try:
-            from music import MusicPlayer, get_auto_directories
+            from music import MusicPlayer
         except ImportError:
-            from .music import MusicPlayer, get_auto_directories
+            from .music import MusicPlayer
         self.overlay = overlay
         self.cleaner = TitleCleaner()
         self.player = MusicPlayer(
-            directories=get_auto_directories(self.load_playlists()),
+            directories=self.get_auto_directories(self.load_playlists()),
             set_screen=self._update_text,
             set_duration=self._update_duration,
             set_lyrics=self._update_lyrics,
@@ -171,6 +172,39 @@ class MusicOverlayController:
             with open(absolute_path, 'w', encoding="utf-8") as f:
                 f.write("")
             return []
+        
+    def get_auto_directories(self, candidate_urls=[]):
+        """Automatically detects existing GTAV Enhanced User Music directories"""
+        valid_dirs = candidate_urls
+        
+        # Determine base path based on OS
+        if platform.system() == 'Windows':
+            base_path = Path(os.environ.get('USERPROFILE', Path.home()))
+        else:
+            base_path = Path.home()
+
+        # List of potential directory candidates
+        candidate_paths = [
+            base_path / "Documents" / "Rockstar Games" / "GTAV Enhanced" / "User Music",
+            base_path / "OneDrive" / "Documents" / "Rockstar Games" / "GTAV Enhanced" / "User Music",
+            Path("/Volumes/Games/Rockstar Games/GTAV Enhanced/User Music"),
+            Path.home() / "Games" / "GTAV Enhanced" / "User Music"
+        ]
+        
+        # Check which directories actually exist
+        for path in candidate_paths:
+            if path.exists() and path.is_dir():
+                valid_dirs.append(str(path.resolve()))
+
+        forcedPaths = [
+            os.path.expanduser("~/MusicPlayerYoutubeDownloads"),
+        ]
+        
+        # Ensure forced paths exist
+        for path in forcedPaths:
+            os.makedirs(path, exist_ok=True)
+
+        return [*valid_dirs, *forcedPaths]
 
     def _update_text(self, artist: str = '', title: str = ''):
         text = self.cleaner.clean(f"{artist} - {title}" if artist != "Unknown Artist" and not artist in title else title)

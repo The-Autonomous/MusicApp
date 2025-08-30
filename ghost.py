@@ -143,6 +143,20 @@ class ThemeManager:
             background=[("active", self.COLORS["frame_bg"])]
         )
 
+        # --- Entry ---
+        style.configure("TEntry",
+            fieldbackground=self.COLORS["entry_bg"],
+            foreground=self.COLORS["text"],
+            insertcolor=self.COLORS["text"],
+            bordercolor=self.COLORS["border"],
+            relief="flat",
+            padding=5
+        )
+        style.map("TEntry",
+            bordercolor=[("focus", self.COLORS["accent"])],
+            fieldbackground=[("!disabled", self.COLORS["entry_bg"])]
+        )
+
         # --- OptionMenu ---
         style.configure("TMenubutton",
             background=self.COLORS["entry_bg"],
@@ -358,6 +372,8 @@ class GhostOverlay:
         "AI Generated These Could You Tell": [ 2,  3,  1,  0, -1,  1,  3,  4,  3,  2],
     }
     
+    MusicPlayer = None # Will be set externally after initialization
+    
     def __init__(self, root):
         ### Root ###
         self.root = root
@@ -376,6 +392,10 @@ class GhostOverlay:
         
         ### Gaming Mode ###
         self.gaming_mode_checkbox = None
+
+        ### Search ###
+        self._search_after_id = None
+        self._is_searching = False
         
         ### Music Player ###
         self.overlay_text_padding = 15
@@ -985,7 +1005,7 @@ class GhostOverlay:
     def show_eq_overlay(self):
         """ Pops a draggable EQ + Echo overlay with rotary knobs. """
         if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
-            self._eq_window.deiconify(); self._eq_window.lift(); return
+            self._eq_window.destroy(); return
             
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
@@ -1123,197 +1143,279 @@ class GhostOverlay:
 #####################################################################################################
 
     def show_search_overlay(self):
-        if self.display_radio: return
-        
-        self.show_key_hints(force_state=False)
-        
-        if hasattr(self, 'search_overlay'):
-            self.close_search_overlay(self._was_main_overlay_open_before_search)
-            if hasattr(self, 'search_overlay'): del self.search_overlay
+        # Prevent opening if in radio mode or already open
+        if self.display_radio:
+            return
+        if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+            self.close_search_overlay(getattr(self, "_was_main_overlay_open_before_search", True))
             return
 
+        self.show_key_hints(force_state=False)
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
-        if self._was_main_overlay_open_before_search: self.close_overlay()
+        if self._was_main_overlay_open_before_search:
+            self.close_overlay()
 
-        BG_WINDOW = self.theme.COLORS["window_bg"]
-        BG_FRAME = self.theme.COLORS["frame_bg"]
-        BG_SEARCH = self.theme.COLORS["entry_bg"]
-        FG_TEXT = self.theme.COLORS["text"]
-        FG_PLACEHOLDER = self.theme.COLORS["placeholder"]
-        ACCENT = self.theme.COLORS["accent"]
-        
-        ENTRY_RADIUS = 18
-        OVERLAY_RADIUS = 28
-        LIST_RADIUS = 18
-
+        # --- Search UI Setup ---
         self.search_overlay = tk.Toplevel(self.root)
-        self.search_overlay.withdraw()
         self.search_overlay.overrideredirect(True)
-        self.search_overlay.configure(bg=BG_WINDOW)
         self.search_overlay.attributes("-topmost", True)
+        self.search_overlay.configure(bg=self.theme.COLORS["window_bg"])
+        
+        main_frame = ttk.Frame(self.search_overlay, style="Accent.TFrame", padding=20)
+        main_frame.pack(fill="both", expand=True)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=1)
 
-        overlay_canvas = RoundedCanvas(self.search_overlay, bg=BG_WINDOW, highlightthickness=0, bd=0)
-        overlay_canvas.pack(fill="both", expand=True)
-        width, height = 440, 360
-        overlay_canvas.create_rounded_box(0, 0, width, height, radius=OVERLAY_RADIUS, color=BG_FRAME)
-
-        main_frame = ttk.Frame(self.search_overlay, style="TFrame")
-        main_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-        PAD_X = 28
-
-        search_bar_frame = ttk.Frame(main_frame)
-        search_bar_frame.pack(fill="x", pady=(28, 0), padx=PAD_X)
-
-        entry_canvas = RoundedCanvas(search_bar_frame, height=36, bg=BG_FRAME, highlightthickness=0, bd=0)
-        entry_canvas.pack(fill="x", expand=True, side="left")
-        entry_canvas.update_idletasks()
-        entry_w = search_bar_frame.winfo_reqwidth() or 320
-        entry_h = 36
-        entry_canvas.config(width=entry_w, height=entry_h)
-        entry_canvas.create_rounded_box(0, 0, entry_w, entry_h, radius=ENTRY_RADIUS, color=BG_SEARCH)
+        top_frame = ttk.Frame(main_frame, style="Accent.TFrame")
+        top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        top_frame.columnconfigure(0, weight=1)
 
         search_var = tk.StringVar()
-        search_entry = tk.Entry(
-            entry_canvas, font=self.theme.FONTS["ui_normal"], bg=BG_SEARCH, fg=FG_TEXT,
-            insertbackground=FG_TEXT, textvariable=search_var, relief="flat", borderwidth=0, highlightthickness=0,
+        search_entry = ttk.Entry(
+            top_frame,
+            textvariable=search_var,
+            font=self.theme.FONTS["ui_normal"],
+            style="TEntry"
         )
-        search_entry.place(x=14, y=4, relwidth=0.80, height=entry_h-8)
-
-        def close_search(): self.close_search_overlay(self._was_main_overlay_open_before_search)
+        search_entry.grid(row=0, column=0, sticky="ew", ipady=5)
         
-        close_btn = tk.Label(entry_canvas, text="✕", font=self.theme.FONTS["ui_normal"], bg=BG_SEARCH, fg="#aaa", cursor="hand2")
-        close_btn.place(relx=0.90, y=6, width=24, height=24)
-        close_btn.bind("<Button-1>", lambda e: close_search())
-        close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#fff"))
-        close_btn.bind("<Leave>", lambda e: close_btn.config(fg="#aaa"))
+        # Frame for checkboxes
+        checkbox_frame = ttk.Frame(top_frame, style="Accent.TFrame")
+        checkbox_frame.grid(row=0, column=1, sticky="e", padx=(10, 0))
 
-        ttk.Frame(main_frame, height=18).pack(fill="x")
+        if hasattr(self, 'MusicPlayer'):
+            download_permanently_var = tk.BooleanVar(value=self.MusicPlayer.youtube_download_permanently)
+            youtube_search_var = tk.BooleanVar(value=self.MusicPlayer.do_youtube_search)
+        else:
+            download_permanently_var = tk.BooleanVar(value=False)
+            youtube_search_var = tk.BooleanVar(value=True)
+            
+        youtube_checkbox = ttk.Checkbutton(
+            checkbox_frame,
+            text="YouTube",
+            variable=youtube_search_var,
+            style="TCheckbutton"
+        )
+        youtube_checkbox.pack(side="left")
+            
+        download_checkbox = ttk.Checkbutton(
+            checkbox_frame,
+            text="Download",
+            variable=download_permanently_var,
+            command=lambda: setattr(self.MusicPlayer, 'youtube_download_permanently', download_permanently_var.get()) if hasattr(self, 'MusicPlayer') else None,
+            style="TCheckbutton"
+        )
+        download_checkbox.pack(side="left", padx=(5,0))
 
-        results_frame = ttk.Frame(main_frame)
-        results_frame.pack(fill="both", expand=True, padx=PAD_X, pady=(0, 18))
+        # --- Results List ---
 
-        list_h = height - (2 * PAD_X) - entry_h - 18
-        list_canvas = RoundedCanvas(results_frame, height=list_h, bg=BG_FRAME, highlightthickness=0, bd=0)
-        list_canvas.pack(fill="both", expand=True, side="left")
-        list_canvas.update_idletasks()
-        list_w = results_frame.winfo_reqwidth() or (width - 2*PAD_X)
-        list_canvas.config(width=list_w, height=list_h)
-        list_canvas.create_rounded_box(0, 0, list_w, list_h, radius=LIST_RADIUS, color=BG_SEARCH)
+        results_frame = ttk.Frame(main_frame, style="Accent.TFrame")
+        results_frame.grid(row=1, column=0, sticky="nsew")
+        results_frame.rowconfigure(0, weight=1)
+        results_frame.columnconfigure(0, weight=1)
 
         results_list = tk.Listbox(
-            list_canvas, font=self.theme.FONTS["ui_list"], bg=BG_SEARCH, fg=FG_TEXT, selectmode="single",
-            height=8, activestyle="none", selectbackground=ACCENT, selectforeground="#23272e",
-            relief="flat", borderwidth=0, highlightthickness=0, highlightbackground=BG_SEARCH,
-            highlightcolor=ACCENT, bd=0
+            results_frame, font=self.theme.FONTS["ui_list"], bg=self.theme.COLORS["entry_bg"],
+            fg=self.theme.COLORS["text"], selectmode="single", activestyle="none",
+            selectbackground=self.theme.COLORS["accent"], selectforeground=self.theme.COLORS["frame_bg"],
+            relief="flat", borderwidth=0, highlightthickness=0
         )
-        results_list.place(x=10, y=8, width=list_w-20, height=list_h-16)
+        
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=results_list.yview)
+        results_list.config(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        results_list.grid(row=0, column=0, sticky="nsew")
 
+        # --- Loading & Animation Widgets ---
+        search_spinner_label = ttk.Label(results_frame, text="", style="Status.TLabel", font=self.theme.FONTS["fixed_width"], background=self.theme.COLORS["entry_bg"])
+        download_canvas = tk.Canvas(main_frame, bg=self.theme.COLORS["window_bg"], highlightthickness=0)
+        
         current_results = []
+        
+        # --- Loading Animation Functions ---
+        def _animate_search_spinner(spinner_chars, index=0):
+            if self._is_searching:
+                search_spinner_label.config(text=f"Searching {spinner_chars[index]}")
+                self.search_overlay.after(150, _animate_search_spinner, spinner_chars, (index + 1) % len(spinner_chars))
 
-        def update_search(*args):
-            search_term = search_var.get().strip()
+        def _start_search_spinner():
+            results_list.grid_remove()
+            scrollbar.grid_remove()
+            search_spinner_label.place(relx=0.5, rely=0.5, anchor="center")
+            self._is_searching = True
+            _animate_search_spinner("|/-\\")
+
+        def _stop_search_spinner():
+            self._is_searching = False
+            search_spinner_label.place_forget()
+            results_list.grid()
+            scrollbar.grid()
+            
+        def _animate_downloading(angle=0):
+            if not (hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists()): return
+            
+            download_canvas.delete("all")
+            w, h = download_canvas.winfo_width(), download_canvas.winfo_height()
+            if w < 10 or h < 10: # Wait for canvas to be sized
+                self.search_overlay.after(50, _animate_downloading, angle)
+                return
+
+            cx, cy = w // 2, h // 2
+            r_outer, r_inner, r_label = min(cx, cy) * 0.7, min(cx, cy) * 0.3, min(cx, cy) * 0.25
+
+            # Draw spinning record
+            download_canvas.create_oval(cx-r_outer, cy-r_outer, cx+r_outer, cy+r_outer, fill="#111", outline=self.theme.COLORS["accent"], width=2)
+            for i in range(12): # Grooves
+                r = r_inner + (r_outer - r_inner) * (i / 12)
+                download_canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#333", width=1)
+            
+            p1_angle = (angle + 45) * (pi / 180)
+            p2_angle = (angle + 135) * (pi / 180)
+            download_canvas.create_line(cx + r_inner * cos(p1_angle), cy + r_inner * sin(p1_angle), 
+                                      cx + r_outer * cos(p1_angle), cy + r_outer * sin(p1_angle), 
+                                      fill=self.theme.COLORS["accent"], width=3)
+            download_canvas.create_line(cx + r_inner * cos(p2_angle), cy + r_inner * sin(p2_angle), 
+                                      cx + r_outer * cos(p2_angle), cy + r_outer * sin(p2_angle), 
+                                      fill=self.theme.COLORS["accent"], width=3)
+
+            download_canvas.create_oval(cx-r_label, cy-r_label, cx+r_label, cy+r_label, fill=self.theme.COLORS["accent_active"], outline="")
+            download_canvas.create_text(cx, cy, text="♪", font=("Segoe UI Symbol", int(r_label*1.2)), fill="#111")
+            
+            self.search_overlay.after(25, _animate_downloading, angle + 5)
+
+        def _show_download_animation():
+            top_frame.grid_remove()
+            results_frame.grid_remove()
+            # Make window background transparent for the animation
+            self.search_overlay.attributes('-transparentcolor', self.theme.COLORS["window_bg"])
+            download_canvas.grid(row=0, column=0, rowspan=2, sticky="nsew")
+            _animate_downloading()
+            
+        # --- Search & Download Logic ---
+        def _update_ui_with_results(results):
+            if not (hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists()): return
+            _stop_search_spinner()
             results_list.delete(0, tk.END)
             current_results.clear()
-            if search_term:
-                raw_search_results = self.MusicPlayer.get_search_term(search_term)
-                for raw_title, path in raw_search_results:
+            
+            if results:
+                for raw_title, path_or_url in results:
                     cleaned_title = self.TitleCleaner.clean(raw_title)
                     results_list.insert(tk.END, f"  {cleaned_title}")
-                    current_results.append((cleaned_title, path))
-            if not current_results and search_term:
+                    current_results.append((cleaned_title, path_or_url))
+            else:
                 results_list.insert(tk.END, "  No results found.")
-                results_list.itemconfig(0, {'fg': FG_PLACEHOLDER})
+                results_list.itemconfig(0, {'fg': self.theme.COLORS["placeholder"]})
 
-        def handle_selection(event=None):
-            selection = results_list.curselection()
-            if selection and current_results:
-                index = selection[0]
-                if results_list.get(index).strip() == "No results found.": return
-                if 0 <= index < len(current_results):
-                    _, path = current_results[index]
-                    self.MusicPlayer.play_song(path)
-                    self.close_search_overlay(self._was_main_overlay_open_before_search)
+        def _search_thread_target(term):
+            try:
+                if youtube_search_var.get():
+                    effective_term = f"{term} (OFFICIAL SONG)"
+                    raw_results = self.MusicPlayer.get_youtube_search(effective_term)
+                    raw_results = [*raw_results, *self.MusicPlayer.get_search_term(term)]
+                else:
+                    raw_results = self.MusicPlayer.get_search_term(term)
+            except Exception as e:
+                ll.error(f"Search thread failed: {e}")
+                raw_results = []
+            finally:
+                if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+                    self.search_overlay.after(0, _update_ui_with_results, raw_results)
 
-        def handle_key_in_entry(event):
-            if event.keysym == "Escape":
-                self.close_search_overlay(self._was_main_overlay_open_before_search)
-                return "break"
-            elif event.keysym == "Return":
-                if results_list.size() > 0:
-                    if not results_list.curselection():
-                        if results_list.get(0).strip() != "No results found.":
-                            results_list.selection_set(0); results_list.activate(0); results_list.see(0)
-                handle_selection()
-                return "break"
-            elif event.keysym == "Down":
-                if results_list.size() > 0:
-                    current_selection = results_list.curselection()
-                    next_index = 0
-                    if current_selection: next_index = min(current_selection[0] + 1, results_list.size() - 1)
-                    if results_list.get(next_index).strip() == "No results found." and next_index == 0 and results_list.size() == 1: pass
-                    else:
-                        results_list.selection_clear(0, tk.END); results_list.selection_set(next_index)
-                        results_list.activate(next_index); results_list.see(next_index)
-                return "break"
-            elif event.keysym == "Up":
-                if results_list.size() > 0:
-                    current_selection = results_list.curselection()
-                    prev_index = results_list.size() - 1
-                    if current_selection: prev_index = max(current_selection[0] - 1, 0)
-                    results_list.selection_clear(0, tk.END); results_list.selection_set(prev_index)
-                    results_list.activate(prev_index); results_list.see(prev_index)
-                return "break"
+        def _trigger_search():
+            if self._is_searching == True: return
+            search_term = search_var.get().strip()
+            if not search_term:
+                results_list.delete(0, tk.END)
+                current_results.clear()
+                return
 
-        def handle_key_in_listbox(event):
-            if event.keysym == "Return": handle_selection(); return "break"
-            elif event.keysym == "Escape": self.close_search_overlay(self._was_main_overlay_open_before_search); return "break"
+            _start_search_spinner()
+            Thread(target=_search_thread_target, args=(search_term,), daemon=True).start()
 
-        search_var.trace_add("write", update_search)
-        search_entry.bind("<Key>", handle_key_in_entry)
+        def youtube_command():
+            if hasattr(self, 'MusicPlayer'):
+                setattr(self.MusicPlayer, 'do_youtube_search', youtube_search_var.get())
+            _trigger_search()
+        youtube_checkbox.config(command=lambda:youtube_command())
+
+        def on_key_release(_):
+            if self._search_after_id:
+                self.search_overlay.after_cancel(self._search_after_id)
+            self._search_after_id = self.search_overlay.after(1000, _trigger_search)
+        
+        def _download_thread_target(path_or_url, is_youtube):
+            try:
+                if is_youtube:
+                    self.MusicPlayer.play_youtube_song(path_or_url)
+                else:
+                    self.MusicPlayer.play_song(path_or_url)
+            finally:
+                if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+                    self.search_overlay.after(0, self.close_search_overlay, self._was_main_overlay_open_before_search)
+
+        def handle_selection(_=None):
+            selection_indices = results_list.curselection()
+            if not selection_indices or not current_results: return
+            index = selection_indices[0]
+            if not (0 <= index < len(current_results)): return
+            
+            _, path_or_url = current_results[index]
+            _show_download_animation()
+            is_youtube = youtube_search_var.get()
+            
+            Thread(target=_download_thread_target, args=(path_or_url, is_youtube), daemon=True).start()
+
+        # --- Key Navigation & Bindings ---
+        def handle_key_navigation(event):
+            key, list_size = event.keysym, results_list.size()
+            
+            if key == "Escape": self.close_search_overlay(self._was_main_overlay_open_before_search); return "break"
+            if key == "Return": handle_selection(); return "break"
+            if list_size == 0 or key not in ("Down", "Up"): return
+
+            current_selection = results_list.curselection()
+            new_index = 0
+            if current_selection:
+                current_index = current_selection[0]
+                new_index = min(current_index + 1, list_size - 1) if key == "Down" else max(current_index - 1, 0)
+            
+            results_list.selection_clear(0, tk.END)
+            results_list.selection_set(new_index)
+            results_list.activate(new_index)
+            results_list.see(new_index)
+            return "break"
+
+        search_entry.bind("<KeyRelease>", on_key_release)
+        search_entry.bind("<Return>", handle_selection)
+        search_entry.bind("<Down>", handle_key_navigation)
+        search_entry.bind("<Up>", handle_key_navigation)
+        
         results_list.bind("<Double-Button-1>", handle_selection)
-        results_list.bind("<Return>", handle_key_in_listbox)
-        results_list.bind("<Escape>", handle_key_in_listbox)
+        results_list.bind("<Return>", handle_selection)
         self.search_overlay.bind("<Escape>", lambda e: self.close_search_overlay(self._was_main_overlay_open_before_search))
 
-        results_list.bind("<MouseWheel>", lambda e: results_list.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # --- Window Management ---
+        def start_move(event): self.search_overlay._drag_start_x, self.search_overlay._drag_start_y = event.x_root, event.y_root
+        def do_move(event):
+            dx, dy = event.x_root - self.search_overlay._drag_start_x, event.y_root - self.search_overlay._drag_start_y
+            self.search_overlay.geometry(f"+{self.search_overlay.winfo_x() + dx}+{self.search_overlay.winfo_y() + dy}")
+            self.search_overlay._drag_start_x, self.search_overlay._drag_start_y = event.x_root, event.y_root
+        
+        main_frame.bind("<Button-1>", start_move); main_frame.bind("<B1-Motion>", do_move)
+        top_frame.bind("<Button-1>", start_move); top_frame.bind("<B1-Motion>", do_move)
 
+        # --- Finalize and Show ---
         self.search_overlay.update_idletasks()
+        width, height = 500, 400
         x = (self.search_overlay.winfo_screenwidth() // 2) - (width // 2)
         y = (self.search_overlay.winfo_screenheight() // 2) - (height // 2)
         self.search_overlay.geometry(f"{width}x{height}+{x}+{y}")
+        
         self.search_overlay.deiconify()
-        self.search_overlay.grab_set()
         self.search_overlay.lift()
-        self.search_overlay.focus_force()
-        
-        def focus_entry_with_click():
-            self.search_overlay.update_idletasks()
-            x = search_entry.winfo_rootx() + search_entry.winfo_width() // 2
-            y = search_entry.winfo_rooty() + search_entry.winfo_height() // 2
-            mouse_controller = mouse.Controller()
-            mouse_controller.position = (x, y); mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
-            search_entry.focus_set()
-        
-        self.search_overlay.after_idle(focus_entry_with_click)
-
-        def start_move(event): self.search_overlay._drag_start_x = event.x_root - self.search_overlay.winfo_x(); self.search_overlay._drag_start_y = event.y_root - self.search_overlay.winfo_y()
-        def do_move(event): self.search_overlay.geometry(f"+{event.x_root - self.search_overlay._drag_start_x}+{event.y_root - self.search_overlay._drag_start_y}")
-        overlay_canvas.bind("<Button-1>", start_move); overlay_canvas.bind("<B1-Motion>", do_move)
-        main_frame.bind("<Button-1>", start_move); main_frame.bind("<B1-Motion>", do_move)
-
-        def check_mouse_outside_overlay():
-            if self.search_overlay and self.search_overlay.winfo_exists():
-                x1, y1 = self.search_overlay.winfo_rootx(), self.search_overlay.winfo_rooty()
-                x2, y2 = x1 + self.search_overlay.winfo_width(), y1 + self.search_overlay.winfo_height()
-                margin = 50
-                mx, my = self.search_overlay.winfo_pointerx(), self.search_overlay.winfo_pointery()
-                if (mx < x1 - margin or mx > x2 + margin or my < y1 - margin or my > y2 + margin):
-                    self.close_search_overlay(self._was_main_overlay_open_before_search)
-                else:
-                    self.search_overlay.after(100, check_mouse_outside_overlay)
-
-        self.search_overlay.after(100, check_mouse_outside_overlay)
+        self.search_overlay.grab_set()
+        search_entry.focus_force()
 
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
@@ -1764,89 +1866,3 @@ class GhostOverlay:
         os._exit(0)
 
 #####################################################################################################
-
-def main():
-    root = tk.Tk()
-    root.withdraw() # Hide the main Tk window
-    
-    # Dummy MusicPlayer class for testing GhostOverlay standalone
-    class DummyMusicPlayer:
-        def __init__(self, overlay_ref):
-            self.overlay = overlay_ref
-            self.is_paused = True
-            self.volume = 50
-            self.is_repeating = False
-            self.current_song_index = 0
-            self.playlist = [
-                ("Song A: The Phantom's Ballad", "Artist X", 185.0, "Line 1 of song A lyrics here\nLine 2 of song A, a bit longer perhaps"),
-                ("Track B: Spooky Beats", "DJ Ghost", 220.0, "Just some spooky beats, no words to see\nRepeating in your head, can't break free"),
-                ("Symphony of the Nightshade", "Nocturne Orchestra", 300.0, None), # No lyrics
-                ("Whispers in the Static", "The Glitch Mobsters", 150.0, "Short one line lyric."),
-            ]
-            self.radio_ips = ["192.168.1.100", "10.0.0.5", "127.0.0.1"]
-            self.overlay.set_radio_ips(self.radio_ips) # Initialize radio IPs
-            self.overlay.toggle_lyrics(True) # Enable lyrics processing by default
-
-        def _update_overlay_song_info(self):
-            title, artist, duration, lyrics = self.playlist[self.current_song_index]
-            self.overlay.set_text(f"{title} - {artist}")
-            self.overlay.set_duration(0, duration) # Reset current time for new song
-            self.overlay.set_lyrics(lyrics if lyrics else "")
-
-        def skip_previous(self):
-            ll.debug("DummyPlayer: Skip Previous")
-            self.current_song_index = (self.current_song_index - 1 + len(self.playlist)) % len(self.playlist)
-            self._update_overlay_song_info()
-        def skip_next(self):
-            ll.debug("DummyPlayer: Skip Next")
-            self.current_song_index = (self.current_song_index + 1) % len(self.playlist)
-            self._update_overlay_song_info()
-        def pause(self, force_play=None):
-            if force_play is True: self.is_paused = False
-            elif force_play is False: self.is_paused = True
-            else: self.is_paused = not self.is_paused
-            ll.debug(f"DummyPlayer: {'Playing' if not self.is_paused else 'Paused'}")
-        def up_volume(self): self.volume = min(100, self.volume + 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
-        def dwn_volume(self): self.volume = max(0, self.volume - 5); ll.debug(f"DummyPlayer: Vol {self.volume}")
-        def repeat(self): self.is_repeating = not self.is_repeating; ll.debug(f"DummyPlayer: Repeat {'On' if self.is_repeating else 'Off'}")
-        def toggle_loop_cycle(self, radio_mode_on: bool):
-            ll.debug(f"DummyPlayer: Radio mode {'Activated' if radio_mode_on else 'Deactivated'}")
-        def set_radio_ip(self, ip:str):
-            if ip: ll.debug(f"DummyPlayer: Attempting to stream from radio IP: {ip}"); return True
-            ll.warn("DummyPlayer: No radio IP to stream from."); return False
-
-
-    overlay = GhostOverlay(root)
-    
-    player = DummyMusicPlayer(overlay)
-    overlay.MusicPlayer = player
-    player._update_overlay_song_info()
-
-    current_pos = 0
-    total_duration = player.playlist[player.current_song_index][2]
-    def simulate_progress():
-        nonlocal current_pos, total_duration
-        if not player.is_paused and overlay.playerState:
-            current_pos +=1
-            if current_pos > total_duration: current_pos = 0
-            overlay.set_duration(current_pos, total_duration)
-        
-        new_total_duration = player.playlist[player.current_song_index][2]
-        if new_total_duration != total_duration:
-            total_duration = new_total_duration
-            current_pos = 0
-
-        root.after(1000, simulate_progress)
-    
-    root.after(1000, simulate_progress)
-
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        ll.warn("Exiting GhostOverlay...")
-    finally:
-        if overlay.listener and overlay.listener.is_alive():
-            overlay.listener.stop()
-
-if __name__ == "__main__":
-    main()

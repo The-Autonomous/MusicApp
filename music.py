@@ -1,8 +1,7 @@
-import os, random, platform, ast, requests, json, multiprocessing, ctypes
+import os, random, ast, requests, json, multiprocessing, ctypes
 from functools import lru_cache
 from multiprocessing import Array as MPArray
 from threading import Event, Thread, Lock
-from mutagen.mp3 import MP3
 from mutagen import File
 from pathlib import Path
 from time import time, sleep
@@ -212,6 +211,10 @@ class MusicPlayer:
         # Movement Debounce
         self.movementDebounce = [False, 0.2]  # [is_moving, debounce_time]
         self.movementDebounceTime = 1 # Time Allowed Between Movements In Seconds
+        
+        # Search Settings
+        self.youtube_download_permanently = False # Whether to download youtube songs permanently or just cache them temporarily
+        self.do_youtube_search = True # Whether to search youtube by default or just treat input as direct URL
 
         # UI callbacks
         self.set_screen = set_screen
@@ -254,102 +257,57 @@ class MusicPlayer:
         self.navigating_history = False
 
 #####################################################################################################
-
-    def get_gaming_mode(self) -> bool:
-        """
-        Return whether gaming mode is currently enabled.
-        In gaming mode, audio processing is bypassed for lower latency.
-        """
-        return AudioPlayer._gaming_mode
     
-    def accepting_radio_eq(self) -> bool:
-        """
-        Return whether the player is currently accepting EQ settings from the radio host.
-        """
-        return getattr(self.radio_client, "_accept_radio_eq", False)
+    ### YOUTUBE INTEGRATION START ###
     
-    def set_accepting_radio_eq(self, accept: bool):
+    @lru_cache(maxsize=128)
+    def get_youtube_search(self, search_term: str):
         """
-        Enable or disable accepting EQ settings from the radio host.
+        Passes a search query to the ytHandle and returns the results.
+        Expected format: [["video title", "video url"], ...]
         """
-        self.radio_client._accept_radio_eq = accept
-        ll.debug(f"Accepting radio EQ set to: {accept}")
-    
-    def toggle_gaming_mode(self, enable: bool):
-        """
-        Enable or disable gaming mode, which bypasses audio processing for lower latency.
-        """
-        AudioPlayer._gaming_mode = enable
-        ll.debug(f"Gaming mode {'enabled' if enable else 'disabled'}. Audio processing {'bypassed' if enable else 'active'}.")
+        if not search_term:
+            return []
+        return self.ytHandle.search_youtube(search_term)
 
-    def set_band(self, freq_hz: int, gain_db: float, Q: float = 1.0):
+    def play_youtube_song(self, url: str):
         """
-        Set the gain of one ISO-centre band.
-        Q is ignored because AudioEQ uses a fixed constant-Q design.
+        Downloads a song from a YouTube URL to a temporary cache file
+        and then plays it.
         """
-        eq = getattr(AudioPlayer, "eq", None)
-        if eq:
-            eq.set_gain(freq_hz, gain_db)
-
-    def get_band(self, freq_hz: int, default: tuple[float, float] = (0.0, 1.0)):
-        """
-        Return (gain_dB, Q) for a single band.
-        Falls back to `default` if the band or EQ is missing.
-        """
-        eq = getattr(AudioPlayer, "eq", None)
-        if eq:
-            return eq.get_band(freq_hz, default)
-        return default
-
-    def get_bands(self) -> dict[int, float]:
-        """
-        Return the full {centre_freq_Hz: gain_dB} map,
-        or an empty dict when EQ isn't initialised.
-        """
-        eq = getattr(AudioPlayer, "eq", None)
-        return eq.get_gains() if eq else {}
-
-    def enable_echo(self, delay_ms: int = 350,
-                    feedback: float = 0.35,
-                    wet: float = 0.5):
-        """
-        Thin shim → AudioPlayer.enable_echo()
-        """
-        AudioPlayer.enable_echo(delay_ms, feedback, wet)
-
-
-    def disable_echo(self):
-        """
-        Thin shim → AudioPlayer.disable_echo()
-        """
-        AudioPlayer.disable_echo()
-
-
-    def set_echo(self, delay_ms: int | None = None,
-                feedback: float | None = None,
-                wet: float | None = None):
-        """
-        Delegates to AudioPlayer.set_echo(), but auto-enables or disables
-        the effect when appropriate (delay>0 or wet>0 ⇒ enable, else disable).
-        """
-        # If echo line already exists, just tweak it
-        if getattr(AudioPlayer, "echo", None):
-            AudioPlayer.set_echo(delay_ms, feedback, wet)
-
-            # auto-disable when both delay and wet end up at 0
-            echo = AudioPlayer.echo
-            if echo and echo.delay_ms == 0 and echo.wet == 0:
-                AudioPlayer.disable_echo()
-            return
-
-        # If no echo yet, enable when meaningful params come in
-        if (delay_ms or 0) > 0 or (wet or 0) > 0:
-            AudioPlayer.enable_echo(delay_ms or 350,
-                            feedback if feedback is not None else 0.35,
-                            wet      if wet      is not None else 0.5)
+        ll.debug(f"Attempting to play YouTube song from URL: {url}")
+        
+        # This is a blocking call. The UI will wait until the download is done.
+        # A future improvement could be to show a "Downloading..." message in the UI.
+        cached_song_path = self.ytHandle.download_single_song_to_cache(url, self.youtube_download_permanently)
+        
+        if cached_song_path and os.path.exists(cached_song_path):
+            # Use the existing metadata function to get info from the downloaded MP3
+            metadata = self.get_metadata(cached_song_path)
+            
+            # Create a temporary 'song' object for the player
+            youtube_song = {
+                'path': cached_song_path,
+                'artist': metadata.get('artist', 'YouTube'),
+                'title': metadata.get('title', 'Downloaded Song'),
+                'duration': metadata.get('duration', 0.0)
+            }
+            
+            # Use the existing play_song method to handle playback
+            # This will add it to history and play it immediately.
+            self.play_song(youtube_song)
+            if self.youtube_download_permanently:
+                ll.debug(f"Downloaded YouTube song for permanent playback: {youtube_song['title']}")
+                self.shuffler.cache.append(youtube_song)
+            ll.debug(f"Queued YouTube song for playback: {youtube_song['title']}")
+        else:
+            ll.error(f"Failed to download or find the cached song for URL: {url}")
+            # Optionally, update the UI to show an error message
+            self.set_screen("Error", "Failed to play YouTube song")
 
 #####################################################################################################
 
+    @lru_cache(maxsize=128)
     def get_search_term(self, search_string: str):
         """
         Search for songs in cache based on the search string.
@@ -456,13 +414,113 @@ class MusicPlayer:
         self.shuffler.enqueue_replay(song) # Add to replay queue for immediate playback
 
         # Update history for direct plays (if not navigating history manually)
-        if not self.navigating_history:
+        # Don't add the temporary youtube cache file to permanent history
+        if not self.navigating_history and song['path'] != str(Path.cwd() / ".youtubeCached.mp3"):
             # If we're playing a new song directly, add it to history and clear forward_stack
             self.shuffler.history = self.shuffler.history[:self.current_index+1]
             self.shuffler.history.append(song['path'])
             self.current_index = len(self.shuffler.history) - 1
             self.forward_stack.clear() # Clear forward stack on new direct play
+            
+        # Pause Glitch Fix??
+        if self.pause_event.is_set():
+            self.pause(True)  # Unpause if paused
         
+#####################################################################################################
+
+    def get_gaming_mode(self) -> bool:
+        """
+        Return whether gaming mode is currently enabled.
+        In gaming mode, audio processing is bypassed for lower latency.
+        """
+        return AudioPlayer._gaming_mode
+    
+    def accepting_radio_eq(self) -> bool:
+        """
+        Return whether the player is currently accepting EQ settings from the radio host.
+        """
+        return getattr(self.radio_client, "_accept_radio_eq", False)
+    
+    def set_accepting_radio_eq(self, accept: bool):
+        """
+        Enable or disable accepting EQ settings from the radio host.
+        """
+        self.radio_client._accept_radio_eq = accept
+        ll.debug(f"Accepting radio EQ set to: {accept}")
+    
+    def toggle_gaming_mode(self, enable: bool):
+        """
+        Enable or disable gaming mode, which bypasses audio processing for lower latency.
+        """
+        AudioPlayer._gaming_mode = enable
+        ll.debug(f"Gaming mode {'enabled' if enable else 'disabled'}. Audio processing {'bypassed' if enable else 'active'}.")
+
+    def set_band(self, freq_hz: int, gain_db: float, Q: float = 1.0):
+        """
+        Set the gain of one ISO-centre band.
+        Q is ignored because AudioEQ uses a fixed constant-Q design.
+        """
+        eq = getattr(AudioPlayer, "eq", None)
+        if eq:
+            eq.set_gain(freq_hz, gain_db)
+
+    def get_band(self, freq_hz: int, default: tuple[float, float] = (0.0, 1.0)):
+        """
+        Return (gain_dB, Q) for a single band.
+        Falls back to `default` if the band or EQ is missing.
+        """
+        eq = getattr(AudioPlayer, "eq", None)
+        if eq:
+            return eq.get_band(freq_hz, default)
+        return default
+
+    def get_bands(self) -> dict[int, float]:
+        """
+        Return the full {centre_freq_Hz: gain_dB} map,
+        or an empty dict when EQ isn't initialised.
+        """
+        eq = getattr(AudioPlayer, "eq", None)
+        return eq.get_gains() if eq else {}
+
+    def enable_echo(self, delay_ms: int = 350,
+                    feedback: float = 0.35,
+                    wet: float = 0.5):
+        """
+        Thin shim → AudioPlayer.enable_echo()
+        """
+        AudioPlayer.enable_echo(delay_ms, feedback, wet)
+
+
+    def disable_echo(self):
+        """
+        Thin shim → AudioPlayer.disable_echo()
+        """
+        AudioPlayer.disable_echo()
+
+
+    def set_echo(self, delay_ms: int | None = None,
+                feedback: float | None = None,
+                wet: float | None = None):
+        """
+        Delegates to AudioPlayer.set_echo(), but auto-enables or disables
+        the effect when appropriate (delay>0 or wet>0 ⇒ enable, else disable).
+        """
+        # If echo line already exists, just tweak it
+        if getattr(AudioPlayer, "echo", None):
+            AudioPlayer.set_echo(delay_ms, feedback, wet)
+
+            # auto-disable when both delay and wet end up at 0
+            echo = AudioPlayer.echo
+            if echo and echo.delay_ms == 0 and echo.wet == 0:
+                AudioPlayer.disable_echo()
+            return
+
+        # If no echo yet, enable when meaningful params come in
+        if (delay_ms or 0) > 0 or (wet or 0) > 0:
+            AudioPlayer.enable_echo(delay_ms or 350,
+                            feedback if feedback is not None else 0.35,
+                            wet      if wet      is not None else 0.5)
+
 #####################################################################################################
 
     def load_meta_cache(self):
@@ -503,7 +561,9 @@ class MusicPlayer:
                 "volume": self.current_volume,
                 "gaming_mode": self.get_gaming_mode(),
                 "accept_radio_eq": self.accepting_radio_eq(),
-                "current_radio_ip": self.current_radio_ip
+                "current_radio_ip": self.current_radio_ip,
+                "youtube_download_permanently": self.youtube_download_permanently,
+                "do_youtube_search": self.do_youtube_search
             }
             try:
                 with save_playback_lock:
@@ -528,6 +588,8 @@ class MusicPlayer:
                 gaming_mode = state.get("gaming_mode", True)
                 accept_radio_eq = state.get("accept_radio_eq", True)
                 self.current_radio_ip = state.get("current_radio_ip", "0.0.0.0")
+                self.youtube_download_permanently = state.get("youtube_download_permanently", False)
+                self.do_youtube_search = state.get("do_youtube_search", True)
                 
                 self.set_volume(volume, True)
                 self.toggle_gaming_mode(gaming_mode)
@@ -1024,8 +1086,10 @@ class MusicPlayer:
                 if not self.navigating_history:
                     self.shuffler.history = self.shuffler.history[:self.current_index+1]
                     if not self.shuffler.history or self.shuffler.history[-1] != song['path']:
-                        self.shuffler.history.append(song['path'])
-                        self.current_index = len(self.shuffler.history) - 1
+                        # Don't add the temporary youtube cache file to permanent history
+                        if song['path'] != str(Path.cwd() / ".youtubeCached.mp3"):
+                            self.shuffler.history.append(song['path'])
+                            self.current_index = len(self.shuffler.history) - 1
 
                 self.current_song = song
                 self.current_song_id = str(song['title']) + str(time())
@@ -1143,28 +1207,3 @@ class MusicPlayer:
                 sleep(1)
 
 #####################################################################################################
-
-def get_auto_directories(candidate_urls=[]):
-    """Automatically detects existing GTAV Enhanced User Music directories"""
-    valid_dirs = candidate_urls
-    
-    # Determine base path based on OS
-    if platform.system() == 'Windows':
-        base_path = Path(os.environ.get('USERPROFILE', Path.home()))
-    else:
-        base_path = Path.home()
-
-    # List of potential directory candidates
-    candidate_paths = [
-        base_path / "Documents" / "Rockstar Games" / "GTAV Enhanced" / "User Music",
-        base_path / "OneDrive" / "Documents" / "Rockstar Games" / "GTAV Enhanced" / "User Music",
-        Path("/Volumes/Games/Rockstar Games/GTAV Enhanced/User Music"),
-        Path.home() / "Games" / "GTAV Enhanced" / "User Music"
-    ]
-    
-    # Check which directories actually exist
-    for path in candidate_paths:
-        if path.exists() and path.is_dir():
-            valid_dirs.append(str(path.resolve()))
-
-    return valid_dirs
