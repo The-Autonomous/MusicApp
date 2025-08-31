@@ -83,10 +83,44 @@ class AutoUpdater:
             
         return files
 
+    def manage_backups(self):
+        """
+        Checks the size of the backup directory and clears it if it exceeds a predefined limit (3MB).
+        """
+        max_size_mb = 1 # Maximum backup directory size in MB
+        max_size_bytes = max_size_mb * 1024 * 1024
+        
+        try:
+            # Calculate the total size of files in the backup directory
+            total_size = sum(
+                os.path.getsize(os.path.join(self.backup_dir, f))
+                for f in os.listdir(self.backup_dir)
+                if os.path.isfile(os.path.join(self.backup_dir, f))
+            )
+
+            ll.debug(f"ℹ️ Current backup directory size: {total_size / (1024*1024):.2f} MB")
+
+            if total_size > max_size_bytes:
+                ll.warn(f"🗑️ Backup directory size exceeds {max_size_mb} MB limit. Clearing...")
+                for filename in os.listdir(self.backup_dir):
+                    file_path = os.path.join(self.backup_dir, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.unlink(file_path)
+                            ll.debug(f"   - Deleted {filename}")
+                    except Exception as e:
+                        ll.error(f"❌ Failed to delete {file_path}: {e}")
+                ll.debug("✅ Backup directory cleared.")
+        except Exception as e:
+            ll.error(f"❌ Error managing backup directory: {e}")
+
     def create_backup_zip(self):
         """
-        Creates a single, timestamped zip file of all .py and .html files in the local directory.
+        Manages backup size and creates a single, timestamped zip file of all relevant files.
         """
+        # First, check and manage the size of the backup directory
+        self.manage_backups()
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_zip_name = f"backup_{timestamp}.zip"
         backup_zip_path = os.path.join(self.backup_dir, backup_zip_name)
@@ -100,7 +134,6 @@ class AutoUpdater:
                     for file in files:
                         if file.endswith('.py') or file.endswith('.html'):
                             file_path = os.path.join(root, file)
-                            # Get the relative path to be stored in the zip
                             relative_path = os.path.relpath(file_path, self.local_dir)
                             zipf.write(file_path, relative_path)
             ll.debug(f"💾 Created backup archive: {backup_zip_name}")
@@ -111,7 +144,7 @@ class AutoUpdater:
 
     def fetch_and_update(self, path):
         """
-        Fetches a remote file, compares it to the local version, and updates if different or missing.
+        Fetches a remote file, compares it, and updates if different or missing.
         """
         raw_url = urljoin(self.raw_base, path)
         ll.debug(f"🔍 Checking: {path}")
@@ -119,7 +152,6 @@ class AutoUpdater:
         try:
             r = self.session.get(raw_url)
             
-            # Rate-limit detection
             if r.status_code == 403 and 'X-RateLimit-Remaining' in r.headers and r.headers['X-RateLimit-Remaining'] == '0':
                 ll.warn("❌ Rate limit exceeded during file fetch. Can't continue updates.")
                 self.show_rate_limit_alert()
@@ -132,7 +164,6 @@ class AutoUpdater:
         remote_content = r.text
         local_path = os.path.join(self.local_dir, path.replace('/', os.sep))
 
-        # Determine if an update is needed
         needs_update = True
         if os.path.isfile(local_path):
             try:
@@ -141,15 +172,13 @@ class AutoUpdater:
                 needs_update = (local_content != remote_content)
             except Exception as e:
                 ll.error(f"❌ Error reading local file {local_path}: {e}")
-                needs_update = True  # If we can't read it, assume it needs updating
+                needs_update = True
 
         if needs_update:
-            # Create local directory structure if it doesn't exist
-            local_dir = os.path.dirname(local_path)
-            if not os.path.exists(local_dir):
-                os.makedirs(local_dir, exist_ok=True)
+            local_dir_path = os.path.dirname(local_path)
+            if not os.path.exists(local_dir_path):
+                os.makedirs(local_dir_path, exist_ok=True)
                 
-            # Write the new file
             try:
                 with open(local_path, 'w', encoding='utf-8') as f:
                     f.write(remote_content)
@@ -165,7 +194,7 @@ class AutoUpdater:
 
     def update(self):
         """
-        Checks and updates each .py and .html file in the repo if needed, then restarts if any updates occurred.
+        Checks and updates each .py and .html file in the repo if needed, then restarts.
         """
         ll.debug(f"🚀 Starting update check for {self.repo_url}")
         
@@ -176,7 +205,6 @@ class AutoUpdater:
 
         ll.debug(f"📋 Found {len(all_files)} files to check")
         
-        # Reset the updated files list
         self.files_updated = []
         
         # Create a single backup archive before any updates
