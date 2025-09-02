@@ -1,5 +1,6 @@
-import os, random, ast, requests, json, multiprocessing, ctypes
+import os, random, ast, requests, json, multiprocessing, ctypes, re
 from functools import lru_cache
+from collections import deque
 from multiprocessing import Array as MPArray
 from threading import Event, Thread, Lock
 from mutagen import File
@@ -123,66 +124,90 @@ class SharedString:
 #####################################################################################################
 
 class SmartShuffler:
+    """
+    An optimized shuffler that uses less memory and provides better performance
+    for large music libraries. It avoids copying the main song cache and uses
+    efficient data structures for history and artist tracking.
+    """
     def __init__(self, cache=[], history_size=50, artist_spacing=2):
-        self.cache = list(cache)
+        self.cache = cache  # Reference to the main cache, no copy
         self.history_size = history_size
         self.artist_spacing = artist_spacing
-        self.history = []
-        self.upcoming = []
+        
+        # Use deque for efficient history management
+        self.history = deque(maxlen=history_size)
+        self.artist_history = deque(maxlen=artist_spacing)
+        
+        self.upcoming_indices = []
         self.replay_queue = []
 
     def _refill_upcoming(self):
-        songs = self.cache.copy()
-        random.shuffle(songs)
-        # enforce artist_spacing
-        for i in range(len(songs)):
-            for j in range(1, self.artist_spacing + 1):
-                if i + j < len(songs) and songs[i]['artist'] == songs[i + j]['artist']:
-                    # swap with a track further ahead
-                    for k in range(i + self.artist_spacing + 1, len(songs)):
-                        if songs[k]['artist'] != songs[i]['artist']:
-                            songs[i + j], songs[k] = songs[k], songs[i + j]
-                            break
-        self.upcoming = songs
+        """Refills the upcoming queue with shuffled indices, not song objects."""
+        if not self.cache:
+            return
+        
+        # Shuffle indices instead of the whole cache to save memory
+        self.upcoming_indices = list(range(len(self.cache)))
+        random.shuffle(self.upcoming_indices)
 
     def enqueue_replay(self, song):
         """
-        Immediately queues a specific song to be played next, bypassing shuffle and spacing logic.
-        This method inserts the song at the front of the replay queue. Songs in the replay queue
-        take priority over all other playback logic, including the upcoming shuffle list and artist spacing rules.
+        Queues a specific song to be played next. This song will be played
+        before any shuffled songs.
         """
-        ll.debug(AudioPlayer.__repr__(), self.__repr__())
         self.replay_queue.insert(0, song)
 
     def get_unique_song(self):
+        """
+        Gets the next unique song, respecting history and artist spacing.
+        This is the core logic of the shuffler.
+        """
         if self.replay_queue:
-            return self.replay_queue.pop(0)
-
-        if not self.upcoming:
-            self._refill_upcoming()
-
-        while self.upcoming:
-            song = self.upcoming.pop(0)
-            if song['path'] in self.history:
-                self.upcoming.append(song)
-                continue
-            # pass spacing/history
+            song = self.replay_queue.pop(0)
+            # Add to history to avoid immediate repeat from shuffle
             self.history.append(song['path'])
-            if len(self.history) > self.history_size:
-                self.history.pop(0)
+            self.artist_history.append(song.get('artist'))
             return song
 
-        # fallback
+        if not self.upcoming_indices:
+            self._refill_upcoming()
+            if not self.upcoming_indices:
+                return None # No songs in cache
+
+        # Find a suitable song from the shuffled indices
+        for i in range(len(self.upcoming_indices)):
+            song_index = self.upcoming_indices.pop(0)
+            song = self.cache[song_index]
+            
+            # Check history and artist spacing rules
+            is_in_history = song['path'] in self.history
+            is_recent_artist = song.get('artist') in self.artist_history
+            
+            if not is_in_history and not is_recent_artist:
+                # Found a good song
+                self.history.append(song['path'])
+                self.artist_history.append(song.get('artist'))
+                return song
+            else:
+                # Put it back at the end of the queue to try later
+                self.upcoming_indices.append(song_index)
+
+        # If we loop through the entire upcoming list and can't find a suitable song
+        # (e.g., all remaining songs are by recent artists), just pick the next one.
+        if self.upcoming_indices:
+            song_index = self.upcoming_indices.pop(0)
+            song = self.cache[song_index]
+            self.history.append(song['path'])
+            self.artist_history.append(song.get('artist'))
+            return song
+            
+        # Fallback if everything fails
         return random.choice(self.cache) if self.cache else None
 
     def __repr__(self):
-        return f"""
-            <SmartShuffler(cache={len(self.cache)}, history_size={self.history_size}, artist_spacing={self.artist_spacing})>
-            self.cache: {len(self.cache)} songs
-            self.history: {len(self.history)} songs
-            self.upcoming: {len(self.upcoming)} songs
-            self.replay_queue: {len(self.replay_queue)} songs
-            """
+        return (f"<SmartShuffler(cache={len(self.cache)}, "
+                f"history={len(self.history)}, upcoming={len(self.upcoming_indices)}, "
+                f"replay={len(self.replay_queue)})>")
 
 #####################################################################################################
 
@@ -310,79 +335,56 @@ class MusicPlayer:
     @lru_cache(maxsize=128)
     def get_search_term(self, search_string: str):
         """
-        Search for songs in cache based on the search string.
-        Returns a list of tuples (display_name, path) sorted by relevance.
-        Limits results to 50 for performance.
+        Performs a high-accuracy search against the local cache. It prioritizes results
+        where all search terms are present in the song's artist or title.
         """
-        search_string = search_string.lower().strip()
-        if not search_string:
+        query = search_string.lower().strip()
+        if not query:
+            return []
+
+        # 1. Tokenize the search query and remove common "stop words" to get the keywords.
+        stop_words = {'by', 'the', 'a', 'an', 'in', 'on', 'ft', 'feat', 'and', '&'}
+        # This splits the search by space, comma, dash, etc., and keeps only the important words.
+        search_tokens = [token for token in re.split(r'[\s.,_-]+', query) if token and token not in stop_words]
+        
+        if not search_tokens:
             return []
 
         results = []
-        seen_paths = set()
-        MAX_RESULTS = 50
-
-        # Helper to add result if not already seen
-        def add_result(song, score=0):
-            if song['path'] not in seen_paths:
-                seen_paths.add(song['path'])
-                display = f"{song['artist']} - {song['title']}"
-                results.append((display, song['path'], score))
-                return True
-            return False
-
-        # 1. Direct title matches (highest priority)
+        
         for song in self.shuffler.cache:
-            if search_string in song['title'].lower():
-                if add_result(song, 100):
-                    if len(results) >= MAX_RESULTS:
-                        break
+            artist = song.get('artist', '')
+            title = song.get('title', '')
+            
+            # 2. Create a "clean" version of the song's info for matching.
+            # This turns "Hans Zimmer - S.T.A.Y." into "hans zimmer s t a y".
+            combined_raw = f"{artist} {title}".lower()
+            # The regex removes all punctuation, making "s.t.a.y" match "stay".
+            combined_clean = re.sub(r'[^\w\s]', '', combined_raw)
+            
+            # 3. FILTER: Check if ALL search keywords are present in the song's info.
+            # This is the most important step for accuracy.
+            if not all(token in combined_clean for token in search_tokens):
+                continue
 
-        if len(results) >= MAX_RESULTS:
-            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+            # 4. SCORE: If a song passes the filter, score it based on relevance.
+            # We reward songs that are a close length to the search query,
+            # penalizing long titles with a lot of extra words.
+            score = 100.0
+            length_penalty = abs(len(combined_clean) - len(query))
+            score -= length_penalty * 0.2  # Apply a small penalty for each extra character.
+            
+            results.append({
+                'display': f"{artist} - {title}",
+                'path': song['path'],
+                'score': score
+            })
 
-        # 2. Artist + Title matches
-        for song in self.shuffler.cache:
-            combined = f"{song['artist']} {song['title']}".lower()
-            if search_string in combined:
-                if add_result(song, 75):
-                    if len(results) >= MAX_RESULTS:
-                        break
-
-        if len(results) >= MAX_RESULTS:
-            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
-
-        # 3. Artist matches
-        for song in self.shuffler.cache:
-            if search_string in song['artist'].lower():
-                if add_result(song, 50):
-                    if len(results) >= MAX_RESULTS:
-                        break
-
-        if len(results) >= MAX_RESULTS:
-            return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
-
-        # 4. Path matches
-        for song in self.shuffler.cache:
-            if search_string in os.path.basename(song['path']).lower():
-                if add_result(song, 25):
-                    if len(results) >= MAX_RESULTS:
-                        break
-
-        if not results:
-            # 5. Fuzzy matches (only if no other results)
-            # Simple character-based similarity
-            search_chars = set(search_string)
-            for song in self.shuffler.cache:
-                title_chars = set(song['title'].lower())
-                artist_chars = set(song['artist'].lower())
-                if len(search_chars & (title_chars | artist_chars)) >= len(search_chars) * 0.7:
-                    if add_result(song, 10):
-                        if len(results) >= MAX_RESULTS:
-                            break
-
-        # Sort by score and return just the display and path
-        return [(r[0], r[1]) for r in sorted(results, key=lambda x: x[2], reverse=True)]
+        # 5. Sort by the final score and return a short, highly relevant list of matches.
+        sorted_results = sorted(results, key=lambda x: x['score'], reverse=True)
+        
+        MAX_RESULTS = 10  # Only return the top 10 best matches
+        return [(r['display'], r['path']) for r in sorted_results[:MAX_RESULTS]]
 
     def play_song(self, path_or_song):
         """
@@ -417,7 +419,7 @@ class MusicPlayer:
         # Don't add the temporary youtube cache file to permanent history
         if not self.navigating_history and song['path'] != str(Path.cwd() / ".youtubeCached.mp3"):
             # If we're playing a new song directly, add it to history and clear forward_stack
-            self.shuffler.history = self.shuffler.history[:self.current_index+1]
+            self._truncate_history()
             self.shuffler.history.append(song['path'])
             self.current_index = len(self.shuffler.history) - 1
             self.forward_stack.clear() # Clear forward stack on new direct play
@@ -803,7 +805,7 @@ class MusicPlayer:
             self._clear_for_new_track()
             new_song = self.get_unique_song()
             if new_song:
-                self.shuffler.history = self.shuffler.history[:self.current_index+1]
+                self._truncate_history()
                 self.shuffler.history.append(new_song['path'])
                 self.current_index += 1
                 self.forward_stack.clear()
@@ -913,12 +915,24 @@ class MusicPlayer:
         self.forward_stack = []
         self.shuffler.replay_queue = []  # Clear queue for new selection
         if self.current_index < len(self.shuffler.history) - 1:
-            self.shuffler.history = self.shuffler.history[:self.current_index+1]
-    
+            self._truncate_history()
+
     def _queue_song(self, song):
         self.skip_flag.set()
         #AudioPlayer.stop() # pygame.mixer.music.stop()
         self.shuffler.enqueue_replay(song)
+
+    def _truncate_history(self):
+        """Truncates the history deque to the current_index."""
+        if not isinstance(self.shuffler.history, deque):
+            # Fallback for safety, though it should always be a deque
+            self.shuffler.history = self.shuffler.history[:self.current_index + 1]
+            return
+
+        num_to_remove = len(self.shuffler.history) - (self.current_index + 1)
+        if num_to_remove > 0:
+            for _ in range(num_to_remove):
+                self.shuffler.history.pop()
 
     def get_unique_song(self):
         # Delegate to SmartShuffler
@@ -1084,7 +1098,7 @@ class MusicPlayer:
 
                 # history and played lists maintained in shuffler, so skip duplicates here
                 if not self.navigating_history:
-                    self.shuffler.history = self.shuffler.history[:self.current_index+1]
+                    self._truncate_history()
                     if not self.shuffler.history or self.shuffler.history[-1] != song['path']:
                         # Don't add the temporary youtube cache file to permanent history
                         if song['path'] != str(Path.cwd() / ".youtubeCached.mp3"):
@@ -1122,19 +1136,19 @@ class MusicPlayer:
                        args=(song['artist'], song['title'], lyric_callback, self.current_song_id), daemon=True).start()
 
                 try:
-                    AudioPlayer.load(song['path']) # pygame.mixer.music.load(song['path'])
-                    AudioPlayer.set_volume(self.current_volume) # pygame.mixer.music.set_volume(self.current_volume)
+                    AudioPlayer.load(song['path'])
+                    AudioPlayer.set_volume(self.current_volume)
                     
                     # Simplified resume logic - if we're resuming and this is the correct song
                     # In core_player_loop, replace the resume block with:
                     if getattr(self, "resume_pending", False) and self.current_song and self.current_song['path'] == song['path']:
                         start_pos = getattr(self, '_resume_position', 0.0)
-                        AudioPlayer.play() # pygame.mixer.music.play()
+                        AudioPlayer.play()
                         try:
-                            AudioPlayer.set_pos(start_pos) # pygame.mixer.music.set_pos(start_pos)
+                            AudioPlayer.set_pos(start_pos)
                         except Exception as e:
                             try:
-                                AudioPlayer.play(start=start_pos) # pygame.mixer.music.play(start=start_pos)
+                                AudioPlayer.play(start=start_pos)
                                 ll.debug(f"Used alternative method to start at {start_pos:.2f}s")
                             except Exception as e:
                                 ll.error(f"Alternative method also failed: {e}")

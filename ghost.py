@@ -1799,8 +1799,17 @@ class GhostOverlay:
                     
             self._update_scheduled = False
 
-        except tk.TclError as e: pass
-        except Exception as e: ll.error(f"Unexpected error in update_display: {e}")
+        except tk.TclError as e:
+            # This can happen if the window is destroyed while an update is pending.
+            # It's generally safe to ignore, but we can log it for debugging.
+            ll.debug(f"TclError in update_display (safe to ignore): {e}")
+        except Exception as e:
+            ll.error(f"Unexpected error in update_display: {e}")
+            # Optionally, display an error message on the overlay itself
+            try:
+                self.canvas.itemconfig(self.canvas_items['player_text'], text="! OVERLAY ERROR !")
+                self.canvas.itemconfig(self.canvas_items['duration_text'], text=str(e))
+            except: pass # Avoid secondary errors if canvas is broken
 
 #####################################################################################################
 
