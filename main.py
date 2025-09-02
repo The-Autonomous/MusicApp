@@ -45,10 +45,7 @@ def main():
     shutdown_handler = ProgramShutdown()
     shutdown_handler.register_root(root)
     
-    overlay = GhostOverlay(root)
-    MusicOverlayController(overlay, fast_load=FastLoad)
-    overlay.set_text("Initializing...")
-    overlay.set_lyrics("Loading...")
+    MusicOverlayController(GhostOverlay(root), fast_load=FastLoad)
     root.mainloop()
 
 if __name__ == '__main__':
