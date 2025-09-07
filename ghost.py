@@ -989,7 +989,11 @@ class GhostOverlay:
 
     def _update_eq_ui_state(self):
         """Disables/enables EQ controls and adds/removes a visual overlay based on gaming mode."""
-        if not getattr(self, "_eq_window", None) or not self._eq_window.winfo_exists():
+        try:
+            if not getattr(self, "_eq_window", None) or not self._eq_window.winfo_exists():
+                return
+        except Exception as E:
+            ll.warn(f"Failed to update EQ window state: {E}")
             return
 
         is_disabled = self.get_gaming_mode()
@@ -1004,8 +1008,12 @@ class GhostOverlay:
 
     def show_eq_overlay(self):
         """ Pops a draggable EQ + Echo overlay with rotary knobs. """
-        if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
-            self._eq_window.destroy(); return
+        try:
+            if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
+                self._eq_window.destroy(); return
+        except Exception as E:
+            ll.warn(f"Failed to toggle EQ window state: {E}")
+            return
             
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
@@ -1445,12 +1453,18 @@ class GhostOverlay:
             self.MusicPlayer.pause() # Assuming pause toggles
             
     def _trigger_volume_up(self):
-        if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
-            self.MusicPlayer.up_volume()
+        try:
+            if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
+                self.MusicPlayer.up_volume()
+        except Exception as e:
+            ll.error(f"Error in volume up trigger: {e}")
             
     def _trigger_volume_dwn(self):
-        if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
-            self.MusicPlayer.dwn_volume()
+        try:
+            if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
+                self.MusicPlayer.dwn_volume()
+        except Exception as e:
+            ll.error(f"Error in volume down trigger: {e}")
             
     def _trigger_repeat(self):
         if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
