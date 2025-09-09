@@ -131,7 +131,7 @@ class ytHandle:
         
         ll.debug(f"Initialized download handler with {max_workers} parallel workers")
 
-    def search_youtube(self, query: str, limit: int = 20):
+    def search_youtube(self, query: str, limit: int = 5):
         """
         Searches YouTube for a given query and returns a list of video titles and URLs.
         """
@@ -154,7 +154,7 @@ class ytHandle:
                     for entry in search_result['entries']:
                         # Ensure the entry is a valid video
                         if entry and entry.get('title') and entry.get('url'):
-                            results.append([entry['title'], entry['url']])
+                            results.append([entry['title'], entry['url'], 'url'])
         except Exception as e:
             ll.error(f"An error occurred during YouTube search: {e}")
             return []

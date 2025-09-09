@@ -1,10 +1,11 @@
-import os, socket, psutil, threading, time
+import os, socket, psutil, threading
 from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
 from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 from itertools import islice
+from time import sleep, monotonic
 
 try:
     from log_loader import log_loader, OutputRedirector
@@ -34,7 +35,6 @@ class RadioHost:
             'lyrics': '',
             'mixer': None,
             'duration': 0.0, # Add duration to current_data
-            'buffered_at': time.time() # Add buffered_at timestamp
         }
 
         def get_pos():
@@ -63,7 +63,7 @@ class RadioHost:
                 f"<location>{get_pos()}</location>"
                 f"<duration>{self.current_data['duration']}</duration>" # Added duration
                 f"<url>{song_url}</url>" # Added song URL
-                f"<buffered_at>{self.current_data['buffered_at']}</buffered_at>" # Added buffered_at
+                f"<buffered_at>{monotonic()}</buffered_at>" # Added buffered_at
                 f"<script>location.href='/{self.app_pad_site}';</script>"
             )
             resp.headers['Cache-Control'] = 'no-store'
@@ -236,7 +236,6 @@ class RadioHost:
             'lyrics': current_song_lyrics,
             'mixer': current_mixer,
             'duration': song_duration, # Set the actual duration
-            'buffered_at': time.time() # Update buffered_at to current time on new song
         })
 
     def _get_local_ip(self):
@@ -366,6 +365,6 @@ if __name__ == '__main__':
     # Keep main thread alive
     try:
         while True:
-            time.sleep(1)
+            sleep(1)
     except KeyboardInterrupt:
         pass

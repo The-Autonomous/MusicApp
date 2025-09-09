@@ -332,8 +332,7 @@ class MusicPlayer:
 
 #####################################################################################################
 
-    @lru_cache(maxsize=128)
-    def get_search_term(self, search_string: str):
+    def get_search_term(self, search_string: str, search_list: list = None, max_results: int = 10):
         """
         Performs a high-accuracy search against the local cache. It prioritizes results
         where all search terms are present in the song's artist or title.
@@ -351,10 +350,16 @@ class MusicPlayer:
             return []
 
         results = []
+        search_list = search_list if search_list is not None else self.shuffler.cache
         
-        for song in self.shuffler.cache:
-            artist = song.get('artist', '')
-            title = song.get('title', '')
+        for song in search_list:
+            song_type_is_dict = isinstance(song, dict)
+            if song_type_is_dict:
+                artist = song.get('artist', '')
+                title = song.get('title', '')
+            else:
+                # This Must Be A Search From Youtube
+                artist, title = song[0].split(" - ", 1) if " - " in song[0] else ("", song[0])
             
             # 2. Create a "clean" version of the song's info for matching.
             # This turns "Hans Zimmer - S.T.A.Y." into "hans zimmer s t a y".
@@ -376,15 +381,15 @@ class MusicPlayer:
             
             results.append({
                 'display': f"{artist} - {title}",
-                'path': song['path'],
-                'score': score
+                'path': song[1] if not song_type_is_dict else song['path'],
+                'score': score,
+                'type': song[2] if not song_type_is_dict else 'path'
             })
 
         # 5. Sort by the final score and return a short, highly relevant list of matches.
         sorted_results = sorted(results, key=lambda x: x['score'], reverse=True)
         
-        MAX_RESULTS = 10  # Only return the top 10 best matches
-        return [(r['display'], r['path']) for r in sorted_results[:MAX_RESULTS]]
+        return [(r['display'], r['path'], r['type']) for r in sorted_results[:max_results]]
 
     def play_song(self, path_or_song):
         """

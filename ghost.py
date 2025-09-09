@@ -428,6 +428,7 @@ class GhostOverlay:
         ### Key Listening ###
         self.is_listening_for_modification = False
         self.action_id_being_modified = None
+        self.require_alt_for_cmds = True # Require Alt for all commands except hidden ones
 
         ### Key Code ###
         self.bindings_handler = SettingsHandler(filename=".keyBindings.json")
@@ -1294,6 +1295,19 @@ class GhostOverlay:
         def _show_download_animation():
             top_frame.grid_remove()
             results_frame.grid_remove()
+            
+            # Set the window to be semi-transparent
+            self.search_overlay.attributes('-alpha', 0.2)
+            
+            # Make the entire animation window ignore mouse clicks.
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.search_overlay.winfo_id())
+                style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+                style = style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+                ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+            except Exception as e:
+                ll.error(f"Failed to set click-through style: {e}")
+                
             # Make window background transparent for the animation
             self.search_overlay.attributes('-transparentcolor', self.theme.COLORS["window_bg"])
             download_canvas.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -1307,10 +1321,12 @@ class GhostOverlay:
             current_results.clear()
             
             if results:
-                for raw_title, path_or_url in results:
-                    cleaned_title = self.TitleCleaner.clean(raw_title)
-                    results_list.insert(tk.END, f"  {cleaned_title}")
-                    current_results.append((cleaned_title, path_or_url))
+                for raw_title, path_or_url, path_or_youtube in results:
+                    is_youtube = path_or_youtube == 'url'
+                    cleaned_title = self.TitleCleaner.clean(raw_title) if not is_youtube else raw_title
+                    type_tag = "" if not youtube_search_var.get() else ("[YouTube]" if is_youtube else "[Local]")
+                    results_list.insert(tk.END, f" {type_tag} {cleaned_title}")
+                    current_results.append((cleaned_title, path_or_url, path_or_youtube))
             else:
                 results_list.insert(tk.END, "  No results found.")
                 results_list.itemconfig(0, {'fg': self.theme.COLORS["placeholder"]})
@@ -1319,8 +1335,12 @@ class GhostOverlay:
             try:
                 if youtube_search_var.get():
                     effective_term = f"{term} (OFFICIAL SONG)"
-                    raw_results = self.MusicPlayer.get_youtube_search(effective_term)
-                    raw_results = [*raw_results, *self.MusicPlayer.get_search_term(term)]
+                    raw_results = self.MusicPlayer.get_search_term(term)
+                    raw_results = [*raw_results, *self.MusicPlayer.get_youtube_search(effective_term)]
+                    
+                    # Reorganize to have most relative results at the top
+                    if len(raw_results) > 10:
+                        raw_results = self.MusicPlayer.get_search_term(term, raw_results, max_results=len(raw_results))
                 else:
                     raw_results = self.MusicPlayer.get_search_term(term)
             except Exception as e:
@@ -1368,32 +1388,35 @@ class GhostOverlay:
             index = selection_indices[0]
             if not (0 <= index < len(current_results)): return
             
-            _, path_or_url = current_results[index]
+            _, path_or_url, is_youtube = current_results[index]
             _show_download_animation()
-            is_youtube = youtube_search_var.get()
             
-            Thread(target=_download_thread_target, args=(path_or_url, is_youtube), daemon=True).start()
+            Thread(target=_download_thread_target, args=(path_or_url, is_youtube=='url'), daemon=True).start()
 
         # --- Key Navigation & Bindings ---
         def handle_key_navigation(event):
-            key, list_size = event.keysym, results_list.size()
-            
-            if key == "Escape": self.close_search_overlay(self._was_main_overlay_open_before_search); return "break"
-            if key == "Return": handle_selection(); return "break"
-            if list_size == 0 or key not in ("Down", "Up"): return
+            try:
+                key, list_size = event.keysym, results_list.size()
+                
+                if key == "Escape": self.close_search_overlay(self._was_main_overlay_open_before_search); return "break"
+                if key == "Return": handle_selection(); return "break"
+                if list_size == 0 or key not in ("Down", "Up"): return
 
-            current_selection = results_list.curselection()
-            new_index = 0
-            if current_selection:
-                current_index = current_selection[0]
-                new_index = min(current_index + 1, list_size - 1) if key == "Down" else max(current_index - 1, 0)
-            
-            results_list.selection_clear(0, tk.END)
-            results_list.selection_set(new_index)
-            results_list.activate(new_index)
-            results_list.see(new_index)
+                current_selection = results_list.curselection()
+                new_index = 0
+                if current_selection:
+                    current_index = current_selection[0]
+                    new_index = min(current_index + 1, list_size - 1) if key == "Down" else max(current_index - 1, 0)
+                
+                results_list.selection_clear(0, tk.END)
+                results_list.selection_set(new_index)
+                results_list.activate(new_index)
+                results_list.see(new_index)
+            except Exception as e:
+                ll.error(f"Key navigation error: {e}")
             return "break"
 
+        search_entry.bind("<Return>", _trigger_search)
         search_entry.bind("<KeyRelease>", on_key_release)
         search_entry.bind("<Return>", handle_selection)
         search_entry.bind("<Down>", handle_key_navigation)

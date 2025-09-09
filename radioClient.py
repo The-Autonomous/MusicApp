@@ -490,10 +490,10 @@ class RadioClient:
         self._pause_start_time = None
         self._paused = False
 
-        # Re-play from the corrected server location - don't pass server's buffered_at
+        # Re-play from the corrected server location
         self._current_song_start_time = self.AudioPlayer.radio_play(
             filepath=self.temp_song_file, 
             start_pos=corrected_resync_pos, 
-            buffer_time=None
+            buffer_time=buffered_at
         )
         self._current_song_start_server_pos = corrected_resync_pos
