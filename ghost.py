@@ -967,7 +967,7 @@ class GhostOverlay:
                 
                 alt_required_check = ttk.Checkbutton(
                     action_row_frame,
-                    text="ALT Needed",
+                    text=f"ALT{"" if action.get('alt_needed', True) else " Not"} Needed",
                     style="TCheckbutton",
                     variable=tk.BooleanVar(value=not action.get('alt_needed', True)),
                     command=lambda act=action: self._on_alt_toggle(act)
