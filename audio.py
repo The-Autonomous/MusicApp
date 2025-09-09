@@ -17,7 +17,7 @@ except:
 
 ### Logging Handler ###
 
-ll = log_loader("Audio", debugging = False)
+ll = log_loader("Audio", debugging = True)
 
 #######################
 
@@ -194,6 +194,25 @@ class AudioPlayerRoot:
         # Last-ditch defaults (keep the app alive)
         return {'samplerate': 44100, 'channels': 2, 'duration': 0.0}
 
+    # Pre-compute slope and intercept for delay calculation
+    slope = (0.75 - 0.52) / (512 - 252)  # (y2 - y1) / (x2 - x1)
+    
+    # Calculate the y-intercept (b) using one point
+    # b = y - mx
+    y_intercept = 0.52 - (slope * 252)
+
+    def calculate_delay(self, duration_in_seconds: float) -> float:
+        """
+        Calculates a dynamic delay based on the song's duration.
+        
+        This function is derived from a linear relationship (y = mx + b) using
+        two known points:
+        - Song 1: 512 seconds (8:32) -> 0.75 delay
+        - Song 2: 252 seconds (4:12) -> 0.48 delay
+        """
+        # Apply the linear formula to the given duration
+        return (self.slope * duration_in_seconds) + self.y_intercept
+
     def _get_audio_info(self, filepath: str) -> dict:
         return self._probe_audio_info(filepath, os.path.getmtime(filepath))
 
@@ -263,7 +282,8 @@ class AudioPlayerRoot:
                 return False if not radio_mode else 0.0
 
             # Calculate final position
-            final_position = start_pos + 0.23
+            skip_offset = self.calculate_delay(self._duration) # Use a linear function to determine the offset based on how long the song is thus how long it takes to load
+            final_position = start_pos + skip_offset  # Default small offset
             solved_monotonic = monotonic()
             
             if radio_mode and buffer_time is not None:
@@ -281,7 +301,9 @@ class AudioPlayerRoot:
                 ll.debug(f"Radio timing: start_pos={start_pos:.3f}, "
                         f"buffer_time={buffer_time:.3f}, current_time={current_time:.3f}, "
                         f"time_since_buffer={time_since_buffer:.3f}, "
-                        f"final_position={final_position:.3f}")
+                        f"final_position={final_position:.3f}"
+                        f"load_times=[{",".join(self._performance_stats['load_times'])}]"
+                        )
             
             # Use final_position for frame calculation
             self._position_frames = int(final_position * self.samplerate)
@@ -608,9 +630,7 @@ class AudioPlayerRoot:
                             # Buffer full, wait a bit
                             sleep(0.001)
                         else:
-                            # Debug info (remove in production)
-                            ll.debug(f"Added chunk: {chunk.shape} frames to buffer "
-                                f"(fill: {self._buffer.fill_ratio:.1%})")
+                            continue
                     else:
                         ll.warn(f"Invalid audio chunk detected, skipping")
                         
