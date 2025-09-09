@@ -263,7 +263,7 @@ class AudioPlayerRoot:
                 return False if not radio_mode else 0.0
 
             # Calculate final position
-            final_position = start_pos + 0.1
+            final_position = start_pos + 0.23
             solved_monotonic = monotonic()
             
             if radio_mode and buffer_time is not None:

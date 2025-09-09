@@ -428,7 +428,6 @@ class GhostOverlay:
         ### Key Listening ###
         self.is_listening_for_modification = False
         self.action_id_being_modified = None
-        self.require_alt_for_cmds = True # Require Alt for all commands except hidden ones
 
         ### Key Code ###
         self.bindings_handler = SettingsHandler(filename=".keyBindings.json")
@@ -466,6 +465,7 @@ class GhostOverlay:
             {
                 'id': 'skip_previous',
                 'required': ['alt', '-'],
+                'alt_needed': True,
                 'action': self._trigger_skip_previous,
                 'hint': "Skip To The Previous Song",
                 'modifiable': True
@@ -473,6 +473,7 @@ class GhostOverlay:
             {
                 'id': 'skip_next',
                 'required': ['alt', '='],
+                'alt_needed': True,
                 'action': self._trigger_skip_next,
                 'hint': "Skip To The Next Song",
                 'modifiable': True
@@ -480,6 +481,7 @@ class GhostOverlay:
             {
                 'id': 'volume_down',
                 'required': ['alt', '['],
+                'alt_needed': True,
                 'action': self._trigger_volume_dwn,
                 'hint': "Turn Down Music Volume",
                 'modifiable': True
@@ -487,6 +489,7 @@ class GhostOverlay:
             {
                 'id': 'volume_up',
                 'required': ['alt', ']'],
+                'alt_needed': True,
                 'action': self._trigger_volume_up,
                 'hint': "Turn Up Music Volume",
                 'modifiable': True
@@ -494,6 +497,7 @@ class GhostOverlay:
             {
                 'id': 'pause_play',
                 'required': ['alt', ';'],
+                'alt_needed': True,
                 'action': self._trigger_pause,
                 'hint': "Pause / Play The Music", # Clarified hint
                 'modifiable': True
@@ -501,6 +505,7 @@ class GhostOverlay:
             {
                 'id': 'repeat_toggle',
                 'required': ['alt', '\''],
+                'alt_needed': True,
                 'action': self._trigger_repeat,
                 'hint': "Enable / Disable Repeat Mode",
                 'modifiable': True
@@ -508,6 +513,7 @@ class GhostOverlay:
             {
                 'id': 'lyrics_toggle_visibility',
                 'required': ['alt', '/'],
+                'alt_needed': True,
                 'action': self._trigger_lyrics_toggle,
                 'hint': "Show / Hide Lyrics If Available", # Clarified hint
                 'modifiable': True
@@ -515,6 +521,7 @@ class GhostOverlay:
             {
                 'id': 'radio_enable_toggle',
                 'required': ['alt', 'a'],
+                'alt_needed': True,
                 'action': self._trigger_radio_toggle,
                 'hint': "Enable / Disable Radio Mode", # Clarified hint
                 'modifiable': True
@@ -522,6 +529,7 @@ class GhostOverlay:
             {
                 'id': 'radio_scan_station',
                 'required': ['alt', '`'],
+                'alt_needed': True,
                 'action': self._trigger_radio_station,
                 'hint': "Scan For Next Radio Station", # Clarified hint
                 'modifiable': True
@@ -529,6 +537,7 @@ class GhostOverlay:
             {
                 'id': 'show_search',
                 'required': ['alt', '\\'],
+                'alt_needed': True,
                 'action': self.show_search_overlay,
                 'hint': "Search Songs",
                 'modifiable': True
@@ -536,6 +545,7 @@ class GhostOverlay:
             {
                 'id': 'show_eq_menu',
                 'required': ['right alt', '\\'],
+                'alt_needed': True,
                 'action': self.show_eq_overlay,
                 'hint': "EQ Menu",
                 'modifiable': True
@@ -543,10 +553,11 @@ class GhostOverlay:
             {
                 'id': 'toggle_overlay',
                 'required': ['alt', 'shift'],
+                'alt_needed': True,
                 'forbidden': ['ALL'],
                 'action': self.toggle_overlay,
                 'hint': "Show / Hide Music Player",
-                'modifiable': False # Core function, specific modifiers
+                'modifiable': True
             },
             {
                 'id': 'player_on_off',
@@ -699,7 +710,8 @@ class GhostOverlay:
 
         for action in self.key_actions:
             # Ensure all required keys are currently pressed
-            required_met = all(self.keys_pressed.get(k, False) for k in action['required'])
+            require_alt_to_act = action.get('alt_needed', True)
+            required_met = all(True if k=='alt' and require_alt_to_act == False else self.keys_pressed.get(k, False) for k in action['required'])
             
             # Ensure no forbidden keys are pressed
             forbidden_met = True # Assume true unless a forbidden key is found pressed
@@ -811,11 +823,20 @@ class GhostOverlay:
         current_keys_str = " + ".join(k.upper() for k in original_keys)
         new_keys_str = " + ".join(k.upper() for k in new_required_keys)
 
-        if messagebox.askyesno("Confirm Key Change",
-                                 f"Change binding for '{action_to_modify['hint']}'\n"
-                                 f"From: {current_keys_str}\n"
-                                 f"To:   {new_keys_str}\n\n"
-                                 f"Are you sure?"):
+        self.key_hints_popup.withdraw() # Hide while dialog is open
+        try:
+            # Adding parent=self.key_hints_popup also helps position the box correctly
+            confirmed = messagebox.askyesno("Confirm Key Change",
+                                            f"Change binding for '{action_to_modify['hint']}'\n"
+                                            f"From: {current_keys_str}\n"
+                                            f"To:   {new_keys_str}\n\n"
+                                            f"Are you sure?",
+                                            parent=self.key_hints_popup)
+        finally:
+            # This block ALWAYS runs, ensuring the hints window is visible again
+            self.key_hints_popup.lift()
+
+        if confirmed:
             action_to_modify['required'] = new_required_keys
             self.bindings_handler.update_setting(action_to_modify['id'], new_required_keys)
             self._rebuild_key_maps()
@@ -843,6 +864,23 @@ class GhostOverlay:
                 self.key_hints_popup = None
             self.show_key_hints()
             
+    def _on_alt_toggle(self, action):
+        """Handles the logic for the 'Alt Not Required' checkbox."""
+        # 1. Update the action's state in memory
+        is_alt_needed = not action.get('alt_needed', True)
+        action['alt_needed'] = is_alt_needed
+        self.bindings_handler.update_setting(action['alt_needed'], is_alt_needed)
+
+        # 2. Rebuild the key maps with the new setting
+        self._rebuild_key_maps()
+        
+        # 3. Correctly refresh the hints window
+        if self.key_hints_popup and self.key_hints_popup.winfo_exists():
+            self.key_hints_popup.destroy()
+            self.key_hints_popup = None  # Reset the variable
+
+        self.show_key_hints(force_state=True) # Re-open with the new info
+            
     def show_key_hints(self, force_state: bool = None):
         """ Show a popup with all key hints and their actions. """
         def close_popup(event=None):
@@ -869,7 +907,7 @@ class GhostOverlay:
 
         self.key_hints_popup.bind("<Escape>", close_popup)
         
-        title_label = ttk.Label(main_frame, text="✨ Music Player Controls ✨", style="Header.TLabel")
+        title_label = ttk.Label(main_frame, text="Music Player Controls", style="Header.TLabel")
         title_label.pack(pady=(0, 15), anchor="center")
 
         separator = tk.Frame(main_frame, height=2, bg=self.theme.COLORS["border"])
@@ -881,6 +919,9 @@ class GhostOverlay:
         canvas = tk.Canvas(list_container, bg=self.theme.COLORS["frame_bg"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
+        
+        self.modification_status_label = ttk.Label(main_frame, text="", style="Status.TLabel", anchor="w", justify=tk.LEFT, wraplength=580)
+        self.modification_status_label.pack(pady=(10, 5), padx=10, anchor="w")
 
         scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
@@ -893,6 +934,11 @@ class GhostOverlay:
 
         for i, action in enumerate(self.key_actions):
             keys_display = " + ".join(k.upper() for k in action['required'])
+            
+            # If alt is not needed, remove it from display (less clunky than a for loop)
+            if not action.get('alt_needed', True):
+                keys_display = keys_display.removeprefix("ALT + ")
+            
             hint_text = action['hint']
 
             action_row_frame = ttk.Frame(scrollable_frame, style="TFrame")
@@ -902,6 +948,7 @@ class GhostOverlay:
             action_row_frame.columnconfigure(0, weight=1)
             action_row_frame.columnconfigure(1, weight=3)
             action_row_frame.columnconfigure(2, weight=0)
+            action_row_frame.columnconfigure(3, weight=0)
 
             key_label = ttk.Label(action_row_frame, text=keys_display, font=self.theme.FONTS["fixed_width"], anchor="w")
             key_label.grid(row=0, column=0, sticky="ew", padx=(10, 5))
@@ -917,10 +964,19 @@ class GhostOverlay:
                     command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
                 )
                 edit_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
+                
+                alt_required_check = ttk.Checkbutton(
+                    action_row_frame,
+                    text="ALT Needed",
+                    style="TCheckbutton",
+                    variable=tk.BooleanVar(value=not action.get('alt_needed', True)),
+                    command=lambda act=action: self._on_alt_toggle(act)
+                )
+                alt_required_check.grid(row=0, column=3, sticky="e", padx=(0, 10))
             
             # Hover effect
             widgets_in_row = [action_row_frame, key_label, hint_label]
-            if action.get('modifiable'): widgets_in_row.append(edit_btn)
+            #if action.get('modifiable'): widgets_in_row.append(edit_btn)
             
             def on_enter(e, widgets=widgets_in_row):
                 for w in widgets: w.configure(style="Hover.TFrame" if isinstance(w, ttk.Frame) else "Hover.TLabel")
@@ -929,10 +985,6 @@ class GhostOverlay:
             
             action_row_frame.bind("<Enter>", on_enter)
             action_row_frame.bind("<Leave>", on_leave)
-
-
-        self.modification_status_label = ttk.Label(scrollable_frame, text="", style="Status.TLabel", anchor="w", justify=tk.LEFT, wraplength=580)
-        self.modification_status_label.pack(pady=(10, 5), padx=10, anchor="w")
 
         buttons_frame = ttk.Frame(main_frame)
         buttons_frame.pack(fill="x", pady=(15, 0), padx=10)
