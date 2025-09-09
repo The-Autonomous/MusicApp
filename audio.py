@@ -17,7 +17,7 @@ except:
 
 ### Logging Handler ###
 
-ll = log_loader("Audio", debugging = True)
+ll = log_loader("Audio", debugging = False)
 
 #######################
 
@@ -302,7 +302,6 @@ class AudioPlayerRoot:
                         f"buffer_time={buffer_time:.3f}, current_time={current_time:.3f}, "
                         f"time_since_buffer={time_since_buffer:.3f}, "
                         f"final_position={final_position:.3f}"
-                        f"load_times=[{",".join(self._performance_stats['load_times'])}]"
                         )
             
             # Use final_position for frame calculation
