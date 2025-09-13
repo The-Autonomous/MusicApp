@@ -260,16 +260,14 @@ class MouseTracker:
     def __init__(self):
         self.user32 = ctypes.windll.user32
         self._right_button_pressed = False
+        self._last_right_press_pos = None  # Stores coordinates of the last press
         self.window_proportions = [0, 0, 0, 0]
         
-        # Initialize the pynput listener.
-        # Crucially, set daemon=True. This means the thread will automatically exit
-        # when the main program exits, even if you forget to call .stop().
         self.listener = mouse.Listener(
             on_click=self._on_click,
-            daemon=True # This makes the thread a daemon thread
+            daemon=True
         )
-        self.listener.start() # Start the listener thread immediately upon initialization
+        self.listener.start()
 
     def calc_pos(self, x, y, a_x, a_y, b_x, b_y):
         """Returns True if point (x,y) is inside the rectangle defined by:
@@ -284,17 +282,20 @@ class MouseTracker:
     def _on_click(self, x, y, button, pressed):
         """Internal callback for pynput mouse events."""
         try:
-            if button == mouse.Button.right and self.calc_pos(x, y, *self.window_proportions):
+            if button == mouse.Button.right:
                 self._right_button_pressed = pressed
-            ll.debug(f"Mouse tracker got key {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})") # Uncomment for detailed pynput debugging
+                if pressed:
+                    # Store the position of the press
+                    self._last_right_press_pos = (x, y)
+                else:
+                    # Clear the position on release
+                    self._last_right_press_pos = None
+            ll.debug(f"Mouse tracker got key {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})")
         except Exception as E:
             ll.warn(f"Mouse tracker met unexpected error {E}")
 
     def mouse_pos(self):
-        """Returns [x, y] of mouse cursor (works in fullscreen games).
-        This method typically works without admin rights for basic cursor position,
-        so it can use ctypes in both admin and non-admin modes.
-        """
+        """Returns [x, y] of mouse cursor (works in fullscreen games)."""
         class POINT(ctypes.Structure):
             _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
         pt = POINT()
@@ -304,16 +305,23 @@ class MouseTracker:
     def is_right_mouse_down(self):
         """Returns True if right mouse button is pressed."""
         return self._right_button_pressed
+        
+    def was_press_in_window(self):
+        """Checks if the last right-click press occurred within the current window bounds."""
+        if not self._last_right_press_pos:
+            return False
+        
+        press_x, press_y = self._last_right_press_pos
+        win_x, win_y, win_w, win_h = self.window_proportions
+        
+        return (win_x <= press_x < win_x + win_w) and (win_y <= press_y < win_y + win_h)
 
     def stop(self):
         """Stops the pynput listener if it was started and is still active."""
         if hasattr(self, 'listener') and self.listener.is_alive():
             ll.print("Stopping pynput listener thread.")
             self.listener.stop()
-            # Use .join() only if you need to ensure the thread has completely terminated
-            # before proceeding, otherwise, daemon=True is often enough for exit.
-            # If your app needs a very specific shutdown order, keep .join().
-            self.listener.join(timeout=1) # Give it a short timeout to terminate
+            self.listener.join(timeout=1)
             if self.listener.is_alive():
                 ll.warn("Warning: pynput listener thread did not terminate cleanly.")
 
@@ -650,7 +658,9 @@ class GhostOverlay:
             # Ignore standalone modifiers as the new distinguishing key, unless it's shift for e.g. Alt+Shift
             # For simplicity, we take any non-'alt' key as the new distinguishing key.
             if name in ('alt', 'ctrl'): # Cannot use alt or ctrl as the distinguishing key with 'alt'
+                self.key_hints_popup.withdraw() # Hide temporarily to avoid stacking
                 messagebox.showwarning("Invalid Key", f"Cannot use '{name.upper()}' as the distinguishing key with ALT. Try another key.")
+                self.key_hints_popup.lift()
                 return # Wait for a different key
 
             # If 'name' is 'shift', 'right shift', or 'right alt', it's a valid part of a combo
@@ -774,7 +784,9 @@ class GhostOverlay:
             )
             self.key_hints_popup.bind("<Escape>", self._cancel_key_modification_event)
         else:
+            self.key_hints_popup.withdraw() # Hide while dialog is open
             messagebox.showinfo("Modify Key", f"Listening for new key for {action_hint}.\nPress the key you want to use with ALT. Press Esc in this message box to cancel (if main window doesn't catch it).")
+            self.key_hints_popup.lift()
             # Fallback if popup isn't ideal for this state
 
     def _cancel_key_modification_event(self, event=None): # For tkinter event binding
@@ -810,7 +822,9 @@ class GhostOverlay:
         # New binding is always ['alt', new_distinguishing_key_name]
         # Ensure new_distinguishing_key_name is not 'alt' itself.
         if new_distinguishing_key_name == 'alt':
+            self.key_hints_popup.withdraw() # Hide while dialog is open
             messagebox.showerror("Invalid Key", "'ALT' itself cannot be the distinguishing key when 'ALT' is already the base. Modification cancelled.")
+            self.key_hints_popup.lift()
             self._cancel_key_modification(refresh_hints=True)
             return
 
@@ -819,7 +833,9 @@ class GhostOverlay:
         # Check for conflicts
         for action in self.key_actions:
             if action['id'] != self.action_id_being_modified and action['required'] == new_required_keys:
+                self.key_hints_popup.withdraw() # Hide while dialog is open
                 messagebox.showerror("Conflict", f"The combination '{' + '.join(k.upper() for k in new_required_keys)}' is already used by '{action['hint']}'.")
+                self.key_hints_popup.lift()
                 self._cancel_key_modification(refresh_hints=True)
                 return
             
@@ -858,9 +874,17 @@ class GhostOverlay:
         self.action_id_being_modified = None # Ensure reset after modification attempt
 
     def _confirm_reset_bindings(self):
-        if messagebox.askyesno("Reset Key Bindings", 
+        self.key_hints_popup.withdraw() # Hide while dialog is open
+        try:
+            # Adding parent=self.key_hints_popup also helps position the box correctly
+            confirmed = messagebox.askyesno("Reset Key Bindings", 
                                "Are you sure you want to reset all modifiable key bindings to their defaults?\nThis cannot be undone.",
-                               icon='warning'):
+                               icon='warning')
+        finally:
+            # This block ALWAYS runs, ensuring the hints window is visible again
+            self.key_hints_popup.lift()
+
+        if confirmed:
             self.bindings_handler.reset_settings()
             self._define_default_key_actions() # Reloads hardcoded defaults into self.key_actions
             # self._load_custom_bindings() # Not strictly needed as JSON is empty, but good for consistency
@@ -1685,10 +1709,25 @@ class GhostOverlay:
 
     def parse_mouse_over_overlay(self):
         if not self.window or not self.window.winfo_exists(): return
-        if self.mouseEvents.is_right_mouse_down():
-            currentPosition = self.mouseEvents.mouse_pos()
-            self.clickThroughState = False
-            self.toggle_overlay_clickthrough(self.clickThroughState)
+
+        # Get current overlay and mouse geometry
+        currentPosition = self.mouseEvents.mouse_pos()
+        wx, wy = self.window.winfo_x(), self.window.winfo_y()
+        ww, wh = self.window.winfo_width(), self.window.winfo_height()
+        
+        # Continuously update the mouse tracker with the window's current position and size.
+        self.mouseEvents.update_window(wx, wy, ww, wh)
+        
+        # The condition for interactivity is now that the right mouse is down AND
+        # the press that initiated it occurred within the overlay's bounds.
+        if self.mouseEvents.is_right_mouse_down() and self.mouseEvents.was_press_in_window():
+            # If we meet the drag condition, make the window interactive.
+            if self.clickThroughState:
+                self.clickThroughState = False
+                self.toggle_overlay_clickthrough(self.clickThroughState)
+
+            # This block simulates the start of a drag since the initial <Button-3> event was missed
+            # due to the window being click-through. It runs only once at the start of a drag.
             if not self._overlay_dragging and self._overlay_start_move:
                 self._drag_start_x = currentPosition[0]
                 self._drag_start_y = currentPosition[1]
@@ -1708,11 +1747,16 @@ class GhostOverlay:
                     mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
                     mouse_controller.press(mouse.Button.right)
         else:
-            if not self.clickThroughState and not self._overlay_dragging:
+            # If the drag conditions are NOT met (e.g., mouse released, or press was outside):
+            # 1. Reset the overlay to be click-through if it isn't already.
+            if not self.clickThroughState:
                 self.clickThroughState = True
                 self.toggle_overlay_clickthrough(self.clickThroughState)
                 try: self.root.after(100, self.keep_overlay_on_top)
                 except: ll.error("Couldn't Load Root After.")
+            
+            # 2. Ensure the dragging state is turned off.
+            self._overlay_dragging = False
                     
     def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):
         """Loop To Handle Draggability - OPTIMIZED FOR GAMING"""
