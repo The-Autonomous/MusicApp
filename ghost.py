@@ -396,6 +396,7 @@ class GhostOverlay:
         ### Search ###
         self._search_after_id = None
         self._is_searching = False
+        self.is_spinning_downloading = False
         
         ### Music Player ###
         self.overlay_text_padding = 15
@@ -581,10 +582,10 @@ class GhostOverlay:
                 'modifiable': False # Specific, important
             },
             {
-                'id': 'kill_all_python',
+                'id': 'kill_self',
                 'required': ['right alt', 'ctrl'],
                 'action': self.close_application,
-                'hint': "EMERGENCY: Close Player & Python Tasks", # Clarified hint
+                'hint': "Shutdown The Music Player", # Clarified hint
                 'modifiable': False # Critical, potentially disruptive
             },
         ]
@@ -967,7 +968,7 @@ class GhostOverlay:
                 
                 alt_required_check = ttk.Checkbutton(
                     action_row_frame,
-                    text=f"ALT{"" if action.get('alt_needed', True) else " Not"} Needed",
+                    text=f" ALT{"" if action.get('alt_needed', True) else " Not"} Needed",
                     style="TCheckbutton",
                     variable=tk.BooleanVar(value=not action.get('alt_needed', True)),
                     command=lambda act=action: self._on_alt_toggle(act)
@@ -1205,7 +1206,7 @@ class GhostOverlay:
 
     def show_search_overlay(self):
         # Prevent opening if in radio mode or already open
-        if self.display_radio:
+        if self.display_radio or self._is_searching or self.is_spinning_downloading:
             return
         if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
             self.close_search_overlay(getattr(self, "_was_main_overlay_open_before_search", True))
@@ -1215,6 +1216,8 @@ class GhostOverlay:
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
         if self._was_main_overlay_open_before_search:
             self.close_overlay()
+            
+        search_recommendation = getattr(self, 'MusicPlayer', None).recommend.analyze_top_artists(top_n=1)[0][0].title() if hasattr(self, 'MusicPlayer') else ""
 
         # --- Search UI Setup ---
         self.search_overlay = tk.Toplevel(self.root)
@@ -1383,8 +1386,10 @@ class GhostOverlay:
                 results_list.insert(tk.END, "  No results found.")
                 results_list.itemconfig(0, {'fg': self.theme.COLORS["placeholder"]})
 
-        def _search_thread_target(term):
+        def _search_thread_target(term, dont_log=False):
             try:
+                if getattr(self, 'MusicPlayer', None) and not dont_log:
+                    self.MusicPlayer.recommend.log_search(term)
                 if youtube_search_var.get():
                     effective_term = f"{term} (OFFICIAL SONG)"
                     raw_results = self.MusicPlayer.get_search_term(term)
@@ -1432,15 +1437,17 @@ class GhostOverlay:
                     self.MusicPlayer.play_song(path_or_url)
             finally:
                 if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+                    self.is_spinning_downloading = False
                     self.search_overlay.after(0, self.close_search_overlay, self._was_main_overlay_open_before_search)
 
         def handle_selection(_=None):
             selection_indices = results_list.curselection()
-            if not selection_indices or not current_results: return
+            if not selection_indices or not current_results: _trigger_search(); return
             index = selection_indices[0]
             if not (0 <= index < len(current_results)): return
             
             _, path_or_url, is_youtube = current_results[index]
+            self.is_spinning_downloading = True
             _show_download_animation()
             
             Thread(target=_download_thread_target, args=(path_or_url, is_youtube=='url'), daemon=True).start()
@@ -1468,7 +1475,6 @@ class GhostOverlay:
                 ll.error(f"Key navigation error: {e}")
             return "break"
 
-        search_entry.bind("<Return>", _trigger_search)
         search_entry.bind("<KeyRelease>", on_key_release)
         search_entry.bind("<Return>", handle_selection)
         search_entry.bind("<Down>", handle_key_navigation)
@@ -1499,6 +1505,9 @@ class GhostOverlay:
         self.search_overlay.lift()
         self.search_overlay.grab_set()
         search_entry.focus_force()
+        
+        if search_recommendation != "":
+            Thread(target=_search_thread_target, args=(search_recommendation, True,), daemon=True).start()
 
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
@@ -1516,12 +1525,18 @@ class GhostOverlay:
             self._trigger_radio_toggle()
 
     def _trigger_skip_previous(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
-            self.MusicPlayer.skip_previous()
+        try:
+            if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
+                self.MusicPlayer.skip_previous()
+        except Exception as e:
+            ll.error(f"Error in skip previous trigger: {e}")
 
     def _trigger_skip_next(self):
-        if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
-            self.MusicPlayer.skip_next()
+        try:
+            if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:
+                self.MusicPlayer.skip_next()
+        except Exception as e:
+            ll.error(f"Error in skip next trigger: {e}")
 
     def _trigger_pause(self):
         if hasattr(self, 'MusicPlayer') and self.playerState and not self.display_radio:

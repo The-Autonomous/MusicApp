@@ -15,16 +15,18 @@ try:
     from radioIpScanner import SimpleRadioScan
     from radioClient import RadioClient
     from radioMaster import RadioHost
-    from audio import AudioPlayer, AudioEcho
+    from audio import AudioPlayer
     from log_loader import log_loader
+    from playerRecommend import PlayerRecommender
 except:
     from .ytHandle import ytHandle
     from .lyricMaster import lyricHandler
     from .radioIpScanner import SimpleRadioScan
     from .radioClient import RadioClient
     from .radioMaster import RadioHost
-    from .audio import AudioPlayer, AudioEcho
+    from .audio import AudioPlayer
     from .log_loader import log_loader
+    from .playerRecommend import PlayerRecommender
 
 #####################################################################################################
 
@@ -280,6 +282,9 @@ class MusicPlayer:
         self.current_index = -1
         self.current_volume = 0.1
         self.navigating_history = False
+        
+        # Recommendations System
+        self.recommend = PlayerRecommender()
 
 #####################################################################################################
     
@@ -834,6 +839,9 @@ class MusicPlayer:
         # This block handles both navigating backward and the initial "previous" press before the time threshold.
         elif self.current_index > 0:
             self.navigating_history = True
+            if self.current_index >= len(self.shuffler.history):
+                ll.error("Current index is out of bounds of history!")
+                self.current_index = len(self.shuffler.history) - 1
             self.forward_stack.append(self.shuffler.history[self.current_index])
             self.current_index -= 1
             prev_path = self.shuffler.history[self.current_index]
@@ -1114,6 +1122,8 @@ class MusicPlayer:
                 self.current_song_id = str(song['title']) + str(time())
                 self.set_screen(song['artist'], self.get_display_title())
                 self.current_song_lyrics = ""
+                
+                self.recommend.log_song_play(song['artist'], song['title'])
 
                 current_rotation_count, max_current_rotation = 0, 5
                 fullTitle = f"{song['artist']}![]!{song['title']}"
