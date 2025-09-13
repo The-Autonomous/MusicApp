@@ -1376,12 +1376,25 @@ class GhostOverlay:
             current_results.clear()
             
             if results:
-                for raw_title, path_or_url, path_or_youtube in results:
-                    is_youtube = path_or_youtube == 'url'
+                for raw_title, path_or_url, song_type in results:
+                    if song_type == 'title_only':
+                        rlist_width = results_list.winfo_width()
+                        font_size = font.Font(font=results_list.cget("font")).measure('0')
+                        spacing_char_count = (rlist_width // font_size) - abs(len(raw_title) // 2) - 5
+                        filler_spacing = " " * spacing_char_count
+                        
+                        results_list.insert(tk.END, f"{filler_spacing}{raw_title}")
+                        current_results.append((raw_title, raw_title, song_type))
+                        continue
+                    if song_type == 'playlist':
+                        results_list.insert(tk.END, f" [Playlist] {raw_title}")
+                        current_results.append((raw_title, path_or_url, song_type))
+                        continue
+                    is_youtube = song_type == 'url'
                     cleaned_title = self.TitleCleaner.clean(raw_title) if not is_youtube else raw_title
                     type_tag = "" if not youtube_search_var.get() else ("[YouTube]" if is_youtube else "[Local]")
                     results_list.insert(tk.END, f" {type_tag} {cleaned_title}")
-                    current_results.append((cleaned_title, path_or_url, path_or_youtube))
+                    current_results.append((cleaned_title, path_or_url, song_type))
             else:
                 results_list.insert(tk.END, "  No results found.")
                 results_list.itemconfig(0, {'fg': self.theme.COLORS["placeholder"]})
@@ -1393,11 +1406,12 @@ class GhostOverlay:
                 if youtube_search_var.get():
                     effective_term = f"{term} (OFFICIAL SONG)"
                     raw_results = self.MusicPlayer.get_search_term(term)
-                    raw_results = [*raw_results, *self.MusicPlayer.get_youtube_search(effective_term)]
+                    do_playlist = len(raw_results) > 5
+                    raw_youtube = self.MusicPlayer.get_youtube_search(effective_term)
+                    raw_results = [("---[ Local Songs ]---", None, 'title_only'), *raw_results, ("---[ YouTube Results ]---", None, 'title_only'), *raw_youtube]
                     
-                    # Reorganize to have most relative results at the top
-                    if len(raw_results) > 10:
-                        raw_results = self.MusicPlayer.get_search_term(term, raw_results, max_results=len(raw_results))
+                    if do_playlist:
+                        raw_results.insert(0, (term, term, 'playlist'))
                 else:
                     raw_results = self.MusicPlayer.get_search_term(term)
             except Exception as e:
@@ -1429,12 +1443,16 @@ class GhostOverlay:
                 self.search_overlay.after_cancel(self._search_after_id)
             self._search_after_id = self.search_overlay.after(1000, _trigger_search)
         
-        def _download_thread_target(path_or_url, is_youtube):
+        def _download_thread_target(path_or_url, song_type):
             try:
-                if is_youtube:
+                if song_type =='url':
                     self.MusicPlayer.play_youtube_song(path_or_url)
-                else:
+                elif song_type == 'path':
                     self.MusicPlayer.play_song(path_or_url)
+                elif song_type == 'playlist':
+                    self.MusicPlayer.gather_playlist(path_or_url)
+                else:
+                    ll.error(f"Unknown song type for download: {song_type}")
             finally:
                 if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
                     self.is_spinning_downloading = False
@@ -1446,11 +1464,15 @@ class GhostOverlay:
             index = selection_indices[0]
             if not (0 <= index < len(current_results)): return
             
-            _, path_or_url, is_youtube = current_results[index]
+            _, path_or_url, song_type = current_results[index]
+            
+            if song_type == 'title_only': # Skip Placeholders
+                return
+            
             self.is_spinning_downloading = True
             _show_download_animation()
             
-            Thread(target=_download_thread_target, args=(path_or_url, is_youtube=='url'), daemon=True).start()
+            Thread(target=_download_thread_target, args=(path_or_url, song_type), daemon=True).start()
 
         # --- Key Navigation & Bindings ---
         def handle_key_navigation(event):

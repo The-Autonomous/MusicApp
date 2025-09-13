@@ -1,4 +1,4 @@
-import os, random, ast, requests, json, multiprocessing, ctypes, re
+import os, random, ast, requests, json, multiprocessing, ctypes, re, random
 from functools import lru_cache
 from collections import deque
 from multiprocessing import Array as MPArray
@@ -337,7 +337,7 @@ class MusicPlayer:
 
 #####################################################################################################
 
-    def get_search_term(self, search_string: str, search_list: list = None, max_results: int = 10):
+    def get_search_term(self, search_string: str, search_list: list = None, max_results: int = 100):
         """
         Performs a high-accuracy search against the local cache. It prioritizes results
         where all search terms are present in the song's artist or title.
@@ -437,6 +437,41 @@ class MusicPlayer:
         # Pause Glitch Fix??
         if self.pause_event.is_set():
             self.pause(True)  # Unpause if paused
+        
+#####################################################################################################
+
+    def gather_playlist(self, search_term, forced_search_results: list = None):
+        """
+        Finds all songs matching a search term, queues them up as a playlist,
+        and starts playing from the first song in the results.
+        """
+        search_results = forced_search_results or self.get_search_term(search_term, max_results=250)
+        if not search_results:
+            ll.debug("Playlist search returned no results.")
+            return
+
+        # 1. Convert all search results into a list of song dictionary objects from the cache.
+        playlist_songs = []
+        for _display, path, _ in search_results:
+            song = next((s for s in self.shuffler.cache if s['path'] == path), None)
+            if song:
+                playlist_songs.append(song)
+
+        if not playlist_songs:
+            ll.debug("No valid songs found in cache for the playlist.")
+            return
+
+        random.shuffle(playlist_songs)  # Shuffle the playlist songs
+        playlist_songs_appending = playlist_songs[1:]
+        self.shuffler.replay_queue.clear()
+        self.forward_stack.clear()
+
+        for song in playlist_songs_appending:
+            self.forward_stack.append(song['path'])
+            ll.debug(f"Queued from playlist search: {song.get('artist')} - {song.get('title')}")
+
+        self.shuffler.enqueue_replay(playlist_songs[0])
+        self.skip_flag.set()
         
 #####################################################################################################
 
@@ -1095,6 +1130,7 @@ class MusicPlayer:
 
     def core_player_loop(self):
         prev_song = None
+        is_first_run = True
         while True:
             try:
                 self.skip_flag.clear()
@@ -1122,8 +1158,6 @@ class MusicPlayer:
                 self.current_song_id = str(song['title']) + str(time())
                 self.set_screen(song['artist'], self.get_display_title())
                 self.current_song_lyrics = ""
-                
-                self.recommend.log_song_play(song['artist'], song['title'])
 
                 current_rotation_count, max_current_rotation = 0, 5
                 fullTitle = f"{song['artist']}![]!{song['title']}"
@@ -1186,6 +1220,13 @@ class MusicPlayer:
                     start_time = time() - start_pos
                     paused_duration = 0
                     last_save_time = 0
+                    logged_song_play = False
+                    self.radio_master.initSong(
+                        title = fullTitle,
+                        mp3_song_file_path = song['path'],
+                        current_mixer = AudioPlayer,
+                        current_song_lyrics = str(self.current_song_lyrics)
+                    )
                     
                     while time() - start_time - paused_duration < total_duration:
                         if self.skip_flag.is_set(): break
@@ -1220,6 +1261,12 @@ class MusicPlayer:
                         if time() - last_save_time > 1:
                             self.save_playback_state()
                             last_save_time = time()
+                        if not logged_song_play and not is_first_run and self.song_elapsed_seconds >= abs(total_duration // 2): # If Past Halfway Log song play
+                            logged_artist_name = song['artist']
+                            if logged_artist_name.lower().__contains__("unknown"):
+                                logged_artist_name = song['title'].split("-")[0].strip()
+                            self.recommend.log_song_play(logged_artist_name, song['title'])
+                            logged_song_play = True
                         sleep(0.25)
 
                 except Exception as e:
@@ -1230,6 +1277,7 @@ class MusicPlayer:
                     AudioPlayer.stop()
                     self.current_song = None
                     self.song_elapsed_seconds = 0.0
+                    is_first_run = False
 
             except Exception as e:
                 ll.error(f"Core Player failed with an unhandled exception: {e}")
