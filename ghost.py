@@ -599,10 +599,12 @@ class GhostOverlay:
             action_id = action.get('id')
             if action_id and action.get('modifiable') and action_id in custom_bindings:
                 new_required_keys = custom_bindings[action_id]
-                if isinstance(new_required_keys, list) and len(new_required_keys) == 2 and new_required_keys[0] == 'alt':
-                    action['required'] = new_required_keys
+                if isinstance(new_required_keys, dict):
+                    action['required'] = new_required_keys.get('required', action['required'])
+                    action['alt_needed'] = new_required_keys.get('alt_needed', action.get('alt_needed', True))
                 else:
                     ll.warn(f"Warning: Invalid custom binding for {action_id} in settings file. Using default.")
+                    self.bindings_handler.update_setting(action_id, {'required': action['required'], 'alt_needed': action.get('alt_needed', True)})
 
     def _rebuild_key_maps(self):
         self.all_existing_keys = set()
@@ -839,7 +841,11 @@ class GhostOverlay:
 
         if confirmed:
             action_to_modify['required'] = new_required_keys
-            self.bindings_handler.update_setting(action_to_modify['id'], new_required_keys)
+            settings_to_save = {
+                'required': new_required_keys,
+                'alt_needed': action_to_modify.get('alt_needed', True) 
+            }
+            self.bindings_handler.update_setting(action_to_modify['id'], settings_to_save)
             self._rebuild_key_maps()
             
             if self.key_hints_popup and self.key_hints_popup.winfo_exists():
@@ -867,15 +873,18 @@ class GhostOverlay:
             
     def _on_alt_toggle(self, action):
         """Handles the logic for the 'Alt Not Required' checkbox."""
-        # 1. Update the action's state in memory
         is_alt_needed = not action.get('alt_needed', True)
         action['alt_needed'] = is_alt_needed
-        self.bindings_handler.update_setting(action['alt_needed'], is_alt_needed)
+        settings_to_save = {
+            'required': action.get('required', None),
+            'alt_needed': action.get('alt_needed', True) 
+        }
+        self.bindings_handler.update_setting(action['id'], settings_to_save)
 
-        # 2. Rebuild the key maps with the new setting
+        # Rebuild key maps to reflect the change
         self._rebuild_key_maps()
         
-        # 3. Correctly refresh the hints window
+        # Close and reopen the hints popup to reflect changes
         if self.key_hints_popup and self.key_hints_popup.winfo_exists():
             self.key_hints_popup.destroy()
             self.key_hints_popup = None  # Reset the variable
