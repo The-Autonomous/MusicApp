@@ -281,7 +281,7 @@ class MusicPlayer:
         self.song_elapsed_seconds = 0.0
         self.forward_stack = []
         self.current_index = -1
-        self.current_volume = 0.1
+        self.current_volume = 0.5
         self.navigating_history = False
         
         # Recommendations System
@@ -899,8 +899,8 @@ class MusicPlayer:
             self.current_volume = direction
         else:
             self.current_volume = round(sorted([0.0, self.current_volume + direction, 1.0])[1], 2)
-        AudioPlayer.set_volume(self.current_volume)
-        #ll.debug(f"🔊 {self.current_volume}")
+        AudioPlayer.set_volume(self.current_volume, set_directly=True)
+        ll.debug(f"🔊 {self.current_volume}")
         
     def get_volume(self):
         return self.current_volume
@@ -1187,7 +1187,7 @@ class MusicPlayer:
 
                 try:
                     AudioPlayer.load(song['path'])
-                    AudioPlayer.set_volume(self.current_volume)
+                    AudioPlayer.set_volume(self.current_volume, set_directly=True)
                     
                     # Simplified resume logic - if we're resuming and this is the correct song
                     # In core_player_loop, replace the resume block with:
@@ -1213,10 +1213,9 @@ class MusicPlayer:
                         start_time = time() # Reset start_time after mixer is ready
 
                     # Now update the screen, after the music has actually started
-                    self.set_screen(song['artist'], self.get_display_title())
-
                     total_duration = song["duration"]
                     self.set_duration(0, total_duration)
+                    self.set_screen(song['artist'], self.get_display_title())
                     
                     # Ensure start_time reflects our position
                     start_time = time() - start_pos

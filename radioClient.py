@@ -165,7 +165,7 @@ class RadioClient:
             
             # Apply the volume update if necessary
             if self.AudioPlayer.volume != volume and hasattr(self.AudioPlayer, 'set_volume') and 0 <= volume <= 1:
-                self.AudioPlayer.set_volume(volume)
+                self.AudioPlayer.set_volume(volume, set_directly=True)
 
             if validated_eq == verified_current_eq:
                 #ll.debug("Skipping EQ and Volume update: settings are the same as current for all verified bands.")
@@ -224,7 +224,7 @@ class RadioClient:
             
             # Restore original volume
             if self._original_volume is not None and hasattr(self.AudioPlayer, 'set_volume'):
-                self.AudioPlayer.set_volume(self._original_volume)
+                self.AudioPlayer.set_volume(self._original_volume, set_directly=True)
                 ll.debug(f"Restored volume to {self._original_volume}")
             
             # Clear stored state
