@@ -1069,7 +1069,6 @@ class GhostOverlay:
     def get_gaming_mode(self):
         """Returns the current state of gaming mode."""
         try:
-            print("Checking gaming mode state...")
             return getattr(self, "MusicPlayer", None).get_gaming_mode()
         except Exception as E:
             return False
@@ -1077,7 +1076,6 @@ class GhostOverlay:
     def set_gaming_mode(self, is_gaming_mode: bool):
         """Sets the state of gaming mode and updates the UI."""
         try:
-            print(f"Setting gaming mode to {'ON' if is_gaming_mode else 'OFF'}...")
             getattr(self, "MusicPlayer", None).toggle_gaming_mode(is_gaming_mode)
             self._update_eq_ui_state()
         except Exception as E:

@@ -91,7 +91,7 @@ class AudioPlayerRoot:
         self.channels = 2
         self.chunk_size = 8192
         self.buffer_size_seconds = buffer_size_seconds
-        self.eq = AudioEQ(self.samplerate, self.channels)
+        self.eq = AudioEQ(self.samplerate, self.channels, self.chunk_size)
         self.echo = None  # off by default
         self._gaming_mode = True  # Bypass processing in gaming mode
         
@@ -573,17 +573,13 @@ class AudioPlayerRoot:
                         ll.error(f"FFmpeg error: {stderr_output}")
                     break
                 
-                # CPU-friendly buffer management with adaptive sleep
-                fill_ratio = self._buffer.fill_ratio
-                if fill_ratio >= 0.9:
-                    sleep(0.05)  # Longer sleep when buffer is very full
+                # --- FIX START ---
+                # Simplified buffer management. Only sleep if the buffer is completely full.
+                # This prevents the reader thread from sleeping unnecessarily, which caused buffer underruns.
+                if self._buffer.is_full:
+                    sleep(0.02)
                     continue
-                elif fill_ratio >= 0.7:
-                    sleep(0.02)  # Medium sleep when buffer is getting full
-                    continue
-                elif fill_ratio >= 0.5:
-                    sleep(0.01)  # Short sleep when buffer is moderately full
-                    continue
+                # --- FIX END ---
                 
                 try:
                     # CPU-efficient reading with larger chunks
@@ -668,12 +664,12 @@ class AudioPlayerRoot:
                 f.seek(self._position_frames)
                 
                 while not self._stop_event.is_set():
+                    # --- FIX START ---
+                    # Simplified buffer management. Only sleep if the buffer is completely full.
                     if self._buffer.is_full:
                         sleep(0.02)
                         continue
-                    elif self._buffer.fill_ratio > 0.8:
-                        sleep(0.005)
-                        continue
+                    # --- FIX END ---
                     
                     chunk = f.read(self.chunk_size, dtype=np.float32, always_2d=True)
                     if self.channels == 2 and chunk.shape[1] == 1:      # mono file
