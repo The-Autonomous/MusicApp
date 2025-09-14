@@ -73,7 +73,7 @@ class RadioHost:
         # Routes
         @self.app.route('/')
         def index():
-            master_time = time.time()
+            master_time = time()
             song_started_at = master_time - get_pos()
             
             # Construct the full URL for the song
