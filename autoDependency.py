@@ -468,7 +468,7 @@ class AutoDependencies:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout * 2  # Longer timeout for installations
+                #timeout=self.timeout * 2  # Does not work on Py 3.13
             )
             
             stdout, stderr = process.communicate()
