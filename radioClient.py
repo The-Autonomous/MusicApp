@@ -23,33 +23,55 @@ class TimeSync:
         self.max_samples = 5
     
     def sync_with_host(self, host_ip, port=8080):
-        """Client calls this to sync with host clock"""
+        """Enhanced clock synchronization with multiple samples"""
         if not host_ip or host_ip == "0.0.0.0":
             return False
             
         try:
-            # Take multiple samples for better accuracy
             samples = []
-            for _ in range(3):
-                start = time()
-                response = requests.get(f"http://{host_ip}:{port}/time", timeout=1.0)
-                end = time()
+            
+            # Take 10 samples instead of 3 for better accuracy
+            for i in range(10):
+                start_time = time()
+                response = requests.get(f"http://{host_ip}:{port}/time", timeout=0.5)
+                end_time = time()
                 
                 if response.status_code == 200:
                     host_time = float(response.text)
-                    network_latency = (end - start) / 2
-                    adjusted_host_time = host_time + network_latency
-                    offset = adjusted_host_time - end
-                    samples.append(offset)
+                    round_trip_time = end_time - start_time
+                    
+                    # Estimate one-way latency (half of round trip)
+                    estimated_latency = round_trip_time / 2
+                    
+                    # Adjust host time for network delay
+                    adjusted_host_time = host_time + estimated_latency
+                    
+                    # Calculate offset
+                    offset = adjusted_host_time - end_time
+                    samples.append((offset, round_trip_time))
                 
-                sleep(0.01)  # Small delay between samples
+                if i < 9:  # Don't sleep after last sample
+                    sleep(0.002)  # 2ms between samples
             
             if samples:
-                # Use median to reduce impact of network jitter
-                self.offset = sorted(samples)[len(samples)//2]
+                # Filter out samples with high latency (network jitter)
+                samples.sort(key=lambda x: x[1])  # Sort by round trip time
+                
+                # Use best 50% of samples (lowest latency)
+                best_samples = samples[:len(samples)//2]
+                
+                # Calculate median offset from best samples
+                offsets = [s[0] for s in best_samples]
+                self.offset = sorted(offsets)[len(offsets)//2]
+                
+                avg_latency = sum(s[1] for s in best_samples) / len(best_samples)
                 self.last_sync = time()
-                ll.debug(f"Clock sync: offset={self.offset:.3f}s, samples={len(samples)}")
+                
+                ll.debug(f"Clock sync: offset={self.offset:.4f}s, "
+                        f"avg_latency={avg_latency*1000:.1f}ms, "
+                        f"samples={len(best_samples)}/{len(samples)}")
                 return True
+                
         except Exception as e:
             ll.warn(f"Clock sync failed: {e}")
             
@@ -66,12 +88,6 @@ class TimeSync:
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
         self.client_data = {'radio_text': '', 'radio_text_clean': '', 'radio_duration': [0, 0]} # [current position, total song duration]
-        self.BUFFER_DELAY = 2.0  # Seconds to buffer before starting playback
-        self.SYNC_INTERVAL = 30.0  # How often to resync clocks (seconds)
-        self.DRIFT_TOLERANCE = 0.1  # Max drift before correction (seconds)
-        
-        # Add TimeSync instance
-        self.time_sync = TimeSync()
         self._running = Event()
         self._paused = False
         self._repeat = False
@@ -93,6 +109,16 @@ class RadioClient:
         self._current_song_start_server_pos = 0.0 # The server's position when _current_song_start_time was recorded
         self._total_pause_duration_for_current_song = 0.0 # Accumulated pause time for the current song
         self._pause_start_time = None # Monotonic time when the *current pause* started
+        
+        # Add TimeSync instance
+        self.time_sync = TimeSync()
+        self.BUFFER_DELAY = 2.0  # Seconds to buffer before starting playback
+        self.SYNC_INTERVAL = 2.0  # How often to resync clocks (seconds)
+        self.DRIFT_TOLERANCE = 0.05  # Max drift before correction (seconds)
+        self.latest_drift_time = 0.5 # The latest time for drifting in seconds
+        self.AUDIO_LATENCY_COMPENSATION = 0.25  # Start with observed drift
+        self.SYSTEM_LATENCY_COMPENSATION = 0.0   # Additional system delays
+        self._song_sync_start_time = None 
         
         # FIXED: Add timing synchronization variables
         self._download_start_time = None  # When we started downloading
@@ -467,31 +493,57 @@ class RadioClient:
         server_pos = data['location']
         
         if self._song_sync_start_time and not self._paused:
-            # Calculate expected position based on synchronized time
+            # Calculate expected position with latency compensation
             current_sync_time = self.time_sync.get_synced_time()
             elapsed_time = current_sync_time - self._song_sync_start_time
-            expected_pos = self._current_song_start_server_pos + elapsed_time
+            
+            # Apply latency compensation
+            compensated_elapsed = elapsed_time - self.AUDIO_LATENCY_COMPENSATION
+            expected_pos = self._current_song_start_server_pos + compensated_elapsed
             
             # Apply duration bounds
             if data['duration'] > 0:
                 expected_pos = max(0.0, min(expected_pos, data['duration']))
             
-            # Check for significant drift
+            # Check for significant drift (increase tolerance since we're compensating)
             drift = abs(expected_pos - server_pos)
-            if drift > self.DRIFT_TOLERANCE and drift < data['duration'] - 1.0:
-                ll.debug(f"🔄 Drift detected: expected={expected_pos:.2f}, "
+            self.latest_drift_time = drift
+            if drift > 0.5 and drift < data['duration'] - 1.0:  # Increased from 0.1 to 0.5
+                ll.debug(f"🔄 Major drift detected: expected={expected_pos:.2f}, "
                         f"server={server_pos:.2f}, drift={drift:.2f}")
                 
-                # Resync if drift is significant
-                if drift > 1.0:  # Major drift
+                # Only resync for major drift (> 1 second)
+                if drift > 1.0:
                     self._resync_playback_precise(data['url'], server_pos)
                     expected_pos = server_pos
             
             # Update display position
             self.client_data['radio_duration'][0] = expected_pos
         else:
-            # Fallback to server position if no sync established
+            # Fallback to server position
             self.client_data['radio_duration'][0] = server_pos
+
+    def calibrate_audio_latency(self):
+        """
+        Call this method to calibrate audio latency.
+        Compare the logs to find the exact offset needed.
+        """
+        ll.debug("🎯 CALIBRATION MODE: Monitor drift for 30 seconds to find exact latency")
+        
+        # Temporarily disable drift correction
+        old_tolerance = self.DRIFT_TOLERANCE
+        self.DRIFT_TOLERANCE = 999.0  # Disable corrections
+        
+        # Reset compensation
+        old_compensation = self.AUDIO_LATENCY_COMPENSATION
+        self.AUDIO_LATENCY_COMPENSATION = 0.0
+        
+        def reset_calibration():
+            self.DRIFT_TOLERANCE = old_tolerance
+            self.AUDIO_LATENCY_COMPENSATION = old_compensation
+            ll.debug("🎯 CALIBRATION COMPLETE: Check logs for consistent drift value")
+        
+        Timer(30.0, reset_calibration).start()
 
     def _resync_playback_precise(self, url, target_position):
         """Precise resync using existing temp file"""
@@ -626,12 +678,10 @@ class RadioClient:
                     f"download_time={time_elapsed_during_download:.3f}, "
                     f"corrected_start_pos={corrected_start_pos:.3f}")
 
-            # Play the song with corrected timing - don't pass buffered_at as buffer_time
-            # since it's from a different time system (server vs client monotonic clocks)
             self._current_song_start_time = self.AudioPlayer.radio_play(
                 filepath=self.temp_song_file, 
                 start_pos=corrected_start_pos, 
-                buffer_time=None
+                buffer_time=self.latest_drift_time
             )
             
             self._current_song_start_server_pos = corrected_start_pos # Record the corrected starting point
@@ -673,6 +723,6 @@ class RadioClient:
         self._current_song_start_time = self.AudioPlayer.radio_play(
             filepath=self.temp_song_file, 
             start_pos=corrected_resync_pos, 
-            buffer_time=buffered_at
+            buffer_time=self.latest_drift_time
         )
         self._current_song_start_server_pos = corrected_resync_pos

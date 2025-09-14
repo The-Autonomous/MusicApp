@@ -255,10 +255,10 @@ class AudioPlayerRoot:
             # Radio-mode correction (for sync)
             final_position = start_pos
             if radio_mode and buffer_time is not None:
-                now = monotonic()
-                time_since_buffer = now - buffer_time
-                final_position = start_pos + time_since_buffer
-                ll.debug(f"Radio timing correction: start={start_pos:.3f}, elapsed={time_since_buffer:.3f}, corrected={final_position:.3f}")
+                #now = monotonic()
+                #time_since_buffer = now - buffer_time
+                final_position = start_pos + buffer_time + float(self._duration / 100)
+                #ll.debug(f"Radio timing correction: start={start_pos:.3f}, elapsed={time_since_buffer:.3f}, corrected={final_position:.3f}")
 
             # Set position frames, then perform an immediate seek so demux starts at right place
             self._position_frames = int(final_position * self.samplerate)
