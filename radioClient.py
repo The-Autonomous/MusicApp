@@ -15,9 +15,63 @@ ll = log_loader("Radio Client")
 
 #######################
 
+class TimeSync:
+    def __init__(self):
+        self.offset = 0.0  # Host time - Client time
+        self.last_sync = 0
+        self.sync_samples = []  # Store multiple sync samples for accuracy
+        self.max_samples = 5
+    
+    def sync_with_host(self, host_ip, port=8080):
+        """Client calls this to sync with host clock"""
+        if not host_ip or host_ip == "0.0.0.0":
+            return False
+            
+        try:
+            # Take multiple samples for better accuracy
+            samples = []
+            for _ in range(3):
+                start = time()
+                response = requests.get(f"http://{host_ip}:{port}/time", timeout=1.0)
+                end = time()
+                
+                if response.status_code == 200:
+                    host_time = float(response.text)
+                    network_latency = (end - start) / 2
+                    adjusted_host_time = host_time + network_latency
+                    offset = adjusted_host_time - end
+                    samples.append(offset)
+                
+                sleep(0.01)  # Small delay between samples
+            
+            if samples:
+                # Use median to reduce impact of network jitter
+                self.offset = sorted(samples)[len(samples)//2]
+                self.last_sync = time()
+                ll.debug(f"Clock sync: offset={self.offset:.3f}s, samples={len(samples)}")
+                return True
+        except Exception as e:
+            ll.warn(f"Clock sync failed: {e}")
+            
+        return False
+    
+    def get_synced_time(self):
+        """Get current time synchronized with host"""
+        return time() + self.offset
+    
+    def is_sync_stale(self):
+        """Check if sync is too old and needs refresh"""
+        return time() - self.last_sync > 30.0
+    
 class RadioClient:
     def __init__(self, audio_player, ip: str = ""):
         self.client_data = {'radio_text': '', 'radio_text_clean': '', 'radio_duration': [0, 0]} # [current position, total song duration]
+        self.BUFFER_DELAY = 2.0  # Seconds to buffer before starting playback
+        self.SYNC_INTERVAL = 30.0  # How often to resync clocks (seconds)
+        self.DRIFT_TOLERANCE = 0.1  # Max drift before correction (seconds)
+        
+        # Add TimeSync instance
+        self.time_sync = TimeSync()
         self._running = Event()
         self._paused = False
         self._repeat = False
@@ -80,9 +134,14 @@ class RadioClient:
         ll.debug(f"Generated {duration_ms}ms of static noise (Samplerate: {samplerate}, Channels: {channels}, Frames: {num_frames}).")
         return self.AudioPlayer.load_static_sound(static_data, self.AudioPlayer.samplerate, self.AudioPlayer.channels)
 
-    def listenTo(self, ip, lyric_callback = None):
+    def listenTo(self, ip, lyric_callback=None):
         self._ip = ip
         self._callback = lyric_callback
+        
+        # Initial time sync
+        if ip and ip != "0.0.0.0":
+            self.time_sync.sync_with_host(ip)
+        
         if not self._running.is_set():
             if os.path.exists(self.temp_song_file):
                 try:
@@ -253,22 +312,32 @@ class RadioClient:
         
     def _update_loop(self):
         first_run = True
+        last_sync_check = 0
+        
         while self._running.is_set():
-            server_pos, data = -1.0, None
             try:
+                # Periodic time synchronization
+                current_time = time.time()
+                if current_time - last_sync_check > self.SYNC_INTERVAL:
+                    self.time_sync.sync_with_host(self._ip)
+                    last_sync_check = current_time
+                
+                # Get server data
                 data = self._fetch_data()
                 if not data:
                     ll.warn("No data received from radio host. Retrying...")
                     sleep(self.update_interval)
                     continue
 
+                # Apply host EQ if enabled
                 if self._accept_host_eq:
                     self._apply_host_eq(data['eq'], data['volume'])
-                    
+                
                 server_pos = data['location']
-
                 is_paused = data['paused']
-                if first_run: # Horrid Spaghetti to ensure first run sets repeat state
+                
+                # Handle first run repeat state setup
+                if first_run:
                     self._repeat = False
                     first_run = False
                 else:
@@ -277,72 +346,177 @@ class RadioClient:
                 # Handle pause/unpause state transitions
                 if is_paused and not self._paused:
                     self.AudioPlayer.pause()
-                    self._pause_start_time = monotonic()
+                    self._pause_start_time = self.time_sync.get_synced_time()
                     self._paused = True
+                    ll.debug("Paused playback")
 
                 elif not is_paused and self._paused:
                     self.AudioPlayer.unpause()
                     if self._pause_start_time is not None:
-                        # Add total duration of that completed pause
-                        self._total_pause_duration_for_current_song += (
-                            monotonic() - self._pause_start_time
-                        )
+                        pause_duration = self.time_sync.get_synced_time() - self._pause_start_time
+                        self._total_pause_duration_for_current_song += pause_duration
                     self._pause_start_time = None
                     self._paused = False
+                    ll.debug("Resumed playback")
 
-                # Handle song change
+                # Handle song changes
                 if data['title'] != self.client_data['radio_text_clean']:
-                    self._total_pause_duration_for_current_song = 0.0
-                    self._pause_start_time = None
-                    self._paused = False
-                    self._current_song_start_time = None
-                    self._current_song_start_server_pos = 0.0
-                    self._handle_song_change(data)
+                    self._reset_song_timing()
+                    self._handle_song_change_synced(data)
 
-                # Update title/duration
+                # Update display info
                 self._update_radio_title(data['title'], data['duration'])
 
-                # Playback position logic
-                client_pos = self.client_data['radio_duration'][0]  # keep last known by default
-                if self._current_song_start_time is not None and not self._paused:
-                    elapsed_active_time = (
-                        (monotonic() - self._current_song_start_time)
-                        - self._total_pause_duration_for_current_song
-                    )
-                    client_pos = self._current_song_start_server_pos + elapsed_active_time
-
-                    # Clamp
-                    if data['duration'] > 0:
-                        client_pos = min(client_pos, data['duration'])
-                        client_pos = max(client_pos, 0.0)
-
-                    # Re-sync if drift detected
-                    if (
-                        abs(client_pos - server_pos) > self.sync_threshold
-                        and abs(client_pos - server_pos)
-                        <= data['duration'] - self.sync_threshold
-                    ):
-                        ll.debug(
-                            f"🔄 Resyncing due to drift: "
-                            f"Client {client_pos:.2f}s, Server {server_pos:.2f}s "
-                            f"(Diff: {abs(client_pos - server_pos):.2f}s)"
-                        )
-                        self._resync_playback(data['url'], server_pos, data['buffered_at'])
-                        client_pos = server_pos  # snap after resync
-
-                # Update display position
-                self.client_data['radio_duration'][0] = client_pos
-                
+                # Calculate and update position with sync correction
+                self._update_position_with_sync(data)
+                    
             except requests.exceptions.ConnectionError:
-                ll.warn(
-                    f"Connection to radio host at {self._ip} lost. Retrying in {self.update_interval}s..."
-                )
-                self.AudioPlayer.pause()
-                self._paused = True
+                ll.warn(f"Connection to radio host at {self._ip} lost. Retrying...")
+                if not self._paused:
+                    self.AudioPlayer.pause()
+                    self._paused = True
             except Exception as e:
                 ll.error(f"Error in _update_loop: {e}")
 
             sleep(self.update_interval)
+            
+    def _reset_song_timing(self):
+        """Reset all timing variables for a new song"""
+        self._total_pause_duration_for_current_song = 0.0
+        self._pause_start_time = None
+        self._paused = False
+        self._current_song_start_time = None
+        self._current_song_start_server_pos = 0.0
+
+    def _handle_song_change_synced(self, data):
+        """Handle song changes with precise timing synchronization"""
+        ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s")
+        
+        # Update client data immediately
+        self._update_radio_title(data['title'], data['duration'])
+        
+        # Record when we received this data (in synchronized time)
+        data_received_time = self.time_sync.get_synced_time()
+        
+        # Start download with timing info
+        Thread(target=self._download_and_play_synced, 
+            args=(data['url'], data['location'], data_received_time), 
+            daemon=True).start()
+
+    def _download_and_play_synced(self, url, server_location, data_received_time):
+        """Download and play with precise timing synchronization"""
+        try:
+            if not self._running.is_set():
+                return
+
+            # Stop current playback
+            if self.AudioPlayer.get_busy():
+                self.AudioPlayer.stop()
+
+            ll.debug(f"Downloading: {url}")
+            
+            # Record download start time
+            download_start = self.time_sync.get_synced_time()
+            
+            # Download the file (your existing download code)
+            os.makedirs(os.path.dirname(self.temp_song_file), exist_ok=True)
+            
+            for attempt in range(3):
+                try:
+                    response = requests.get(url, stream=True, timeout=10)
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    ll.error(f"Download attempt {attempt + 1} failed: {e}")
+                    if attempt == 2:
+                        raise
+                    sleep(1)
+
+            with open(self.temp_song_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if not self._running.is_set():
+                        return
+                    f.write(chunk)
+            
+            # Calculate timing correction
+            download_end = self.time_sync.get_synced_time()
+            total_delay = download_end - data_received_time
+            corrected_start_pos = server_location + total_delay
+            
+            ll.debug(f"Timing: server_pos={server_location:.3f}, "
+                    f"download_delay={total_delay:.3f}, "
+                    f"corrected_start={corrected_start_pos:.3f}")
+
+            # Start playback with corrected position
+            self._current_song_start_time = self.AudioPlayer.radio_play(
+                filepath=self.temp_song_file,
+                start_pos=corrected_start_pos
+            )
+            
+            # Record timing for position tracking
+            self._current_song_start_server_pos = corrected_start_pos
+            self._song_sync_start_time = self.time_sync.get_synced_time()
+            
+            ll.debug(f"Started playback at {corrected_start_pos:.2f}s")
+
+        except Exception as e:
+            ll.error(f"Error in synchronized download/play: {e}")
+
+    def _update_position_with_sync(self, data):
+        """Update position display with drift correction"""
+        server_pos = data['location']
+        
+        if self._song_sync_start_time and not self._paused:
+            # Calculate expected position based on synchronized time
+            current_sync_time = self.time_sync.get_synced_time()
+            elapsed_time = current_sync_time - self._song_sync_start_time
+            expected_pos = self._current_song_start_server_pos + elapsed_time
+            
+            # Apply duration bounds
+            if data['duration'] > 0:
+                expected_pos = max(0.0, min(expected_pos, data['duration']))
+            
+            # Check for significant drift
+            drift = abs(expected_pos - server_pos)
+            if drift > self.DRIFT_TOLERANCE and drift < data['duration'] - 1.0:
+                ll.debug(f"🔄 Drift detected: expected={expected_pos:.2f}, "
+                        f"server={server_pos:.2f}, drift={drift:.2f}")
+                
+                # Resync if drift is significant
+                if drift > 1.0:  # Major drift
+                    self._resync_playback_precise(data['url'], server_pos)
+                    expected_pos = server_pos
+            
+            # Update display position
+            self.client_data['radio_duration'][0] = expected_pos
+        else:
+            # Fallback to server position if no sync established
+            self.client_data['radio_duration'][0] = server_pos
+
+    def _resync_playback_precise(self, url, target_position):
+        """Precise resync using existing temp file"""
+        ll.debug(f"Precise resync to {target_position:.2f}s")
+        
+        try:
+            # Stop current playback
+            self.AudioPlayer.stop()
+            
+            # Reset timing variables
+            self._total_pause_duration_for_current_song = 0.0
+            self._pause_start_time = None
+            
+            # Start playback at target position
+            self._current_song_start_time = self.AudioPlayer.radio_play(
+                filepath=self.temp_song_file,
+                start_pos=target_position
+            )
+            
+            # Update sync timing
+            self._current_song_start_server_pos = target_position
+            self._song_sync_start_time = self.time_sync.get_synced_time()
+            
+        except Exception as e:
+            ll.error(f"Precise resync failed: {e}")
             
     def _fetch_data(self):
         try:
@@ -392,17 +566,22 @@ class RadioClient:
             return None
 
     def _handle_song_change(self, data):
-        ll.debug(f"🎵 New song: {data['title']} at server position: {data['location']:.2f}s, buffered at: {data['buffered_at']:.2f}s")
+        # Download immediately but don't play yet
+        self._pre_download_song(data['url'])
         
-        # Update client data
-        self._update_radio_title(data['title'], data['duration'])
-
-        # FIXED: Record timing when we start the download/play process
-        self._download_start_time = monotonic()
-        self._server_time_at_download = data['buffered_at']
-
-        # Download the new song in a separate thread
-        Thread(target=self._download_and_play, args=(data['url'], data['location'], data['buffered_at']), daemon=True).start()
+        # Calculate exact start time accounting for download
+        target_start_time = data['buffered_at'] + self.BUFFER_DELAY
+        current_time = self.time_sync.get_synced_time()
+        
+        if current_time < target_start_time:
+            # We have time to buffer
+            delay = target_start_time - current_time
+            Timer(delay, self._start_synchronized_playback, 
+                args=[data['location']]).start()
+        else:
+            # We're late, start immediately with position correction
+            corrected_pos = data['location'] + (current_time - target_start_time)
+            self._start_synchronized_playback(corrected_pos)
 
     def _download_and_play(self, url, server_location, buffered_at):
         try:

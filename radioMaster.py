@@ -1,11 +1,11 @@
-import os, socket, psutil, threading
+import os, socket, psutil, threading, requests
 from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
 from waitress import serve
 from mutagen.mp3 import MP3 # Import MP3 to get audio duration
 from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
 from itertools import islice
-from time import sleep, monotonic
+from time import sleep, monotonic, time
 
 try:
     from log_loader import log_loader, OutputRedirector
@@ -20,6 +20,30 @@ ll = log_loader("Radio Master")
 
 #######################
 
+class TimeSync:
+    def __init__(self):
+        self.offset = 0.0  # Host time - Client time
+        self.last_sync = 0
+    
+    def sync_with_host(self, host_ip):
+        """Client calls this to sync with host clock"""
+        try:
+            start = time()
+            response = requests.get(f"http://{host_ip}:8080/time")
+            end = time()
+            
+            host_time = float(response.text)
+            network_latency = (end - start) / 2
+            adjusted_host_time = host_time + network_latency
+            
+            self.offset = adjusted_host_time - end
+            self.last_sync = time()
+        except:
+            pass
+    
+    def get_synced_time(self):
+        return time() + self.offset
+    
 class RadioHost:
     def __init__(self, player, port=8080, ip=None, fake_load=False):
         # Flask app setup
@@ -49,6 +73,9 @@ class RadioHost:
         # Routes
         @self.app.route('/')
         def index():
+            master_time = time.time()
+            song_started_at = master_time - get_pos()
+            
             # Construct the full URL for the song
             song_url = f"http://{self._get_local_ip()}:{port}/song"
             eq_data = self.MusicPlayer.get_bands() if hasattr(self.MusicPlayer, 'get_bands') else {}
@@ -56,6 +83,8 @@ class RadioHost:
 
             resp = make_response(
                 f"<title>{self.current_data['title']}</title>"
+                f"<master_time>{master_time}</master_time>"
+                f"<song_start_time>{song_started_at}</song_start_time>"
                 f"<paused>{self.MusicPlayer.pause_event.is_set()}</paused>"
                 f"<repeat>{self.MusicPlayer.repeat_event.is_set()}</repeat>"
                 f"<eq>{eq_string}</eq>"
@@ -116,6 +145,10 @@ class RadioHost:
             # raw_results is list of (title, path)
             results = [{ 'title': title, 'path': path } for title, path in raw_results]
             return jsonify({ 'code': 'success', 'results': results })
+        
+        @self.app.route('/time')
+        def get_time():
+            return str(time())
         
         @self.app.route('/action', methods=['POST'])
         def handle_action():

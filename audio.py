@@ -135,10 +135,10 @@ class RobustAudioBuffer:
             self._closed = True
 
 class AudioPlayerRoot:
-    def __init__(self, buffer_size_seconds: float = 3.0):
+    def __init__(self, buffer_size_seconds: float = 0.5):
         self.samplerate = 44100
         self.channels = 2
-        self.chunk_size = 1024  # Small chunks for low latency
+        self.chunk_size = 512  # Small chunks for low latency
         self.buffer_size_seconds = buffer_size_seconds
         self.eq = AudioEQ(self.samplerate, self.channels, self.chunk_size)
         self.echo = None

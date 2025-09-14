@@ -1582,6 +1582,7 @@ class GhostOverlay:
         self.search_overlay.deiconify()
         self.search_overlay.lift()
         self.search_overlay.grab_set()
+        results_frame.focus()
         search_entry.focus_force()
         
         if search_recommendation != "":
