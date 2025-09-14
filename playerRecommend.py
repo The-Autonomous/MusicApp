@@ -152,6 +152,34 @@ class PlayerRecommender:
             
         return artist_totals.most_common(top_n)
 
+    def analyze_top_songs(self, top_n: int = 5) -> list:
+        """
+        Analyzes the full play history to find the songs with the most listens.
+
+        Args:
+            top_n (int): The number of top songs to return.
+
+        Returns:
+            list: A list of tuples, where each tuple is (song_name, total_plays, artist_name),
+                  sorted in descending order of plays.
+        """
+        if not self.song_plays:
+            ll.print("No play history available to analyze.")
+            return []
+
+        song_totals = Counter()
+        song_to_artist = {}
+        
+        for artist, songs in self.song_plays.items():
+            for song, plays in songs.items():
+                song_totals[song] += plays
+                song_to_artist[song] = artist
+                
+        top_songs = song_totals.most_common(top_n)
+        
+        # Return list of tuples (song_name, total_plays, artist_name)
+        return [(song, plays, song_to_artist[song]) for song, plays in top_songs]
+
     def suggest_search_terms(self, current_query: str = "", top_n: int = 5) -> list:
         """
         Suggests other potential search terms based on the most frequently
@@ -180,48 +208,42 @@ class PlayerRecommender:
                 break
                 
         return suggestions
+    
+    def suggest_search_terms_str(self):
+        return " ".join([suggestion.title() for suggestion in self.suggest_search_terms(current_query="", top_n=2)])
 
 
 if __name__ == "__main__":
     # Use the OutputRedirector context manager to handle logging to a file
     with OutputRedirector(enable_dual_logging=True):
-        ll.print("--- Starting Player Recommender Demo ---")
-        
         # Initialize the recommender. It will automatically load previous data if it exists.
         recommender = PlayerRecommender()
 
-        # --- Log some song plays ---
-        ll.print("\n--- Logging Song Plays ---")
-        recommender.log_song_play("Led Zeppelin", "Stairway to Heaven")
-        recommender.log_song_play("Pink Floyd", "Comfortably Numb")
-        recommender.log_song_play("Led Zeppelin", "Kashmir")
-        recommender.log_song_play("Led Zeppelin", "Stairway to Heaven") # Second play
-        recommender.log_song_play("Queen", "Bohemian Rhapsody")
-        recommender.log_song_play("pink floyd ", "Wish You Were Here") # Test normalization
-        
-        # --- Log some searches ---
-        ll.print("\n--- Logging Searches ---")
-        recommender.log_search("best classic rock bands")
-        recommender.log_search("70s rock essentials")
-        recommender.log_search("live rock concerts")
-
         # --- Perform Analysis ---
-        ll.print("\n--- Analyzing Listening Habits ---")
-        top_artists = recommender.analyze_top_artists(top_n=3)
+        ll.print("\n--- Analyzing Artist Playing Habits ---")
+        top_artists = recommender.analyze_top_artists(top_n=20)
         
         if top_artists:
             print("\nYour Top Artists:")
             for i, (artist, plays) in enumerate(top_artists, 1):
-                # Capitalize for display purposes
                 print(f"  {i}. {artist.title()} ({plays} total plays)")
+                
+        ll.print("\n--- Analyzing Song Playing Habits ---")
+        top_songs = recommender.analyze_top_songs(top_n=20)
         
-        # --- Get Search Suggestions ---
-        ll.print("\n--- Generating Search Suggestions ---")
-        suggestions = recommender.suggest_search_terms(current_query="bands like Queen", top_n=3)
+        if top_songs:
+            print("\nYour Top Artists:")
+            for i, (song, plays, artist) in enumerate(top_songs, 1):
+                print(f"  {i}. {song.title()} by {artist.title()} ({plays} total plays)")
         
-        if suggestions:
-            print("\nBased on your history, you might also want to search for:")
-            for term in suggestions:
-                print(f"  - {term}")
-
-        ll.print("\n--- Demo Complete ---")
+        ll.print(f"Recommended Search Term: {recommender.suggest_search_terms_str()}")
+        
+        while True:
+            # --- Get Search Suggestions ---
+            ll.print("\n--- Generating Search Suggestions ---")
+            suggestions = recommender.suggest_search_terms(current_query=input(">>> "), top_n=3)
+            
+            if suggestions:
+                print("\nBased on your history, you might also want to search for:")
+                for term in suggestions:
+                    print(f"  - {term}")

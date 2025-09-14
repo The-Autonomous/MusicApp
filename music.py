@@ -216,7 +216,7 @@ class SmartShuffler:
 class MusicPlayer:
     SAVE_STATE_FILE = ".musicapp_state.json"
     
-    def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips, fast_load: bool = False, fast_load_limit: int = 20):
+    def __init__(self, directories, set_screen, set_duration, set_lyrics, set_ips, is_afk, fast_load: bool = False, fast_load_limit: int = 20):
         # Fast Load Mode
         self.fast_load_limit = fast_load_limit
         
@@ -248,6 +248,7 @@ class MusicPlayer:
         self.set_duration = set_duration
         self.set_lyrics = set_lyrics
         self.set_ips = set_ips
+        self.is_afk = is_afk
 
         # Initialize YouTube
         self.ytHandle = ytHandle(video_name_callback=self.current_video.set)
@@ -1215,6 +1216,7 @@ class MusicPlayer:
                     self.set_screen(song['artist'], self.get_display_title())
 
                     total_duration = song["duration"]
+                    self.set_duration(0, total_duration)
                     
                     # Ensure start_time reflects our position
                     start_time = time() - start_pos
@@ -1253,6 +1255,15 @@ class MusicPlayer:
                                 current_mixer = AudioPlayer,
                                 current_song_lyrics = str(self.current_song_lyrics)
                             )
+                            if not logged_song_play and not is_first_run and self.song_elapsed_seconds >= abs(total_duration // 2): # If Past Halfway Log song play
+                                logged_artist_name = song['artist']
+                                if logged_artist_name.lower().__contains__("unknown"):
+                                    logged_artist_name = song['title'].split("-")[0].strip()
+                                if self.is_afk():
+                                    ll.debug(f"User AFK - Skipping Logging Of Play For '{logged_artist_name}'")
+                                else:
+                                    self.recommend.log_song_play(logged_artist_name, song['title'])
+                                logged_song_play = True
                             
                         current_rotation_count += 0.5 # Add One Else Loop Back
                         self.song_elapsed_seconds = time() - start_time - paused_duration
@@ -1261,12 +1272,6 @@ class MusicPlayer:
                         if time() - last_save_time > 1:
                             self.save_playback_state()
                             last_save_time = time()
-                        if not logged_song_play and not is_first_run and self.song_elapsed_seconds >= abs(total_duration // 2): # If Past Halfway Log song play
-                            logged_artist_name = song['artist']
-                            if logged_artist_name.lower().__contains__("unknown"):
-                                logged_artist_name = song['title'].split("-")[0].strip()
-                            self.recommend.log_song_play(logged_artist_name, song['title'])
-                            logged_song_play = True
                         sleep(0.25)
 
                 except Exception as e:

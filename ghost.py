@@ -1,4 +1,4 @@
-import ctypes, os
+import ctypes, os, random
 import tkinter as tk
 from tkinter import font, messagebox, ttk
 from threading import Lock, RLock, Thread
@@ -262,6 +262,11 @@ class MouseTracker:
         self._right_button_pressed = False
         self._last_right_press_pos = None  # Stores coordinates of the last press
         self.window_proportions = [0, 0, 0, 0]
+        self.mouse_tracking = {
+            'CurrentPosition': (0, 0),
+            'LastCheckedTime': monotonic(),
+            "AFKTimeout": 60*60 # 1 hour in seconds
+        }
         
         self.listener = mouse.Listener(
             on_click=self._on_click,
@@ -300,6 +305,10 @@ class MouseTracker:
             _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
         pt = POINT()
         self.user32.GetCursorPos(ctypes.byref(pt))
+        prevPosition = self.mouse_tracking['CurrentPosition'] # Log The Current Position
+        self.mouse_tracking['CurrentPosition'] = (pt.x, pt.y) # Set It To The New Position
+        if self.mouse_tracking['CurrentPosition'] != prevPosition: # If They Dont Match
+            self.mouse_tracking['LastCheckedTime'] = monotonic() # Update The Last Time The Mouse Moved
         return [pt.x, pt.y]
 
     def is_right_mouse_down(self):
@@ -1249,8 +1258,24 @@ class GhostOverlay:
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
         if self._was_main_overlay_open_before_search:
             self.close_overlay()
-            
-        search_recommendation = getattr(self, 'MusicPlayer', None).recommend.analyze_top_artists(top_n=1)[0][0].title() if hasattr(self, 'MusicPlayer') else ""
+        
+        search_recommendation = ""
+        if hasattr(self, 'MusicPlayer'):
+            searching_mechanism = self.MusicPlayer.recommend
+            type_to_search = random.choice(['song', 'artist', 'search_history'])
+            if type_to_search == 'song':
+                search_result = random.choice(searching_mechanism.analyze_top_songs(top_n=5))
+                clean_song_title = self.TitleCleaner.clean(search_result[0])
+                split_song = clean_song_title.split(" - ", 1)
+                if len(split_song) == 2:
+                    search_recommendation = f"{split_song[1]} By {search_result[2]}".title()
+                else:
+                    search_recommendation = f"{clean_song_title} By {search_result[2]}".title()
+            elif type_to_search == 'artist':
+                search_result = random.choice(searching_mechanism.analyze_top_artists(top_n=5))
+                search_recommendation = search_result[0].title()
+            elif type_to_search == 'search_history':
+                search_recommendation = searching_mechanism.suggest_search_terms_str()
 
         # --- Search UI Setup ---
         self.search_overlay = tk.Toplevel(self.root)
@@ -1454,16 +1479,16 @@ class GhostOverlay:
                 if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
                     self.search_overlay.after(0, _update_ui_with_results, raw_results)
 
-        def _trigger_search():
+        def _trigger_search(forced_term: str = None, dont_log: bool = False):
             if self._is_searching == True: return
-            search_term = search_var.get().strip()
+            search_term = forced_term or search_var.get().strip()
             if not search_term:
-                results_list.delete(0, tk.END)
-                current_results.clear()
+                #results_list.delete(0, tk.END)
+                #current_results.clear()
                 return
 
             _start_search_spinner()
-            Thread(target=_search_thread_target, args=(search_term,), daemon=True).start()
+            Thread(target=_search_thread_target, args=(search_term,dont_log,), daemon=True).start()
 
         def youtube_command():
             if hasattr(self, 'MusicPlayer'):
@@ -1562,7 +1587,8 @@ class GhostOverlay:
         search_entry.focus_force()
         
         if search_recommendation != "":
-            Thread(target=_search_thread_target, args=(search_recommendation, True,), daemon=True).start()
+            ll.print(f"Search recommendation: {search_recommendation}")
+            Thread(target=_trigger_search, args=(search_recommendation, True,), daemon=True).start()
 
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
@@ -1684,8 +1710,8 @@ class GhostOverlay:
     def reboot_overlay(self):
         """Reboot the overlay, closing and reopening it."""
         if messagebox.askyesno(
-            "Reboot Overlay",
-            "Are you sure you want to reboot the Music Player?\nThis will restart the everything and you may lose the song you are actively listening to!"
+            "Restart Music Player",
+            "Are you sure you want to restart the Music Player?"
         ):
             try:
                 from adminRaise import Administrator
@@ -1742,6 +1768,7 @@ class GhostOverlay:
                     ctypes.windll.user32.SetFocus(hwnd)
                     ctypes.windll.user32.BringWindowToTop(hwnd)
                     
+                    # Simulate a right-click to ensure the window is focused and draggable.
                     mouse_controller = mouse.Controller()
                     mouse_controller.press(mouse.Button.right); mouse_controller.release(mouse.Button.right)
                     mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
@@ -2002,6 +2029,9 @@ class GhostOverlay:
             if self.player_metric['player_text'] == text: return
             self.player_metric['player_text'] = text
         self.schedule_update()
+        
+    def is_afk(self) -> bool:
+        return abs(monotonic() - self.mouseEvents.mouse_tracking["LastCheckedTime"]) >= self.mouseEvents.mouse_tracking["AFKTimeout"]
                 
     def set_duration(self, current_seconds: float, total_seconds: float):
         def format_time(seconds):

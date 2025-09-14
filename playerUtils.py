@@ -150,6 +150,7 @@ class MusicOverlayController:
             set_duration=self._update_duration,
             set_lyrics=self._update_lyrics,
             set_ips=self._update_ips,
+            is_afk=self.is_afk,
             fast_load=fast_load,
         )
         overlay.MusicPlayer = self.player
@@ -217,6 +218,9 @@ class MusicOverlayController:
         self.overlay.toggle_lyrics(show)
         if lyrics:
             self.overlay.set_lyrics(lyrics)
+    
+    def is_afk(self) -> bool:
+        return self.overlay.is_afk()
         
     def _update_ips(self, ip_list):
         self.overlay.set_radio_ips(ip_list)
