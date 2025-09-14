@@ -1,16 +1,34 @@
 import json, os, atexit
 import numpy as np
 from threading import Lock
-from scipy.signal import sosfilt, sosfilt_zi, get_window # Kept for AudioEcho and now used for windowing
-from math import sin, cos, pi, radians, atan2, degrees, log10
+from scipy.signal import get_window
+from math import sin, cos, radians, atan2, degrees
 import tkinter as tk
 from time import time
 
+try:
+    from log_loader import log_loader
+except:
+    from .log_loader import log_loader
+    
+###################################
+    
+ll = log_loader("Music Player")
+
+###################################
+
+# Get PyFFTW
+try:
+    import pyfftw
+    _HAVE_PYFFTW = True
+except Exception:
+    import numpy.fft as npfft
+    _HAVE_PYFFTW = False
+
 class AudioEQ:
     """
-    High-performance 10-band graphic equalizer using FFT.
-    This implementation replaces a series of CPU-intensive biquad filters
-    with a much more efficient frequency-domain approach.
+    High-performance 10-band graphic equalizer using FFT overlap-add.
+    Uses pyFFTW with planned transforms if available, falls back to numpy.fft.
     """
 
     SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "musicapp_eq.json")
@@ -19,140 +37,168 @@ class AudioEQ:
     def __init__(self, samplerate: int, channels: int, chunk_size: int, gains_db=None):
         self.sr = int(samplerate)
         self.ch = int(channels)
-        self.chunk_size = chunk_size
+        self.chunk_size = int(chunk_size)
         self.lock = Lock()
 
-        # FFT processing parameters for overlap-add method
-        self._fft_size = chunk_size * 2  # Use 2x chunk size for FFT to handle overlap
-        self._hop_size = chunk_size      # Step size is the original chunk size
-        self._window = get_window('hann', self._fft_size, fftbins=True)
+        # FFT/OLA params
+        self._hop_size = self.chunk_size
+        self._fft_size = self._hop_size * 2  # 50% overlap
+        self._window = get_window("hann", self._fft_size, fftbins=True).astype(np.float32)
 
-        # 🔑 Normalize window for perfect overlap-add reconstruction
-        self._window /= np.sum(self._window) / self._hop_size
+        # Normalize window for perfect overlap-add
+        norm_factor = np.sum(self._window) / float(self._hop_size)
+        self._window /= norm_factor
 
-        # Overlap buffer, needs to match channel count
+        # Buffers
         self._overlap = np.zeros((self._hop_size, self.ch), dtype=np.float32)
+        self._input_buffer = np.zeros((self._fft_size, self.ch), dtype=np.float32)
 
-        # Pre-calculate frequency bins for the FFT
-        self._freq_bins = np.fft.rfftfreq(self._fft_size, d=1./self.sr)
-        
-        # Load persisted gains (if user didn't explicitly pass gains_db)
+        # Frequency bins
+        self._rfft_bins = self._fft_size // 2 + 1
+        self._freq_bins = np.fft.rfftfreq(self._fft_size, d=1.0 / self.sr)
+
+        # FFT implementation
+        if _HAVE_PYFFTW:
+            # Build FFTW plans once
+            self._fft_in = pyfftw.empty_aligned((self._fft_size, self.ch), dtype="float32")
+            self._fft_out = pyfftw.empty_aligned((self._rfft_bins, self.ch), dtype="complex64")
+
+            self._plan_rfft = pyfftw.builders.rfft(
+                self._fft_in,
+                axis=0,
+                threads=os.cpu_count(),
+                planner_effort="FFTW_MEASURE",
+                overwrite_input=True
+            )
+            self._plan_irfft = pyfftw.builders.irfft(
+                self._fft_out,
+                n=self._fft_size,
+                axis=0,
+                threads=os.cpu_count(),
+                planner_effort="FFTW_MEASURE"
+            )
+        else:
+            # Fallback to numpy.fft
+            self._plan_rfft = lambda x: npfft.rfft(x, axis=0)
+            self._plan_irfft = lambda X: npfft.irfft(X, n=self._fft_size, axis=0)
+
+        # Load gains
         if os.path.isfile(self.SETTINGS_FILE):
             loaded = self._load_settings()
             gains_db = [loaded.get(str(f), 0.0) for f in self.ISO_BANDS]
         else:
             gains_db = gains_db or [0.0] * len(self.ISO_BANDS)
-        
+
         self.gains_db = list(map(float, gains_db))
-        self._gain_curve = None # This will hold the calculated frequency response
+        self._gain_curve = None
         self._rebuild_gain_curve()
 
         atexit.register(self._save_settings)
 
-    # ---------- Public API (remains compatible with old version) ----------
+        # Debug info
+        if _HAVE_PYFFTW:
+            ll.debug(f"AudioEQ: Using pyFFTW ({os.cpu_count()} threads)")
+        else:
+            ll.debug("AudioEQ: Using numpy.fft fallback")
+
+    def reset_state(self):
+        """Clear overlap and input buffers to avoid bleed from previous track."""
+        with self.lock:
+            self._overlap.fill(0.0)
+            self._input_buffer.fill(0.0)
+
+    # ---------- Public API ----------
     def set_gain(self, freq_hz: int, gain_db: float):
-        """Set gain (dB) for the band and rebuild the FFT gain curve."""
         with self.lock:
             try:
                 idx = self.ISO_BANDS.index(freq_hz)
                 self.gains_db[idx] = float(gain_db)
                 self._rebuild_gain_curve()
             except ValueError:
-                # Frequency not in our ISO bands, ignore it
                 pass
 
     def get_gains(self) -> dict:
-        """Returns a dictionary of the current band gains."""
         return dict(zip(self.ISO_BANDS, self.gains_db))
 
     def get_band(self, freq_hz: int, default: float = 0.0) -> float:
-        """Return gain in dB for one centre frequency."""
         return self.get_gains().get(freq_hz, default)
 
+    # ---------- Core processing ----------
     def process(self, chunk: np.ndarray) -> np.ndarray:
-        """
-        Processes an audio chunk using proper overlap-add FFT.
-        Always returns hop_size samples, no skips.
-        """
-        if chunk.size == 0:
-            return chunk
+        if chunk is None or chunk.size == 0:
+            return np.zeros((0, self.ch), dtype=np.float32)
 
+        # Ensure shape (n, ch)
         if chunk.ndim == 1 and self.ch > 1:
             chunk = np.column_stack([chunk] * self.ch)
+        elif chunk.ndim == 1:
+            chunk = chunk.reshape(-1, 1)
 
         if chunk.shape[0] < self._hop_size:
-            padding = np.zeros((self._hop_size - chunk.shape[0], self.ch), dtype=np.float32)
-            chunk = np.vstack((chunk, padding))
+            pad_len = self._hop_size - chunk.shape[0]
+            pad = np.zeros((pad_len, self.ch), dtype=np.float32)
+            chunk = np.vstack((chunk, pad))
+
+        chunk = chunk.astype(np.float32, copy=False)
 
         with self.lock:
-            # --- Step 1: maintain rolling buffer ---
-            if not hasattr(self, "_input_buffer"):
-                self._input_buffer = np.zeros((self._fft_size, self.ch), dtype=np.float32)
-            
-            # shift left by hop_size
+            # Slide input buffer
             self._input_buffer[:-self._hop_size] = self._input_buffer[self._hop_size:]
-            # append new chunk at the end
             self._input_buffer[-self._hop_size:] = chunk
 
-            # --- Step 2: window ---
+            # Apply window
             fft_buffer = self._input_buffer * self._window[:, None]
 
-            # --- Step 3: FFT ---
-            freq_domain_data = np.fft.rfft(fft_buffer, axis=0)
+            # FFT
+            if _HAVE_PYFFTW:
+                self._fft_in[:] = fft_buffer
+                freq_domain = self._plan_rfft()
+            else:
+                freq_domain = self._plan_rfft(fft_buffer)
 
-            # --- Step 4: EQ ---
-            freq_domain_data *= self._gain_curve[:, None]
+            # Apply EQ
+            freq_domain *= self._gain_curve[:, None]
 
-            # --- Step 5: iFFT ---
-            time_domain_data = np.fft.irfft(freq_domain_data, axis=0)
+            # iFFT
+            if _HAVE_PYFFTW:
+                self._fft_out[:] = freq_domain
+                time_domain = self._plan_irfft()
+            else:
+                time_domain = self._plan_irfft(freq_domain)
 
-            # --- Step 6: overlap-add reconstruction ---
-            output_chunk = time_domain_data[:self._hop_size] + self._overlap
-            self._overlap = time_domain_data[self._hop_size:]
+            # Overlap-add
+            out = time_domain[:self._hop_size] + self._overlap
+            self._overlap = time_domain[self._hop_size:].astype(np.float32, copy=True)
 
-            # --- Step 7: clip ---
-            np.clip(output_chunk, -1.0, 1.0, out=output_chunk)
-            return output_chunk.astype(np.float32)
+            # Clip
+            np.clip(out, -1.0, 1.0, out=out)
+            return out.astype(np.float32, copy=False)
 
-    # ---------- Internals for FFT Processing ----------
+    # ---------- Internals ----------
     def _rebuild_gain_curve(self):
-        """
-        Calculates the target gain for each FFT frequency bin based on the
-        10 user-defined ISO band gains. Uses interpolation for smooth transitions.
-        """
-        # Convert dB gains to linear amplitude multipliers
-        gains_linear = [10**(g / 20.0) for g in self.gains_db]
-
-        # Add boundary points for smoother interpolation at edges
-        extended_freqs = [0] + list(self.ISO_BANDS) + [self.sr / 2]
+        gains_linear = [10 ** (g / 20.0) for g in self.gains_db]
+        extended_freqs = [0.0] + list(self.ISO_BANDS) + [self.sr / 2.0]
         extended_gains = [gains_linear[0]] + gains_linear + [gains_linear[-1]]
-        
-        # Logarithmic interpolation is more natural for audio frequencies
-        # We need to handle the log(0) case for the first frequency bin
-        log_freqs = np.log10(np.array(extended_freqs, dtype=float) + 1e-6) # Add small epsilon to avoid log(0)
+        log_ext_freqs = np.log10(np.array(extended_freqs) + 1e-6)
         log_bins = np.log10(self._freq_bins + 1e-6)
-        
-        # np.interp is highly optimized for this kind of operation
-        interpolated_gains = np.interp(log_bins, log_freqs, extended_gains)
-        
-        self._gain_curve = interpolated_gains.astype(np.float32)
+        interp = np.interp(log_bins, log_ext_freqs, extended_gains)
+        self._gain_curve = np.asarray(interp, dtype=np.complex64)
 
-    # ---------- Persistence (unchanged) ----------
     def _load_settings(self) -> dict:
-        """Load {freq: gain_db} from JSON file."""
         try:
-            with open(self.SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                # Ensure keys are loaded as strings to match what gets saved
-                return {str(k): float(v) for k, v in json.load(f).items()}
+            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {str(k): float(v) for k, v in data.items()}
         except Exception:
             return {}
 
     def _save_settings(self):
-        """Write current gains to JSON, atomically if possible."""
-        # Save keys as strings to be JSON compliant
         data = {str(f): g for f, g in zip(self.ISO_BANDS, self.gains_db)}
-        with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=None)
+        try:
+            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
 
 class AudioEcho:
     """

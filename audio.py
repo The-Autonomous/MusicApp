@@ -248,6 +248,7 @@ class AudioPlayerRoot:
 
     def play(self, filepath: Optional[str] = None, start_pos: float = 0.0) -> bool:
         """Play audio file or resume current playback"""
+        self.eq.reset_state()
         if filepath:
             return self._start_playback_session(filepath, start_pos=start_pos, play_immediately=True)
         elif self._filepath:

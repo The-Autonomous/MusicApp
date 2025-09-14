@@ -42,6 +42,7 @@ class AutoDependencies:
         # Enhanced package mapping with version constraints and alternatives
         self.packages = {
             "numpy": {"module": "numpy", "min_version": "1.20.0"},
+            "pyfftw": {"module": "pyfftw", "min_version": None},
             "scipy": {"module": "scipy", "min_version": None},
             "colorama": {"module": "colorama", "min_version": None},
             "requests": {"module": "requests", "min_version": "2.25.0"},
