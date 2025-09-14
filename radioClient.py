@@ -317,7 +317,7 @@ class RadioClient:
         while self._running.is_set():
             try:
                 # Periodic time synchronization
-                current_time = time.time()
+                current_time = time()
                 if current_time - last_sync_check > self.SYNC_INTERVAL:
                     self.time_sync.sync_with_host(self._ip)
                     last_sync_check = current_time
