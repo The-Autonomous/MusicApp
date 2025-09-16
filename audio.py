@@ -412,7 +412,6 @@ class AudioPlayerRoot:
                 ll.error(f"Audio callback error #{self._callback_errors}: {e}")
 
     def stop(self):
-        ll.debug("Stop method called")
         self._stop_event.set()
         
         # Stop stream first
