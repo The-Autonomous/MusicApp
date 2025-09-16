@@ -1,9 +1,7 @@
-import json, gc, weakref, os
+import gc
 from threading import Event, Thread, Lock, RLock
 from typing import Optional, Union
 from time import sleep, monotonic
-from functools import lru_cache
-from collections import deque
 import sounddevice as sd
 import numpy as np
 import av
@@ -179,8 +177,6 @@ class AudioPlayerRoot:
                 self.channels, 
                 self.samplerate
             )
-            
-            ll.debug(f"Opened {filepath}: {self.samplerate}Hz, {self.channels}ch, {self._duration:.2f}s")
         except Exception as e:
             ll.error(f"Failed to open {filepath}: {e}")
             raise
@@ -195,7 +191,6 @@ class AudioPlayerRoot:
                 except Exception:
                     # Fallback to legacy av.time_base multiply
                     ts = int(seconds * av.time_base)
-                ll.debug(f"Seeking to {seconds:.3f}s -> ts={ts}")
                 self._container.seek(ts, stream=self._audio_stream, any_frame=False, backward=True)
                 self._position_frames = int(seconds * self.samplerate)
             except Exception as e:

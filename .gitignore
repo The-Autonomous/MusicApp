@@ -9,3 +9,4 @@ LOCAL_autoUpdate.py
 /Test
 /backup
 /debug
+*.1
