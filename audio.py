@@ -13,7 +13,7 @@ except:
     from .log_loader import log_loader
     from .audio_eq import AudioEQ, AudioEcho
 
-ll = log_loader("Audio", debugging=True)
+ll = log_loader("Audio")
 
 class RobustAudioBuffer:
     """High-performance lock-free circular buffer designed for real-time audio."""
@@ -33,8 +33,6 @@ class RobustAudioBuffer:
         self._available = 0
         self._lock = Lock()
         self._closed = False
-        
-        ll.debug(f"Buffer created: {self.buffer_size} samples ({self.buffer_size/sample_rate:.2f}s)")
 
     def write(self, data: np.ndarray) -> bool:
         """Write data to buffer. Returns True if successful."""
@@ -250,10 +248,7 @@ class AudioPlayerRoot:
             # Radio-mode correction (for sync)
             final_position = start_pos
             if radio_mode and buffer_time is not None:
-                #now = monotonic()
-                #time_since_buffer = now - buffer_time
                 final_position = start_pos + buffer_time + float(self._duration / 100)
-                #ll.debug(f"Radio timing correction: start={start_pos:.3f}, elapsed={time_since_buffer:.3f}, corrected={final_position:.3f}")
 
             # Set position frames, then perform an immediate seek so demux starts at right place
             self._position_frames = int(final_position * self.samplerate)
@@ -301,7 +296,6 @@ class AudioPlayerRoot:
                 self._stream.start()
                 self._play_event.set()
                 
-                ll.debug(f"Playback started with {self._buffer.available_seconds:.2f}s buffer")
                 return monotonic() if radio_mode else True
                 
             except Exception as e:
@@ -378,9 +372,6 @@ class AudioPlayerRoot:
 
         except Exception as e:
             ll.error(f"Critical error in audio reader: {e}")
-        finally:
-            ll.debug("Audio reader thread finished")
-
 
     def _audio_callback(self, outdata: np.ndarray, frames: int, time_info, status):
         """High-performance audio callback."""
@@ -456,7 +447,6 @@ class AudioPlayerRoot:
             self._play_event.clear()
         
         gc.collect()
-        ll.debug("Stop method completed")
 
     def pause(self):
         self._paused.set()
@@ -490,8 +480,6 @@ class AudioPlayerRoot:
             self._volume = max(0.0, min(1.0, float(volume)))
         else:
             self._volume = max(0.0, min(1.0, self._volume + float(volume)))
-
-        ll.debug(f"self._volume={self._volume:.2f}")
 
     @property
     def volume(self) -> float:
