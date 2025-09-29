@@ -103,6 +103,8 @@ class RadioClient:
         self.update_interval = 0.5
         self.sync_threshold = 1.0 # Threshold for re-syncing client position to server position
         self.temp_song_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache.mp3")
+        
+        self.time_since_last_switch = 0.0
 
         # New/Revised time tracking variables for robust radio client playback
         self._current_song_start_time = None # Monotonic time when the *current song* started playing locally
@@ -387,6 +389,10 @@ class RadioClient:
 
                 # Handle song changes
                 if data['title'] != self.client_data['radio_text_clean']:
+                    if time() - self.time_since_last_switch < 1.0:
+                        ll.debug("Ignoring rapid song switch to avoid glitches")
+                        sleep(1)
+                    self.time_since_last_switch = time()
                     self._reset_song_timing()
                     self._handle_song_change_synced(data)
 

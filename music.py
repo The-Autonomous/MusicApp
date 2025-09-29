@@ -224,6 +224,7 @@ class MusicPlayer:
         self.skip_flag = Event()
         self.pause_event = Event()
         self.repeat_event = Event()
+        self.downloading_youtube_song = Event()
         self.current_player_mode = Event()  # False = MusicPlayer, True = RadioPlayer
         
         # Initialize Multiprocess Popup
@@ -310,7 +311,12 @@ class MusicPlayer:
         
         # This is a blocking call. The UI will wait until the download is done.
         # A future improvement could be to show a "Downloading..." message in the UI.
+        self.downloading_youtube_song.set()
+        self.AudioPlayer.pause(True)  # Pause playback while downloading
+        
         cached_song_path = self.ytHandle.download_single_song_to_cache(url, self.youtube_download_permanently)
+        self.AudioPlayer.pause(False)  # Pause playback while downloading
+        self.downloading_youtube_song.clear()
         
         if cached_song_path and os.path.exists(cached_song_path):
             # Use the existing metadata function to get info from the downloaded MP3
@@ -804,6 +810,9 @@ class MusicPlayer:
     
     def pause(self, forcedState: bool = None):
         """forcedState: If provided, forces pause (False) or unpause (True); otherwise, toggles current pause state."""
+        if self.downloading_youtube_song.is_set():
+            ll.debug("Cannot pause/unpause while downloading a YouTube song.")
+            return
         should_unpause = forcedState if forcedState is not None else self.pause_event.is_set()
         if should_unpause:
             self.pause_event.clear()
