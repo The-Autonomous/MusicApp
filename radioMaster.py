@@ -1,9 +1,10 @@
-import os, socket, psutil, threading, requests
+import os, socket, threading, requests
 from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
-from waitress import serve
-from mutagen.mp3 import MP3 # Import MP3 to get audio duration
-from mutagen.wave import WAVE # Import WAVE to get audio duration for WAV files
+from waitress import create_server
+from html import escape
+import json
+import mimetypes
 from itertools import islice
 from time import sleep, monotonic, time
 
@@ -16,7 +17,7 @@ except:
 
 ### Logging Handler ###
 
-ll = log_loader("Radio Master")
+ll = log_loader("Radio Master", debugging=False)
 
 #######################
 
@@ -29,7 +30,7 @@ class TimeSync:
         """Client calls this to sync with host clock"""
         try:
             start = time()
-            response = requests.get(f"http://{host_ip}:8080/time")
+            response = requests.get(f"http://{host_ip}:8080/time", timeout=2)
             end = time()
             
             host_time = float(response.text)
@@ -48,6 +49,12 @@ class RadioHost:
     def __init__(self, player, port=8080, ip=None, fake_load=False):
         # Flask app setup
         self.MusicPlayer = player
+        self._host = ip or self._get_local_ip()
+        self._server = None
+        self._log_lock = threading.Lock()
+        self._log_offsets = {0: 0}
+        self._log_identity = None
+        self._log_size = 0
         self.app_pad_site = "app_pad"
         self.app = Flask(__name__, static_folder='app_pad')
         Compress(self.app)
@@ -59,6 +66,7 @@ class RadioHost:
             'lyrics': '',
             'mixer': None,
             'duration': 0.0, # Add duration to current_data
+            'track_id': '',
         }
 
         def get_pos():
@@ -77,15 +85,16 @@ class RadioHost:
             song_started_at = master_time - get_pos()
             
             # Construct the full URL for the song
-            song_url = f"http://{self._get_local_ip()}:{port}/song"
+            song_url = f"http://{self._host}:{port}/song?track={self.current_data['track_id']}"
             eq_data = self.MusicPlayer.get_bands() if hasattr(self.MusicPlayer, 'get_bands') else {}
             eq_string = ','.join(f"{k}:{v}" for k,v in eq_data.items())
 
             resp = make_response(
-                f"<title>{self.current_data['title']}</title>"
+                f"<title>{escape(self.current_data['title'])}</title>"
+                f"<track_id>{self.current_data['track_id']}</track_id>"
                 f"<master_time>{master_time}</master_time>"
                 f"<song_start_time>{song_started_at}</song_start_time>"
-                f"<paused>{self.MusicPlayer.pause_event.is_set()}</paused>"
+                f"<paused>{self.MusicPlayer.pause_event.is_set() or self.current_data['mixer'] is None}</paused>"
                 f"<repeat>{self.MusicPlayer.repeat_event.is_set()}</repeat>"
                 f"<eq>{eq_string}</eq>"
                 f"<volume>{self.MusicPlayer.current_volume}</volume>"
@@ -118,8 +127,27 @@ class RadioHost:
                 if start < 0 or count < 1:
                     return jsonify({'error': 'Invalid start or count'}), 400
 
-                with open(serve_log_path, 'r', encoding='utf-8', errors='replace') as f:
-                    lines = list(islice(f, start, start + count))
+                with self._log_lock:
+                    stat = os.stat(serve_log_path)
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity != self._log_identity or stat.st_size < self._log_size:
+                        self._log_offsets = {0: 0}
+                    self._log_identity, self._log_size = identity, stat.st_size
+                    nearest = max(line for line in self._log_offsets if line <= start)
+                    with open(serve_log_path, 'rb') as f:
+                        f.seek(self._log_offsets[nearest])
+                        for line in range(nearest, start):
+                            if not f.readline():
+                                break
+                        lines = []
+                        for line in range(start, start + count):
+                            raw = f.readline()
+                            if not raw:
+                                break
+                            lines.append(raw.decode('utf-8', errors='replace'))
+                        self._log_offsets[start + len(lines)] = f.tell()
+                    if len(self._log_offsets) > 512:
+                        self._log_offsets = {0: 0}
 
                 has_more = len(lines) == count
 
@@ -143,7 +171,7 @@ class RadioHost:
             # Perform search via your MusicPlayer helper
             raw_results = self.MusicPlayer.get_search_term(query)
             # raw_results is list of (title, path)
-            results = [{ 'title': title, 'path': path } for title, path in raw_results]
+            results = [{ 'title': title, 'path': path } for title, path, kind in raw_results if kind == 'path']
             return jsonify({ 'code': 'success', 'results': results })
         
         @self.app.route('/time')
@@ -152,7 +180,7 @@ class RadioHost:
         
         @self.app.route('/action', methods=['POST'])
         def handle_action():
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             action = data.get('action', '').lower()
 
             if action == 'pause':
@@ -191,8 +219,10 @@ class RadioHost:
             return jsonify({
                 "code": "success",
                 "title": self.current_data["title"],
+                "track_id": self.current_data["track_id"],
+                "duration": self.current_data["duration"],
                 "position": round(get_pos(), 2),
-                "paused": self.MusicPlayer.pause_event.is_set(),
+                "paused": self.MusicPlayer.pause_event.is_set() or self.current_data['mixer'] is None,
                 "repeat": self.MusicPlayer.repeat_event.is_set(),
                 "volume": round(self.MusicPlayer.current_volume, 2)
             })
@@ -203,7 +233,9 @@ class RadioHost:
             if not mp3_path or not os.path.isfile(mp3_path):
                 return "No song loaded", 404
             directory, filename = os.path.split(mp3_path)
-            return send_from_directory(directory, filename, mimetype='audio/mpeg' if filename.lower().endswith('.mp3') else 'audio/wav')
+            return send_from_directory(directory, filename,
+                                       mimetype=mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+                                       conditional=True)
 
         @self.app.route('/lyrics')
         def serve_lyrics():
@@ -211,65 +243,45 @@ class RadioHost:
 
         @self.app.after_request
         def add_no_cache_headers(response):
-            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-            response.headers['Pragma']        = 'no-cache'
-            response.headers['Expires']       = '0'
+            if request.path in ('/song', '/app_pad', '/app_pad/logs') or request.path.startswith('/app_pad/'):
+                response.headers['Cache-Control'] = 'private, max-age=3600'
+            else:
+                response.headers['Cache-Control'] = 'no-store'
             return response
 
         if not fake_load:
-            try:
-                if not ip:
-                    if not self._free_port(port):
-                        port = 9000
-                    host = self._get_local_ip()
-                else:
-                    host = ip
-                self._server_thread = threading.Thread(
-                    target=serve,
-                    args=(self.app,),
-                    kwargs={
-                        'host': host, 
-                        'port': port,
-                        'threads': 2,  # Reduce from default 4-6 threads
-                        'connection_limit': 10,  # Limit concurrent connections
-                        'cleanup_interval': 15,  # Cleanup inactive connections every 15s
-                        'channel_timeout': 120,  # Timeout for inactive channels
-                        'log_untrusted_proxy_headers': False,  # Reduce logging overhead
-                        'send_bytes': 8192,  # Optimize buffer size
-                        'recv_bytes': 8192,
-                        'asyncore_use_poll': True,  # Use poll instead of select (Linux/Mac)
-                    },
-                    daemon=True
-                )
-                self._server_thread.start()
-                ll.debug(f"Serving on http://{host}:{port}")
-            except Exception as e:
-                ll.error(f"Failed to start server on port {port}: {e}")
+            # Binding reports an occupied port; never terminate another application's process.
+            self._server = create_server(self.app, host=self._host, port=port, threads=2,
+                                         connection_limit=16, channel_timeout=30,
+                                         outbuf_high_watermark=512 * 1024,
+                                         outbuf_overflow=256 * 1024,
+                                         max_request_body_size=64 * 1024)
+            self._server_thread = threading.Thread(target=self._server.run, daemon=True,
+                                                    name="radio-host")
+            self._server_thread.start()
+            ll.print(f"Phone controls: http://{self._host}:{port}/app_pad")
 
-    def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics=""):
-        """Call whenever you load a new track."""
-        song_duration = 0.0
-        if os.path.exists(mp3_song_file_path):
-            try:
-                if mp3_song_file_path.lower().endswith('.mp3'):
-                    audio = MP3(mp3_song_file_path)
-                    song_duration = audio.info.length
-                elif mp3_song_file_path.lower().endswith('.wav'):
-                    # For WAV files, you can use WAVE from mutagen or scipy.io.wavfile.read
-                    # Using WAVE from mutagen for consistency with MP3 duration fetching
-                    audio = WAVE(mp3_song_file_path)
-                    song_duration = audio.info.length
-            except Exception as e:
-                ll.error(f"Error getting duration for {mp3_song_file_path}: {e}")
+    def close(self):
+        if self._server:
+            for channel in list(self._server.active_channels.values()):
+                channel.close()
+            self._server.task_dispatcher.shutdown(timeout=1)
+            self._server.close()
+            self._server = None
+            self._server_thread.join(timeout=1)
 
-        # Update data
-        self.current_data.update({
-            'title': title,
-            'mp3_path': mp3_song_file_path,
-            'lyrics': current_song_lyrics,
-            'mixer': current_mixer,
-            'duration': song_duration, # Set the actual duration
-        })
+    def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics="",
+                 duration=None, track_id=None):
+        if duration is None:
+            duration = current_mixer.get_duration() if current_mixer else 0
+        if not isinstance(current_song_lyrics, str):
+            current_song_lyrics = json.dumps(current_song_lyrics or [])
+        self.current_data = {
+            "title": title, "mp3_path": mp3_song_file_path,
+            "lyrics": current_song_lyrics or "[]", "mixer": current_mixer,
+            "duration": float(duration or 0),
+            "track_id": track_id or str(os.path.getmtime(mp3_song_file_path)),
+        }
 
     def _get_local_ip(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -281,43 +293,6 @@ class RadioHost:
         finally:
             s.close()
         return ip
-
-    def _free_port(self, port):
-        """Kill any process listening on `port` (requires admin/sudo)."""
-        processesToStop = []
-        for conn in psutil.net_connections(kind='tcp'):
-            if conn.laddr and conn.laddr.port == port and conn.status == psutil.CONN_LISTEN:
-                pid = conn.pid
-                if not pid:
-                    continue
-                try:
-                    p = psutil.Process(pid)
-                    processesToStop.append(p)
-                except Exception:
-                    pass
-        if len(processesToStop) > 0:
-            if Administrator(False).is_admin():
-                for p in processesToStop:
-                    try:
-                        p.terminate()
-                        p.wait(3)
-                        ll.debug(f"✅ Successfully terminated PID {pid} ({p.name()}) on port {port}")
-                    except psutil.NoSuchProcess:
-                        ll.debug(f"✅ Process PID {pid} already terminated.")
-                    except psutil.TimeoutExpired:
-                        ll.debug(f"⚠️ Timeout expired while waiting for PID {pid} to terminate. Killing it.")
-                        try:
-                            p.kill()
-                            p.wait(3)
-                            ll.debug(f"✅ Successfully killed PID {pid} ({p.name()}) on port {port}")
-                        except Exception as e:
-                            ll.error(f"❌ Failed to kill PID {pid}: {e}")
-                    except Exception as e:
-                        ll.error(f"❌ Failed to terminate PID {pid}: {e}")
-            else:
-                ll.debug(f"Running without admin rights! I cannot free the occupied ports!")
-                return False
-        return True
 
 # Example usage:
 if __name__ == '__main__':

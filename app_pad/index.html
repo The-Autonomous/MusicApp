@@ -25,7 +25,6 @@
 
             .container {
                 background: rgba(255, 255, 255, 0.05);
-                backdrop-filter: blur(10px);
                 padding: 2.5rem; /* Increased padding for more breathing room */
                 border-radius: 20px;
                 box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
@@ -378,9 +377,10 @@
                 if (positionUpdater) return;
                 const posEl = document.getElementById('song-position');
                 function update() {
-                    if (audio && !audio.paused && !audio.ended) {
-                        posEl.textContent = formatTime(audio.currentTime);
-                        positionUpdater = requestAnimationFrame(update);
+                    if (!document.hidden && audio && !audio.paused && !audio.ended) {
+                        const display = formatTime(audio.currentTime);
+                        if (posEl.textContent !== display) posEl.textContent = display;
+                        positionUpdater = setTimeout(update, 500);
                     } else {
                         positionUpdater = null;
                     }
@@ -389,7 +389,7 @@
             }
             function stopPositionUpdater() {
                 if (positionUpdater) {
-                    cancelAnimationFrame(positionUpdater);
+                    clearTimeout(positionUpdater);
                     positionUpdater = null;
                 }
             }
@@ -526,11 +526,12 @@
                     const songUrlToPlay = await fetchSongUrl();
 
                     // Reload audio if the song title changes
-                    if (lastSongTitle !== data.title) {
+                    const trackIdentity = data.track_id || data.title;
+                    if (lastSongTitle !== trackIdentity) {
                         updateAudioStatus(`Song changed: ${data.title}. Reloading audio...`);
-                        audio.src = songUrlToPlay + "?t=" + Date.now();
+                        audio.src = songUrlToPlay + "?track=" + encodeURIComponent(trackIdentity);
                         audio.load();
-                        lastSongTitle = data.title;
+                        lastSongTitle = trackIdentity;
                     }
 
                     // 3. Sync properties
@@ -750,13 +751,17 @@
                 }
                 window.sendAction = sendAction;
 
+                let pollPending = false;
                 async function pollStatus() {
+                    if (pollPending || document.hidden) return;
+                    pollPending = true;
                     try {
                         const startTime = performance.now();
                         const res = await fetch('/action', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ action: 'status' })
+                            body: JSON.stringify({ action: 'status' }),
+                            signal: AbortSignal.timeout(5000)
                         });
                         const endTime = performance.now();
                         const latency = (endTime - startTime) / 1000; // in seconds
@@ -773,6 +778,8 @@
                     } catch (error) {
                         console.error('Error polling status:', error);
                         updateAudioStatus(`Error polling status: ${error.message}`);
+                    } finally {
+                        pollPending = false;
                     }
                 }
 
@@ -812,7 +819,7 @@
                         display = display.replace(/\s*$/, '') + ' [Repeat]';
                     }
 
-                    songEl.innerHTML = display;
+                    if (songEl.textContent !== display) songEl.textContent = display;
                     
                     let latency = data._latency || 0;
                     let adjustedPosition = (typeof data.position === "number" && !isNaN(data.position))
@@ -837,6 +844,10 @@
                 // Initial poll and interval
                 pollStatus();
                 setInterval(pollStatus, 1000);
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden) stopPositionUpdater();
+                    else pollStatus();
+                });
 
                 // --- Search Functionality Scripts ---
                 const openSearchButton = document.getElementById('openSearchButton');

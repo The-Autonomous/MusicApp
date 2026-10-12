@@ -1,249 +1,177 @@
-import json, os, atexit
-import numpy as np
-from threading import Lock
-from scipy.signal import get_window
+"""Audio effects are initialized on demand and processed by the decoder."""
+import atexit
+import json
+import os
+from threading import RLock
 from math import sin, cos, radians, atan2, degrees
-import tkinter as tk
 from time import time
+import tkinter as tk
+import numpy as np
 
-try:
-    from log_loader import log_loader
-except:
-    from .log_loader import log_loader
-    
-###################################
-    
-ll = log_loader("Music Player")
-
-###################################
-
-# Get PyFFTW
-try:
-    import pyfftw
-    _HAVE_PYFFTW = True
-except Exception:
-    import numpy.fft as npfft
-    _HAVE_PYFFTW = False
 
 class AudioEQ:
-    """
-    High-performance 10-band graphic equalizer using FFT overlap-add.
-    Uses pyFFTW with planned transforms if available, falls back to numpy.fft.
-    """
-
     SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "musicapp_eq.json")
     ISO_BANDS = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 
-    def __init__(self, samplerate: int, channels: int, chunk_size: int, gains_db=None):
-        self.sr = int(samplerate)
-        self.ch = int(channels)
-        self.chunk_size = int(chunk_size)
-        self.lock = Lock()
-
-        # FFT/OLA params
-        self._hop_size = self.chunk_size
-        self._fft_size = self._hop_size * 2  # 50% overlap
-        self._window = get_window("hann", self._fft_size, fftbins=True).astype(np.float32)
-
-        # Normalize window for perfect overlap-add
-        norm_factor = np.sum(self._window) / float(self._hop_size)
-        self._window /= norm_factor
-
-        # Buffers
-        self._overlap = np.zeros((self._hop_size, self.ch), dtype=np.float32)
-        self._input_buffer = np.zeros((self._fft_size, self.ch), dtype=np.float32)
-
-        # Frequency bins
-        self._rfft_bins = self._fft_size // 2 + 1
-        self._freq_bins = np.fft.rfftfreq(self._fft_size, d=1.0 / self.sr)
-
-        # FFT implementation
-        if _HAVE_PYFFTW:
-            # Build FFTW plans once
-            self._fft_in = pyfftw.empty_aligned((self._fft_size, self.ch), dtype="float32")
-            self._fft_out = pyfftw.empty_aligned((self._rfft_bins, self.ch), dtype="complex64")
-
-            self._plan_rfft = pyfftw.builders.rfft(
-                self._fft_in,
-                axis=0,
-                threads=os.cpu_count(),
-                planner_effort="FFTW_MEASURE",
-                overwrite_input=True
-            )
-            self._plan_irfft = pyfftw.builders.irfft(
-                self._fft_out,
-                n=self._fft_size,
-                axis=0,
-                threads=os.cpu_count(),
-                planner_effort="FFTW_MEASURE"
-            )
-        else:
-            # Fallback to numpy.fft
-            self._plan_rfft = lambda x: npfft.rfft(x, axis=0)
-            self._plan_irfft = lambda X: npfft.irfft(X, n=self._fft_size, axis=0)
-
-        # Load gains
-        if os.path.isfile(self.SETTINGS_FILE):
-            loaded = self._load_settings()
-            gains_db = [loaded.get(str(f), 0.0) for f in self.ISO_BANDS]
-        else:
-            gains_db = gains_db or [0.0] * len(self.ISO_BANDS)
-
-        self.gains_db = list(map(float, gains_db))
-        self._gain_curve = None
-        self._rebuild_gain_curve()
-
+    def __init__(self, samplerate, channels, chunk_size, gains_db=None):
+        self.sr, self.ch, self.chunk_size = int(samplerate), int(channels), int(chunk_size)
+        self.lock = RLock()
+        loaded = self._load_settings()
+        self.gains_db = [float(loaded.get(str(f), (gains_db or [0] * 10)[i]))
+                         for i, f in enumerate(self.ISO_BANDS)]
+        self._ready = False
+        self._dirty = True
+        self._settings_dirty = False
         atexit.register(self._save_settings)
 
-        # Debug info
-        if _HAVE_PYFFTW:
-            ll.debug(f"AudioEQ: Using pyFFTW ({os.cpu_count()} threads)")
-        else:
-            ll.debug("AudioEQ: Using numpy.fft fallback")
+    def _initialize(self):
+        self._hop_size = self.chunk_size
+        self._fft_size = self.chunk_size * 2
+        self._window = np.hanning(self._fft_size + 1)[:-1].astype(np.float32)
+        self._overlap = np.zeros((self.chunk_size, self.ch), dtype=np.float32)
+        self._input_buffer = np.zeros((self._fft_size, self.ch), dtype=np.float32)
+        self._work = np.empty_like(self._input_buffer)
+        self._freq_bins = np.fft.rfftfreq(self._fft_size, d=1.0 / self.sr)
+        try:
+            import pyfftw
+            self._fft_in = pyfftw.empty_aligned(self._work.shape, dtype="float32")
+            self._fft_out = pyfftw.empty_aligned((self.chunk_size + 1, self.ch), dtype="complex64")
+            self._plan_rfft = pyfftw.builders.rfft(self._fft_in, axis=0, threads=1,
+                                                  planner_effort="FFTW_ESTIMATE")
+            self._plan_irfft = pyfftw.builders.irfft(self._fft_out, n=self._fft_size,
+                                                    axis=0, threads=1,
+                                                    planner_effort="FFTW_ESTIMATE")
+            self._fftw = True
+        except ImportError:
+            self._fftw = False
+        self._ready = True
 
     def reset_state(self):
-        """Clear overlap and input buffers to avoid bleed from previous track."""
         with self.lock:
-            self._overlap.fill(0.0)
-            self._input_buffer.fill(0.0)
+            if self._ready:
+                self._overlap.fill(0)
+                self._input_buffer.fill(0)
 
-    # ---------- Public API ----------
-    def set_gain(self, freq_hz: int, gain_db: float):
+    def set_gain(self, freq_hz, gain_db):
         with self.lock:
-            try:
-                idx = self.ISO_BANDS.index(freq_hz)
-                self.gains_db[idx] = float(gain_db)
-                self._rebuild_gain_curve()
-            except ValueError:
-                pass
+            if freq_hz not in self.ISO_BANDS:
+                return
+            idx = self.ISO_BANDS.index(freq_hz)
+            gain = max(-12.0, min(12.0, float(gain_db)))
+            if self.gains_db[idx] != gain:
+                self.gains_db[idx] = gain
+                self._dirty = self._settings_dirty = True
+                if not any(self.gains_db):
+                    self.reset_state()
 
-    def get_gains(self) -> dict:
-        return dict(zip(self.ISO_BANDS, self.gains_db))
+    def get_gains(self):
+        with self.lock:
+            return dict(zip(self.ISO_BANDS, self.gains_db))
 
-    def get_band(self, freq_hz: int, default: float = 0.0) -> float:
+    def get_band(self, freq_hz, default=0.0):
         return self.get_gains().get(freq_hz, default)
 
-    # ---------- Core processing ----------
-    def process(self, chunk: np.ndarray) -> np.ndarray:
-        if chunk is None or chunk.size == 0:
-            return np.zeros((0, self.ch), dtype=np.float32)
-
-        # Ensure shape (n, ch)
-        if chunk.ndim == 1 and self.ch > 1:
-            chunk = np.column_stack([chunk] * self.ch)
-        elif chunk.ndim == 1:
-            chunk = chunk.reshape(-1, 1)
-
-        if chunk.shape[0] < self._hop_size:
-            pad_len = self._hop_size - chunk.shape[0]
-            pad = np.zeros((pad_len, self.ch), dtype=np.float32)
-            chunk = np.vstack((chunk, pad))
-
-        chunk = chunk.astype(np.float32, copy=False)
-
+    def process(self, chunk):
         with self.lock:
-            # Slide input buffer
-            self._input_buffer[:-self._hop_size] = self._input_buffer[self._hop_size:]
-            self._input_buffer[-self._hop_size:] = chunk
-
-            # Apply window
-            fft_buffer = self._input_buffer * self._window[:, None]
-
-            # FFT
-            if _HAVE_PYFFTW:
-                self._fft_in[:] = fft_buffer
-                freq_domain = self._plan_rfft()
+            if not any(self.gains_db) or not len(chunk):
+                return chunk
+            if not self._ready:
+                self._initialize()
+            if self._dirty:
+                self._rebuild_gain_curve()
+            length = len(chunk)
+            if length < self.chunk_size:
+                chunk = np.pad(chunk, ((0, self.chunk_size - length), (0, 0)))
+            self._input_buffer[:-self.chunk_size] = self._input_buffer[self.chunk_size:]
+            self._input_buffer[-self.chunk_size:] = chunk
+            np.multiply(self._input_buffer, self._window[:, None], out=self._work)
+            if self._fftw:
+                self._fft_in[:] = self._work
+                spectrum = self._plan_rfft()
             else:
-                freq_domain = self._plan_rfft(fft_buffer)
-
-            # Apply EQ
-            freq_domain *= self._gain_curve[:, None]
-
-            # iFFT
-            if _HAVE_PYFFTW:
-                self._fft_out[:] = freq_domain
-                time_domain = self._plan_irfft()
+                spectrum = np.fft.rfft(self._work, axis=0)
+            spectrum *= self._gain_curve[:, None]
+            if self._fftw:
+                self._fft_out[:] = spectrum
+                signal = self._plan_irfft()
             else:
-                time_domain = self._plan_irfft(freq_domain)
+                signal = np.fft.irfft(spectrum, n=self._fft_size, axis=0)
+            out = (signal[:self.chunk_size] + self._overlap).astype(np.float32, copy=False)
+            self._overlap[:] = signal[self.chunk_size:]
+            np.clip(out, -1, 1, out=out)
+            return out[:length]
 
-            # Overlap-add
-            out = time_domain[:self._hop_size] + self._overlap
-            self._overlap = time_domain[self._hop_size:].astype(np.float32, copy=True)
-
-            # Clip
-            np.clip(out, -1.0, 1.0, out=out)
-            return out.astype(np.float32, copy=False)
-
-    # ---------- Internals ----------
     def _rebuild_gain_curve(self):
-        gains_linear = [10 ** (g / 20.0) for g in self.gains_db]
-        extended_freqs = [0.0] + list(self.ISO_BANDS) + [self.sr / 2.0]
-        extended_gains = [gains_linear[0]] + gains_linear + [gains_linear[-1]]
-        log_ext_freqs = np.log10(np.array(extended_freqs) + 1e-6)
-        log_bins = np.log10(self._freq_bins + 1e-6)
-        interp = np.interp(log_bins, log_ext_freqs, extended_gains)
-        self._gain_curve = np.asarray(interp, dtype=np.complex64)
+        gains = np.power(10, np.asarray(self.gains_db) / 20)
+        # Ignore bands above Nyquist instead of creating unsorted interpolation points.
+        pairs = [(f, g) for f, g in zip(self.ISO_BANDS, gains) if f < self.sr / 2]
+        freqs = [0] + [f for f, _ in pairs] + [self.sr / 2]
+        values = [gains[0]] + [g for _, g in pairs] + [pairs[-1][1]]
+        self._gain_curve = np.interp(np.log10(self._freq_bins + 1e-6),
+                                    np.log10(np.asarray(freqs) + 1e-6), values).astype(np.float32)
+        self._dirty = False
 
-    def _load_settings(self) -> dict:
+    def _load_settings(self):
         try:
-            with open(self.SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return {str(k): float(v) for k, v in data.items()}
-        except Exception:
+            with open(self.SETTINGS_FILE, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                return loaded if isinstance(loaded, dict) else {}
+        except (OSError, ValueError):
             return {}
 
     def _save_settings(self):
-        data = {str(f): g for f, g in zip(self.ISO_BANDS, self.gains_db)}
-        try:
-            with open(self.SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
+        if not self._settings_dirty:
+            return
+        with self.lock:
+            try:
+                temporary = self.SETTINGS_FILE + ".tmp"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump({str(f): g for f, g in self.get_gains().items()}, handle)
+                os.replace(temporary, self.SETTINGS_FILE)
+                self._settings_dirty = False
+            except OSError:
+                pass
+
 
 class AudioEcho:
-    """
-    One-tap echo / delay line.
-      • delay_ms  - echo delay time
-      • feedback  - 0 (no repeats) … 0.9 (lots of repeats)
-      • wet       - 0 (dry only) … 1.0 (echo only)
-    """
-    def __init__(self, samplerate, channels,
-                 delay_ms=350, feedback=0.35, wet=0.5):
-        self.sr   = int(samplerate)
-        self.ch   = int(channels)
+    def __init__(self, samplerate, channels, delay_ms=350, feedback=0.35, wet=0.5):
+        self.sr, self.ch = int(samplerate), int(channels)
+        self.lock = RLock()
         self.set_params(delay_ms, feedback, wet)
 
-    # ― public ----------------------------------------------------------
     def set_params(self, delay_ms=None, feedback=None, wet=None):
-        if delay_ms  is not None: self.delay_ms = max(10,  delay_ms)
-        if feedback  is not None: self.feedback = np.clip(feedback, 0, 0.95)
-        if wet       is not None: self.wet      = np.clip(wet,      0, 1)
+        with self.lock:
+            if delay_ms is not None:
+                self.delay_ms = max(10, min(5000, float(delay_ms)))
+            if feedback is not None:
+                self.feedback = max(0, min(0.95, float(feedback)))
+            if wet is not None:
+                self.wet = max(0, min(1, float(wet)))
+            length = max(1, int(self.sr * self.delay_ms / 1000))
+            if not hasattr(self, "_buf") or len(self._buf) != length:
+                self._buf = np.zeros((length, self.ch), dtype=np.float32)
+                self._idx = 0
 
-        # resize delay buffer if time changed
-        dlen = int(self.sr * self.delay_ms / 1000)
-        if not hasattr(self, "_buf") or dlen != self._buf.shape[0]:
-            self._buf   = np.zeros((dlen, self.ch), dtype=np.float32)
-            self._idx   = 0  # write pointer
+    def reset_state(self):
+        with self.lock:
+            self._buf.fill(0)
+            self._idx = 0
 
-    def process(self, x: np.ndarray) -> np.ndarray:
-        if x.size == 0:        # edge case
-            return x
-        out   = x.copy()
-        n     = x.shape[0]
-        buf   = self._buf
-        idx   = self._idx
-        wet   = self.wet
-        fb    = self.feedback
-
-        # sample-by-sample circular buffer (vectorised)
-        for i in range(n):
-            echo          = buf[idx]
-            buf[idx]      = x[i] + echo * fb   # write input + feedback
-            out[i]        = x[i]*(1-wet) + echo*wet   # mix
-            idx           = (idx + 1) % buf.shape[0]
-
-        self._idx = idx
-        return out
+    def process(self, x):
+        with self.lock:
+            if not self.wet or not len(x):
+                return x
+            out = np.empty_like(x)
+            offset = 0
+            while offset < len(x):
+                count = min(len(x) - offset, len(self._buf) - self._idx)
+                source = x[offset:offset + count]
+                delayed = self._buf[self._idx:self._idx + count].copy()
+                self._buf[self._idx:self._idx + count] = source + delayed * self.feedback
+                out[offset:offset + count] = source * (1 - self.wet) + delayed * self.wet
+                self._idx = (self._idx + count) % len(self._buf)
+                offset += count
+            return out
 
 class EQKnob(tk.Canvas):
     """
@@ -278,42 +206,40 @@ class EQKnob(tk.Canvas):
 
     # ───────────────────────────────────────────────────────── internal ──
     def _draw(self):
-        """Redraw the knob face + pointer + text."""
-        self.delete("all")
-
-        # shell
-        self.ring = self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
-                         fill="#222", outline="#555", width=2)
-
-        # pointer
-        ang = radians(self._gain_to_angle(self.gain))
-        x   = self.r + 2 + self.r*0.75 * sin(ang)
-        y   = self.r + 2 - self.r*0.75 * cos(ang)
-        self.create_line(self.r+2, self.r+2, x, y,
-                         fill="#2ee", width=3, capstyle="round")
-
-        # gain text
-        self.create_text(self.r+2, self.r+2,
-                         text=f"{self.gain:+.1f} dB",
-                         fill="#ddd", font=("Segoe UI", 8, "bold"))
+        """Keep canvas items and update only their position and value."""
+        if self.ring is None:
+            self.ring = self.create_oval(2, 2, 2 + self.r * 2, 2 + self.r * 2,
+                                         fill="#222", outline="#555", width=2)
+            self._pointer = self.create_line(0, 0, 0, 0, fill="#2ee", width=3, capstyle="round")
+            self._label = self.create_text(self.r + 2, self.r + 2,
+                                           fill="#ddd", font=("Segoe UI", 8, "bold"))
+        angle = radians(self._gain_to_angle(self.gain))
+        x = self.r + 2 + self.r * 0.75 * sin(angle)
+        y = self.r + 2 - self.r * 0.75 * cos(angle)
+        self.coords(self._pointer, self.r + 2, self.r + 2, x, y)
+        self.itemconfig(self._label, text=f"{self.gain:+.1f} dB")
+        self.itemconfig(self.ring, fill="#555" if self._disabled else "#222")
 
     def _start(self, ev):
         self._drag(ev)                      # update instantly
 
     def disable(self, disabled: bool):
         """Disables or enables the knob and updates its appearance."""
+        self._disabled = bool(disabled)
         if disabled:
             self.configure(state="disabled")
             self.unbind("<Button-1>")
             self.unbind("<B1-Motion>")
             self.unbind("<ButtonRelease-1>")
-            self.itemconfig(self.ring, fill="#555")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#555")
         else:
             self.configure(state="normal")
             self.bind("<Button-1>", self._start)
             self.bind("<B1-Motion>", self._drag)
             self.bind("<ButtonRelease-1>", self._commit)
-            self.itemconfig(self.ring, fill="#222")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#222")
         self._draw()
 
     def _drag(self, ev):
@@ -377,42 +303,40 @@ class PercentKnob(tk.Canvas):
 
     # ───────────────────────────────────────────────────────── internal ──
     def _draw(self):
-        """Redraw the knob face + pointer + text."""
-        self.delete("all")
-
-        # shell
-        self.ring = self.create_oval(2, 2, 2+self.r*2, 2+self.r*2,
-                         fill="#222", outline="#555", width=2)
-
-        # pointer
-        ang = radians(self._gain_to_angle(self.gain))
-        x   = self.r + 2 + self.r*0.75 * sin(ang)
-        y   = self.r + 2 - self.r*0.75 * cos(ang)
-        self.create_line(self.r+2, self.r+2, x, y,
-                         fill="#2ee", width=3, capstyle="round")
-
-        # gain text
-        self.create_text(self.r+2, self.r+2,
-                         text=f"{self.gain:+.1f}%",
-                         fill="#ddd", font=("Segoe UI", 8, "bold"))
+        """Keep canvas items and update only their position and value."""
+        if self.ring is None:
+            self.ring = self.create_oval(2, 2, 2 + self.r * 2, 2 + self.r * 2,
+                                         fill="#222", outline="#555", width=2)
+            self._pointer = self.create_line(0, 0, 0, 0, fill="#2ee", width=3, capstyle="round")
+            self._label = self.create_text(self.r + 2, self.r + 2,
+                                           fill="#ddd", font=("Segoe UI", 8, "bold"))
+        angle = radians(self._gain_to_angle(self.gain))
+        x = self.r + 2 + self.r * 0.75 * sin(angle)
+        y = self.r + 2 - self.r * 0.75 * cos(angle)
+        self.coords(self._pointer, self.r + 2, self.r + 2, x, y)
+        self.itemconfig(self._label, text=f"{self.gain:+.1f}%")
+        self.itemconfig(self.ring, fill="#555" if self._disabled else "#222")
 
     def _start(self, ev):
         self._drag(ev)                      # update instantly
 
     def disable(self, disabled: bool):
         """Disables or enables the knob and updates its appearance."""
+        self._disabled = bool(disabled)
         if disabled:
             self.configure(state="disabled")
             self.unbind("<Button-1>")
             self.unbind("<B1-Motion>")
             self.unbind("<ButtonRelease-1>")
-            self.itemconfig(self.ring, fill="#555")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#555")
         else:
             self.configure(state="normal")
             self.bind("<Button-1>", self._start)
             self.bind("<B1-Motion>", self._drag)
             self.bind("<ButtonRelease-1>", self._commit)
-            self.itemconfig(self.ring, fill="#222")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#222")
         self._draw()
 
     def _drag(self, ev):
@@ -492,43 +416,37 @@ class VolumeSlider(tk.Canvas):
             self.cb(self.volume)
 
     def _draw(self):
-        """Draw track, thumb, and percentage text."""
-        self.delete("all")
-        w = int(self['width'])
-        # Draw track line
-        self.create_line(
-            self._thumb_radius, self._track_y,
-            w - self._thumb_radius, self._track_y,
-            fill="#555", width=self._track_height, capstyle="round"
-        )
-        # Draw thumb circle
-        pos = self._value_to_pos(self.volume)
-        self.ring = self.create_oval(
-            pos - self._thumb_radius, self._track_y - self._thumb_radius,
-            pos + self._thumb_radius, self._track_y + self._thumb_radius,
-            fill="#2ee", outline=""
-        )
-        # Draw volume text
-        self.create_text(
-            w // 2, self._track_y,
-            text=f"{self.volume:.0f}%", fill="#ddd",
-            font=("Segoe UI", 8, "bold")
-        )
+        width = int(self['width'])
+        if self.ring is None:
+            self.create_line(self._thumb_radius, self._track_y,
+                             width - self._thumb_radius, self._track_y,
+                             fill="#555", width=self._track_height, capstyle="round")
+            self.ring = self.create_oval(0, 0, 0, 0, fill="#2ee", outline="")
+            self._label = self.create_text(width // 2, self._track_y, fill="#ddd",
+                                           font=("Segoe UI", 8, "bold"))
+        position = self._value_to_pos(self.volume)
+        self.coords(self.ring, position - self._thumb_radius, self._track_y - self._thumb_radius,
+                    position + self._thumb_radius, self._track_y + self._thumb_radius)
+        self.itemconfig(self._label, text=f"{self.volume:.0f}%")
+        self.itemconfig(self.ring, fill="#555" if self._disabled else "#2ee")
 
     def disable(self, disabled: bool):
         """Disables or enables the knob and updates its appearance."""
+        self._disabled = bool(disabled)
         if disabled:
             self.configure(state="disabled")
             self.unbind("<Button-1>")
             self.unbind("<B1-Motion>")
             self.unbind("<ButtonRelease-1>")
-            self.itemconfig(self.ring, fill="#555")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#555")
         else:
             self.configure(state="normal")
             self.bind("<Button-1>", self._start)
             self.bind("<B1-Motion>", self._drag)
             self.bind("<ButtonRelease-1>", self._commit)
-            self.itemconfig(self.ring, fill="#2ee")
+            if self.ring is not None:
+                self.itemconfig(self.ring, fill="#2ee")
         self._draw()
 
     def _value_to_pos(self, value: float) -> float:
@@ -568,4 +486,3 @@ class VolumeSlider(tk.Canvas):
         self._dragging = False
         if self.cb:
             self.cb(self.volume)
-            

@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from importlib.util import find_spec
+from importlib.metadata import version, PackageNotFoundError
 from typing import Dict, List, Optional, Tuple
 
 # --- tqdm installation ---
@@ -42,14 +43,10 @@ class AutoDependencies:
         # Enhanced package mapping with version constraints and alternatives
         self.packages = {
             "numpy": {"module": "numpy", "min_version": "1.20.0"},
-            "pyfftw": {"module": "pyfftw", "min_version": None},
             "av": {"module": "av", "min_version": None},
-            "scipy": {"module": "scipy", "min_version": None},
             "colorama": {"module": "colorama", "min_version": None},
             "requests": {"module": "requests", "min_version": "2.25.0"},
             "sounddevice": {"module": "sounddevice", "min_version": None},
-            "soundfile": {"module": "soundfile", "min_version": None},
-            "pydub": {"module": "pydub", "min_version": None},
             "mutagen": {"module": "mutagen", "min_version": None},
             "yt-dlp": {"module": "yt_dlp", "min_version": None},
             "Flask": {"module": "flask", "min_version": "2.0.0"},
@@ -58,6 +55,8 @@ class AutoDependencies:
             "aiohttp": {"module": "aiohttp", "min_version": "3.7.0"},
             "psutil": {"module": "psutil", "min_version": None},
             "waitress": {"module": "waitress", "min_version": None},
+            "playwright": {"module": "playwright", "min_version": "1.40.0"},
+            "ytmusicapi": {"module": "ytmusicapi", "min_version": "1.8.0"},
         }
         
         self.missing_details = []
@@ -247,18 +246,11 @@ class AutoDependencies:
             print(f"❌ pip not available: {e}")
             return False
 
-    def _get_installed_version(self, package_name: str) -> Optional[str]:
-        """Get the installed version of a package."""
+    def _get_installed_version(self, package_name):
         try:
-            result = subprocess.run([sys.executable, "-m", "pip", "show", package_name], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                for line in result.stdout.split('\n'):
-                    if line.startswith('Version:'):
-                        return line.split(':', 1)[1].strip()
-        except Exception:
-            pass
-        return None
+            return version(package_name)
+        except PackageNotFoundError:
+            return None
 
     def _version_compare(self, current: str, required: str) -> bool:
         """Simple version comparison. Returns True if current >= required."""
@@ -284,7 +276,7 @@ class AutoDependencies:
             print("❌ pip is not available. Cannot proceed with dependency management.")
             sys.exit(1)
             
-        self.ensure_build_tools()
+        # Prefer binary wheels. A music player does not need a compiler installation.
         importlib.invalidate_caches()
         
         for pkg_name, pkg_info in self.packages.items():
@@ -337,6 +329,13 @@ class AutoDependencies:
                 return
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+
+        bundled = Path(__file__).parent / "ffmpeg-bin"
+        binary = next(bundled.glob("**/ffmpeg.exe"), None) if bundled.exists() else None
+        if binary and binary.with_name("ffprobe.exe").is_file():
+            os.environ["PATH"] = str(binary.parent) + os.pathsep + os.environ["PATH"]
+            print("✅ [FFMPEG] Using bundled executables")
+            return
 
         print("🔧 [FFMPEG/FFPROBE] Not found. Attempting to install...")
         
@@ -458,7 +457,7 @@ class AutoDependencies:
         
         # Regular installation for other packages
         try:
-            cmd = [sys.executable, "-m", "pip", "install", pkg_name]
+            cmd = [sys.executable, "-m", "pip", "install", "--only-binary=:all:", pkg_name]
             if not (hasattr(sys, 'real_prefix') or 
                    (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix)):
                 cmd.append("--user")
@@ -471,7 +470,12 @@ class AutoDependencies:
                 #timeout=self.timeout * 2  # Does not work on Py 3.13
             )
             
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=180)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
             
             if process.returncode == 0:
                 print(f"  ✅ Successfully installed '{pkg_name}'")

@@ -1,185 +1,120 @@
-import sys, threading, os, colorama
+"""Bounded logging with recoverable rotation and a draining shutdown."""
+import os
+from pathlib import Path
+import sys
+import threading
 from collections import deque
 
-# Initialize colorama to enable ANSI escape sequences on Windows terminals
-colorama.init()
+try:
+    import colorama
+    colorama.init()
+except ImportError:
+    pass
+
 
 class OutputRedirector:
-    """
-    Redirects sys.stdout and sys.stderr to an internal buffer and a log file
-    in a separate, non-blocking thread.
-    
-    This design is complex but offers granular control over logging behavior.
-    """
-    filename = '.logging.txt'
-    
-    def __init__(self, enable_dual_logging=False, buffer_size=64*1024, flush_interval=10, max_file_size=1024*1024):
-        """
-        Initializes the output redirection system.
+    filename = str(Path(__file__).parent / ".logging.txt")
 
-        Args:
-            enable_dual_logging (bool): If True, output is also written to the original
-                                        stdout/stderr in real-time.
-            buffer_size (int): The size in bytes of the buffer before a flush is triggered.
-            flush_interval (int): The maximum time in seconds between flushes.
-            max_file_size (int): The size in bytes at which the log file will be rotated.
-        """
+    def __init__(self, enable_dual_logging=False, buffer_size=64 * 1024,
+                 flush_interval=10, max_file_size=1024 * 1024):
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval
         self.max_file_size = max_file_size
         self.dual_log = enable_dual_logging
-        
-        # Ensure the log file directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(self.filename)), exist_ok=True)
-        
-        # Clear the log file on startup to avoid appending to old data
-        try:
-            with open(self.filename, 'w', encoding='utf-8') as f:
-                f.write('')
-        except Exception as e:
-            sys.__stderr__.write(f"Warning: Could not clear log file on startup: {e}\n")
-        
-        # The main buffer for incoming writes
         self.buffer = deque()
         self.buffer_length = 0
-        
-        # A threading.Condition object for signaling between threads
+        self.dropped_messages = 0
         self.buffer_condition = threading.Condition()
-        
-        # Control flags
         self.shutdown = False
-        
-        # Store original streams to restore them later
-        self.original_stdout = sys.stdout
-        self.original_stderr = sys.stderr
-        
-        # Background flush thread handles writing to the file
-        self.flush_thread = threading.Thread(target=self._background_flush, daemon=True)
+        self.original_stdout, self.original_stderr = sys.stdout, sys.stderr
+        self.file = None
+        self.flush_thread = threading.Thread(target=self._background_flush,
+                                             daemon=True, name="log-writer")
         self.flush_thread.start()
-        
-        # Redirect standard streams
-        sys.stdout = self
-        sys.stderr = self
-        
-    def write(self, text):
-        """
-        Handles incoming text from print statements. Appends it to the buffer.
-        """
-        if not text or self.shutdown:
-            return len(text) if text else 0
+        sys.stdout = sys.stderr = self
 
-        # Dual log: write to original output as well
+    def write(self, text):
+        if not text or self.shutdown:
+            return len(text or "")
         if self.dual_log:
             try:
-                # Use a raw write to avoid infinite recursion
                 self.original_stdout.write(text)
-                self.original_stdout.flush()
             except Exception:
                 pass
-
-        # Use the condition variable to manage access to the buffer
         with self.buffer_condition:
+            if self.buffer_length + len(text) > self.buffer_size * 2:
+                self.dropped_messages += 1
+                return len(text)
             self.buffer.append(text)
             self.buffer_length += len(text)
-            
-            # If the buffer is full, wake the background thread to flush
             if self.buffer_length >= self.buffer_size:
                 self.buffer_condition.notify()
-
         return len(text)
-    
-    def flush(self):
-        """
-        Requests an immediate buffer flush. Wakes the background thread.
-        """
-        with self.buffer_condition:
-            if self.buffer_length > 0:
-                self.buffer_condition.notify()
-    
-    def _rotate_file(self):
-        """
-        Rotates the log file when it exceeds the maximum size.
-        """
-        if os.path.exists(self.filename):
-            file_size = os.path.getsize(self.filename)
-            if file_size > self.max_file_size:
-                # Close the current file handle before renaming
-                self.file.close()
-                os.rename(self.filename, f"{self.filename}.1")
-                # Re-open the file to continue writing to the new empty log
-                self.file = open(self.filename, 'a', encoding='utf-8')
-    
-    def _background_flush(self):
-        """
-        Background thread for writing buffer content to the log file.
-        """
-        self.file = None
-        
-        try:
-            # Open the file once and keep the handle open
-            self.file = open(self.filename, 'a', encoding='utf-8', buffering=8192)
-            
-            while not self.shutdown:
-                # Wait for a notification or timeout
-                with self.buffer_condition:
-                    self.buffer_condition.wait(timeout=self.flush_interval)
-                    
-                    # Swap the current buffer to a local buffer for writing
-                    local_buffer = self.buffer
-                    self.buffer = deque()
-                    self.buffer_length = 0
 
-                # Write the local buffer content to the file
-                if local_buffer:
-                    for chunk in local_buffer:
-                        self.file.write(chunk)
-                    self.file.flush()
-                
-                # Check file size and rotate if needed
-                self._rotate_file()
-                
-        except (OSError, IOError) as e:
-            sys.__stderr__.write(f"Warning: Error writing to log file: {e}\n")
-        finally:
-            # Ensure the file is closed on shutdown or error
-            if self.file:
-                try:
-                    self.file.close()
-                except Exception:
-                    pass
-    
-    def restore(self):
-        """
-        Restores original streams and cleans up resources. This is CRITICAL
-        to call before the application exits.
-        """
-        if self.shutdown:
-            return
-        
-        self.shutdown = True
-        
-        # Wake the flushing thread to perform a final flush
+    def flush(self):
         with self.buffer_condition:
             self.buffer_condition.notify()
-        
-        # Wait for the flush thread to finish its work
-        self.flush_thread.join(timeout=2.0)
-        
-        # Restore the original streams
-        sys.stdout = self.original_stdout
-        sys.stderr = self.original_stderr
-    
+
+    def _rotate_file(self):
+        if os.path.isfile(self.filename) and os.path.getsize(self.filename) >= self.max_file_size:
+            if self.file:
+                self.file.close()
+                self.file = None
+            os.replace(self.filename, self.filename + ".1")
+
+    def _background_flush(self):
+        try:
+            while True:
+                with self.buffer_condition:
+                    if not self.shutdown and self.buffer_length < self.buffer_size:
+                        self.buffer_condition.wait(timeout=self.flush_interval)
+                    chunks = self.buffer
+                    self.buffer = deque()
+                    self.buffer_length = 0
+                    dropped, self.dropped_messages = self.dropped_messages, 0
+                    stopping = self.shutdown
+                if chunks or dropped:
+                    try:
+                        self._rotate_file()
+                        if self.file is None:
+                            self.file = open(self.filename, "a", encoding="utf-8", buffering=8192)
+                        if dropped:
+                            self.file.write(f"[Logging] Dropped {dropped} messages to limit memory.\n")
+                        self.file.writelines(chunks)
+                        self.file.flush()
+                    except OSError:
+                        if self.file:
+                            try:
+                                self.file.close()
+                            except OSError:
+                                pass
+                        self.file = None
+                if stopping:
+                    break
+        finally:
+            if self.file:
+                self.file.close()
+
+    def restore(self):
+        if self.shutdown:
+            return
+        with self.buffer_condition:
+            self.shutdown = True
+            self.buffer_condition.notify()
+        self.flush_thread.join(timeout=2)
+        sys.stdout, sys.stderr = self.original_stdout, self.original_stderr
+
     def __enter__(self):
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
+
+    def __exit__(self, *args):
         self.restore()
 
 class log_loader:
     """
     A simple wrapper for formatted and colored console and file output.
     """
-    def __init__(self, proj_name="", custom_colors=None, debugging=True):
+    def __init__(self, proj_name="", custom_colors=None, debugging=False):
         self.proj_name = proj_name
         self.do_debug = debugging
 

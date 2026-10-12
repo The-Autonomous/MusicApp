@@ -10,3 +10,10 @@ LOCAL_autoUpdate.py
 /backup
 /debug
 *.1
+/.youtube-auth/
+/playwright/.auth/
+/MusicApp/youtube_session.bin
+*.opus
+*.m4a
+*.webm
+*.tmp

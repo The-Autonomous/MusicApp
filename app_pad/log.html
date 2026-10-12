@@ -365,38 +365,30 @@
                         // Process the escape sequence
                         const codes = match[1].split(';').filter(code => code !== '');
                         
-                        for (const code of codes) {
-                            if (code === '0' || code === '') {
-                                // Reset
-                                if (openSpan) {
-                                    result += '</span>';
-                                    openSpan = false;
-                                }
+                        for (let index = 0; index < codes.length; index++) {
+                            const code = codes[index];
+                            if (code === '38' && codes[index + 1] === '2' && index + 4 < codes.length) {
+                                const rgb = codes.slice(index + 2, index + 5).map(value =>
+                                    Math.max(0, Math.min(255, Number(value))));
+                                if (openSpan) result += '</span>';
+                                result += '<span style="color:rgb(' + rgb.join(',') + ')">';
+                                openSpan = true;
+                                currentClasses.clear();
+                                index += 4;
+                            } else if (code === '0') {
+                                if (openSpan) result += '</span>';
+                                openSpan = false;
                                 currentClasses.clear();
                             } else if (this.colorMap[code]) {
-                                // Remove any existing color classes
                                 for (const cls of currentClasses) {
-                                    if (cls.startsWith('ansi-') && !cls.includes('bold') && !cls.includes('dim') && !cls.includes('italic') && !cls.includes('underline')) {
-                                        currentClasses.delete(cls);
-                                    }
+                                    if (Object.values(this.colorMap).includes(cls)) currentClasses.delete(cls);
                                 }
                                 currentClasses.add(this.colorMap[code]);
                             } else if (this.styleMap[code]) {
                                 currentClasses.add(this.styleMap[code]);
-                            } else if (code.startsWith('38;2;')) {
-                                // RGB color support
-                                const rgbMatch = match[1].match(/38;2;(\d+);(\d+);(\d+)/);
-                                if (rgbMatch) {
-                                    if (openSpan) {
-                                        result += '</span>';
-                                    }
-                                    result += `<span style="color: rgb(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]})">`;
-                                    openSpan = true;
-                                    currentClasses.clear(); // Clear classes when using inline style
-                                }
                             }
                         }
-                        
+
                         lastIndex = match.index + match[0].length;
                     }
                     
@@ -493,7 +485,7 @@
                     this.updateStatus('Loading logs...');
                     this.updateButtons();
 
-                    fetch(`/logs/api?start=${this.startLine}&count=${this.count}`)
+                    fetch(`/logs/api?start=${this.startLine}&count=${this.count}`, { signal: AbortSignal.timeout(5000) })
                         .then(res => res.json())
                         .then(data => {
                             if (data.error) {
@@ -518,14 +510,15 @@
                         this.logContainer.innerHTML = '<div class="loading">No logs found</div>';
                         return;
                     }
-                    this.logContainer.innerHTML = lines.map(line => `<div class="log-line">${this.ansiParser.parseAnsiToHtml(line)}</div>`).join('');
+                    const content = lines.map(line => `<div class="log-line">${this.ansiParser.parseAnsiToHtml(line)}</div>`).join('');
+                    if (this.logContainer.innerHTML !== content) this.logContainer.innerHTML = content;
                     this.updateStatus('Success')
                 }
 
                 renderError(message) {
                     this.logContainer.innerHTML = `<div class="error">${this.ansiParser.escapeHtml(message)}</div>`;
                     this.lineCount.textContent = 'Lines: 0';
-                    if (!this.autoRefresh) {this.updateStatus('Auto-Refreshing...'); setTimeout(() => loadLogs(), 1000);}
+                    this.updateStatus('Refresh failed. Use Refresh to retry.');
                 }
 
                 nextPage() {
@@ -546,7 +539,9 @@
                     if (this.autoRefresh) {
                         this.autoRefreshBtn.textContent = '⏹️ Stop';
                         this.autoRefreshBtn.classList.add('auto-refresh');
-                        this.autoRefreshInterval = setInterval(() => this.loadLogs(), 15000);
+                        this.autoRefreshInterval = setInterval(() => {
+                            if (!document.hidden) this.loadLogs();
+                        }, 15000);
                         this.loadLogs(); // Load immediately
                     } else {
                         this.autoRefreshBtn.textContent = '⏱️ Auto';

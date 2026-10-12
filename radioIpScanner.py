@@ -1,5 +1,5 @@
 import asyncio, socket, re, ipaddress
-from aiohttp import ClientSession, ClientTimeout, ClientConnectorError
+from aiohttp import ClientSession, ClientTimeout, ClientConnectorError, TCPConnector
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -11,9 +11,10 @@ def get_local_ip():
         s.close()
 
 class IPRadioScanner:
-    def __init__(self, timeout: float = 5.0, concurrency: int = 50, debug: bool = True):
+    def __init__(self, timeout: float = 2.0, concurrency: int = 4, debug: bool = False):
         self.timeout   = timeout
-        self.semaphore = asyncio.Semaphore(concurrency)
+        self.concurrency = concurrency
+        self.semaphore = None
         self.debug     = debug
 
         host_ip       = get_local_ip()
@@ -76,8 +77,9 @@ class IPRadioScanner:
         return None
 
     async def getAllIps(self, callback):
+        self.semaphore = asyncio.Semaphore(self.concurrency)
         timeout = ClientTimeout(total=self.timeout)
-        async with ClientSession(timeout=timeout) as session:
+        async with ClientSession(timeout=timeout, connector=TCPConnector(limit=self.concurrency)) as session:
             tasks = [
                 asyncio.create_task(self._fetch(session, str(ip)))
                 for ip in self.network.hosts()
@@ -95,6 +97,7 @@ class IPRadioScanner:
                 print(f"Scan complete. Found {results_found} radio servers.")
 
     async def getFirstIp(self, callback):
+        self.semaphore = asyncio.Semaphore(self.concurrency)
         timeout = ClientTimeout(total=self.timeout)
         async with ClientSession(timeout=timeout) as session:
             tasks = [
@@ -111,6 +114,7 @@ class IPRadioScanner:
                     for t in tasks:
                         if not t.done():
                             t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
                     return
                     
             if self.debug:
@@ -120,7 +124,7 @@ class SimpleRadioScan:
     """
     Synchronous wrapper around IPRadioScanner for easy calls.
     """
-    def __init__(self, timeout: float = 5.0, concurrency: int = 50, debug: bool = False):
+    def __init__(self, timeout: float = 2.0, concurrency: int = 4, debug: bool = False):
         self.scanner = IPRadioScanner(timeout=timeout, concurrency=concurrency, debug=debug)
 
     def scan_all(self, callback):

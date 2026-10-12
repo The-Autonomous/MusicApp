@@ -8,7 +8,7 @@ except ImportError:
     from .log_loader import log_loader, OutputRedirector
 
 # Instantiate the logger for use within the PlayerRecommender class
-ll = log_loader("Recommendations", debugging=True)
+ll = log_loader("Recommendations", debugging=False)
 
 class PlayerRecommender:
     """
@@ -230,7 +230,7 @@ class PlayerRecommender:
             current_words = set(re.findall(r'\b\w+\b', current_query.strip().lower()))
             
             suggestions = []
-            for word, count in self.search_word_counts.most_common():
+            for word, count in self.search_word_counts.most_common(top_n + len(current_words)):
                 if word not in current_words:
                     suggestions.append(word)
                 if len(suggestions) >= top_n:

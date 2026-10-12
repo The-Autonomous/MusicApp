@@ -2,6 +2,7 @@ import ctypes, os, random
 import tkinter as tk
 from tkinter import font, messagebox, ttk
 from threading import Lock, RLock, Thread
+from queue import Queue, Empty, Full
 from pynput import keyboard, mouse
 from time import monotonic, sleep
 from math import cos, pi, sin, ceil
@@ -44,6 +45,12 @@ LWA_ALPHA = 0x00000002 # Use this flag with SetLayeredWindowAttributes for alpha
 ### Logging Handle ###
 
 ll = log_loader("Ghost", debugging = False)
+
+class _MousePoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+class _LastInput(ctypes.Structure):
+    _fields_ = [("size", ctypes.c_uint), ("tick", ctypes.c_uint)]
 
 ### Theming ###
 
@@ -287,6 +294,8 @@ class MouseTracker:
     def _on_click(self, x, y, button, pressed):
         """Internal callback for pynput mouse events."""
         try:
+            if pressed:
+                self.mouse_tracking['LastCheckedTime'] = monotonic()
             if button == mouse.Button.right:
                 self._right_button_pressed = pressed
                 if pressed:
@@ -301,9 +310,7 @@ class MouseTracker:
 
     def mouse_pos(self):
         """Returns [x, y] of mouse cursor (works in fullscreen games)."""
-        class POINT(ctypes.Structure):
-            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-        pt = POINT()
+        pt = _MousePoint()
         self.user32.GetCursorPos(ctypes.byref(pt))
         prevPosition = self.mouse_tracking['CurrentPosition'] # Log The Current Position
         self.mouse_tracking['CurrentPosition'] = (pt.x, pt.y) # Set It To The New Position
@@ -394,6 +401,11 @@ class GhostOverlay:
     def __init__(self, root):
         ### Root ###
         self.root = root
+        self._closing = False
+        self._ui_queue = Queue(maxsize=256)
+        self._display_dirty = False
+        self._layout_key = None
+        self._last_mouse_poll = 0.0
         self.theme = ThemeManager()
         self.theme.apply_ttk_styles(self.root)
         
@@ -473,7 +485,7 @@ class GhostOverlay:
         
         ### Finalization ###
         self.keep_overlay_on_top_init()
-        Thread(target=self.handle_overlay_background_process, daemon=True).start() # Handle Dragability (Needs Seperate Thread For It To Work Even When No Display Updates Occur)
+        self.root.after(100, self._ui_tick)
         self.root.after(0, self.display_overlay) # Start the overlay display process
 
 #####################################################################################################
@@ -569,6 +581,14 @@ class GhostOverlay:
                 'modifiable': True
             },
             {
+                'id': 'youtube_sync',
+                'required': ['right alt', 'y'],
+                'alt_needed': True,
+                'action': lambda: self.youtube_sync.show(self),
+                'hint': 'Connect YouTube / Sync Liked Songs',
+                'modifiable': True
+            },
+            {
                 'id': 'toggle_overlay',
                 'required': ['alt', 'shift'],
                 'alt_needed': True,
@@ -655,11 +675,11 @@ class GhostOverlay:
         if name in getattr(self, 'hidden_keys', {}):
             action = self.hidden_keys[name]
             if callable(action):
-                action()
+                self.post_ui(action)
 
         if self.is_listening_for_modification:
             if name == 'escape':
-                self._cancel_key_modification(refresh_hints=True)
+                self.post_ui(self._cancel_key_modification, refresh_hints=True)
                 return
 
             # We are expecting 'alt' + new_key. 'alt' is implicit.
@@ -667,14 +687,12 @@ class GhostOverlay:
             # Ignore standalone modifiers as the new distinguishing key, unless it's shift for e.g. Alt+Shift
             # For simplicity, we take any non-'alt' key as the new distinguishing key.
             if name in ('alt', 'ctrl'): # Cannot use alt or ctrl as the distinguishing key with 'alt'
-                self.key_hints_popup.withdraw() # Hide temporarily to avoid stacking
-                messagebox.showwarning("Invalid Key", f"Cannot use '{name.upper()}' as the distinguishing key with ALT. Try another key.")
-                self.key_hints_popup.lift()
+                self.post_ui(messagebox.showwarning, "Invalid Key", f"Cannot use '{name.upper()}' with ALT. Try another key.")
                 return # Wait for a different key
 
             # If 'name' is 'shift', 'right shift', or 'right alt', it's a valid part of a combo
             # The design is Alt + `name`.
-            self.finalize_key_modification(name)
+            self.post_ui(self.finalize_key_modification, name)
             return
 
         if name in self.keys_pressed:
@@ -743,10 +761,7 @@ class GhostOverlay:
             if required_met and forbidden_met:
                 action_func = action.get('action')
                 if callable(action_func):
-                    try:
-                        self.root.after(0, action_func)
-                    except Exception as e:
-                        self.root.after(2000, action_func) # Retry after a short delay
+                    self.post_ui(action_func)
                     self.last_toggle_state = True # Prevent immediate re-trigger
                     # Optional: More selective reset of keys_pressed if needed
                     # For example, keep 'alt' pressed but clear the action-specific key:
@@ -970,11 +985,12 @@ class GhostOverlay:
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        self.key_hints_popup.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        self.key_hints_popup._binding_variables = []
         for i, action in enumerate(self.key_actions):
             keys_display = " + ".join(k.upper() for k in action['required'])
             
@@ -1008,11 +1024,13 @@ class GhostOverlay:
                 )
                 edit_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
                 
+                required_variable = tk.BooleanVar(master=self.key_hints_popup, value=action.get('alt_needed', True))
+                self.key_hints_popup._binding_variables.append(required_variable)
                 alt_required_check = ttk.Checkbutton(
                     action_row_frame,
                     text=f" ALT{"" if action.get('alt_needed', True) else " Not"} Needed",
                     style="TCheckbutton",
-                    variable=tk.BooleanVar(value=not action.get('alt_needed', True)),
+                    variable=required_variable,
                     command=lambda act=action: self._on_alt_toggle(act)
                 )
                 alt_required_check.grid(row=0, column=3, sticky="e", padx=(0, 10))
@@ -1123,8 +1141,8 @@ class GhostOverlay:
         rows = ceil(len(bands) / max_cols)
         w = min(len(bands), max_cols)*per_knob + 40
         h = rows*110 + 190
-        x = self.window.winfo_x() + self.window.winfo_width()//2 - w//2
-        y = self.window.winfo_y() + self.window.winfo_height() + 20
+        x = (self.root.winfo_screenwidth() - w) // 2
+        y = 40
         win.geometry(f"{w}x{h}+{x}+{y}")
         
         card = tk.Canvas(win, width=w, height=h, bg=self.theme.COLORS["window_bg"], highlightthickness=0)
@@ -1156,7 +1174,6 @@ class GhostOverlay:
             init = _eq_target.get_band(freq, 0.0)
             if isinstance(init, tuple): init = init[0]
             callback = lambda g, f=freq: knob_changed(g, f)
-            if freq >= fmax: callback = lambda g, f=freq: knob_changed(0, f)
             knob = EQKnob(col, radius=26, init_gain=init, callback=callback, bg=self.theme.COLORS["window_bg"])
             knob.pack()
             self.eq_knobs[freq] = knob
@@ -1167,8 +1184,7 @@ class GhostOverlay:
             for f, g in zip(bands, self.EQ_PRESETS[name]):
                 self.eq_knobs[f].gain = g
                 self.eq_knobs[f]._draw()
-                if f < fmax:
-                    _eq_target.set_band(f, g)
+                _eq_target.set_band(f, g)
             preset_var.set(name)
 
         preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *self.EQ_PRESETS.keys(), command=apply_preset, style="TMenubutton")
@@ -1182,25 +1198,35 @@ class GhostOverlay:
         echo_frame.place(relx=0.5, rely=0.63, anchor="n")
 
         delay_init = getattr(_eq_target, "echo", None)
-        delay_ms   = delay_init.delay_ms if delay_init else 0
+        delay_ms   = delay_init.delay_ms if delay_init else 350
         wet_pct    = int(delay_init.wet*100) if delay_init else 0
 
         ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Echo", font=(self.theme.FONTS["ui_normal"][0], 9, "bold")).grid(row=0, column=0, columnspan=2, pady=(0,3))
 
         def update_echo(_=None):
-            if delay_ms == 0 and wet_pct == 0:
+            if wet_pct == 0:
                 _eq_target.disable_echo()
             elif not getattr(_eq_target, "echo", None):
                 _eq_target.enable_echo(delay_ms=delay_ms, wet=wet_pct/100, feedback=0.35)
             else:
                 _eq_target.set_echo(delay_ms=delay_ms, wet=wet_pct/100)
 
-        delay_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=delay_ms, callback=lambda v: (globals().update(delay_ms=int(max(0,v))), update_echo())[1])
-        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Delay ms").grid(row=1, column=0, padx=6, pady=2)
+        def set_delay(value):
+            nonlocal delay_ms
+            delay_ms = max(10, int(value * 10))
+            update_echo()
+
+        def set_wet(value):
+            nonlocal wet_pct
+            wet_pct = max(0, int(value))
+            update_echo()
+
+        delay_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=delay_ms / 10, callback=set_delay)
+        ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Delay ×10 ms").grid(row=1, column=0, padx=6, pady=2)
         delay_knob.grid(row=2, column=0, padx=6)
         self.all_eq_knobs.append(delay_knob)
 
-        wet_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=wet_pct, callback=lambda v: (globals().update(wet_pct=int(max(0,v))), update_echo())[1])
+        wet_knob = PercentKnob(echo_frame, radius=20, bg=self.theme.COLORS["window_bg"], init_gain=wet_pct, callback=set_wet)
         ttk.Label(echo_frame, background=self.theme.COLORS["window_bg"], text="Wet %").grid(row=1, column=1, padx=6, pady=2)
         wet_knob.grid(row=2, column=1, padx=6)
         self.all_eq_knobs.append(wet_knob)
@@ -1239,7 +1265,6 @@ class GhostOverlay:
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         x, y = (sw - ow) // 2, (sh - oh) // 2
         win.geometry(f"{ow}x{oh}+{x}+{y}")
-        ctypes.windll.user32.SetCursorPos(x + (ow // 2), y + (oh // 2))
         self._update_eq_ui_state()
         
 #####################################################################################################
@@ -1248,7 +1273,7 @@ class GhostOverlay:
         # Prevent opening if in radio mode or already open
         if self.display_radio or self._is_searching or self.is_spinning_downloading:
             return
-        if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+        if getattr(self, 'search_overlay', None) and self.search_overlay.winfo_exists():
             self.close_search_overlay(getattr(self, "_was_main_overlay_open_before_search", True))
             return
 
@@ -1262,15 +1287,19 @@ class GhostOverlay:
             searching_mechanism = self.MusicPlayer.recommend
             type_to_search = random.choice(['song', 'artist', 'search_history'])
             if type_to_search == 'song':
-                search_result = random.choice(searching_mechanism.analyze_top_songs(top_n=5))
+                choices = searching_mechanism.analyze_top_songs(top_n=5)
+                search_result = random.choice(choices) if choices else ('', 0, '')
                 clean_song_title = self.TitleCleaner.clean(search_result[0])
                 split_song = clean_song_title.split(" - ", 1)
                 if len(split_song) == 2:
                     search_recommendation = f"{split_song[1]} By {search_result[2]}".title()
                 else:
                     search_recommendation = f"{clean_song_title} By {search_result[2]}".title()
+                if not clean_song_title:
+                    search_recommendation = ""
             elif type_to_search == 'artist':
-                search_result = random.choice(searching_mechanism.analyze_top_artists(top_n=5))
+                choices = searching_mechanism.analyze_top_artists(top_n=5)
+                search_result = random.choice(choices) if choices else ('', 0)
                 search_recommendation = search_result[0].title()
             elif type_to_search == 'search_history':
                 search_recommendation = searching_mechanism.suggest_search_terms_str()
@@ -1356,7 +1385,7 @@ class GhostOverlay:
         def _animate_search_spinner(spinner_chars, index=0):
             if self._is_searching:
                 search_spinner_label.config(text=f"Searching {spinner_chars[index]}")
-                self.search_overlay.after(150, _animate_search_spinner, spinner_chars, (index + 1) % len(spinner_chars))
+                self._spinner_after_id = self.search_overlay.after(150, _animate_search_spinner, spinner_chars, (index + 1) % len(spinner_chars))
 
         def _start_search_spinner():
             results_list.grid_remove()
@@ -1377,7 +1406,7 @@ class GhostOverlay:
             download_canvas.delete("all")
             w, h = download_canvas.winfo_width(), download_canvas.winfo_height()
             if w < 10 or h < 10: # Wait for canvas to be sized
-                self.search_overlay.after(50, _animate_downloading, angle)
+                self._download_after_id = self.search_overlay.after(50, _animate_downloading, angle)
                 return
 
             cx, cy = w // 2, h // 2
@@ -1401,7 +1430,7 @@ class GhostOverlay:
             download_canvas.create_oval(cx-r_label, cy-r_label, cx+r_label, cy+r_label, fill=self.theme.COLORS["accent_active"], outline="")
             download_canvas.create_text(cx, cy, text="♪", font=("Segoe UI Symbol", int(r_label*1.2)), fill="#111")
             
-            self.search_overlay.after(25, _animate_downloading, angle + 5)
+            self._download_after_id = self.search_overlay.after(150, _animate_downloading, angle + 15)
 
         def _show_download_animation():
             top_frame.grid_remove()
@@ -1455,11 +1484,13 @@ class GhostOverlay:
                 results_list.insert(tk.END, "  No results found.")
                 results_list.itemconfig(0, {'fg': self.theme.COLORS["placeholder"]})
 
-        def _search_thread_target(term, dont_log=False):
+        search_window = self.search_overlay
+
+        def _search_thread_target(term, use_youtube, dont_log=False):
             try:
                 if getattr(self, 'MusicPlayer', None) and not dont_log:
                     self.MusicPlayer.recommend.log_search(term)
-                if youtube_search_var.get():
+                if use_youtube:
                     effective_term = f"{term} (OFFICIAL SONG)"
                     raw_results = self.MusicPlayer.get_search_term(term)
                     do_playlist = len(raw_results) > 5
@@ -1474,8 +1505,10 @@ class GhostOverlay:
                 ll.error(f"Search thread failed: {e}")
                 raw_results = []
             finally:
-                if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
-                    self.search_overlay.after(0, _update_ui_with_results, raw_results)
+                def finish_search():
+                    if getattr(self, 'search_overlay', None) is search_window and search_window.winfo_exists():
+                        _update_ui_with_results(raw_results)
+                self.post_ui(finish_search)
 
         def _trigger_search(forced_term: str = None, dont_log: bool = False):
             if self._is_searching == True: return
@@ -1486,7 +1519,7 @@ class GhostOverlay:
                 return
 
             _start_search_spinner()
-            Thread(target=_search_thread_target, args=(search_term,dont_log,), daemon=True).start()
+            Thread(target=_search_thread_target, args=(search_term,youtube_search_var.get(),dont_log), daemon=True).start()
 
         def youtube_command():
             if hasattr(self, 'MusicPlayer'):
@@ -1510,9 +1543,11 @@ class GhostOverlay:
                 else:
                     ll.error(f"Unknown song type for download: {song_type}")
             finally:
-                if hasattr(self, 'search_overlay') and self.search_overlay.winfo_exists():
+                def finish_download():
                     self.is_spinning_downloading = False
-                    self.search_overlay.after(0, self.close_search_overlay, self._was_main_overlay_open_before_search)
+                    if getattr(self, 'search_overlay', None) is search_window and search_window.winfo_exists():
+                        self.close_search_overlay(self._was_main_overlay_open_before_search)
+                self.post_ui(finish_download)
 
         def handle_selection(_=None):
             selection_indices = results_list.curselection()
@@ -1526,7 +1561,8 @@ class GhostOverlay:
                 return
             
             self.is_spinning_downloading = True
-            _show_download_animation()
+            if song_type == 'url':
+                _show_download_animation()
             
             Thread(target=_download_thread_target, args=(path_or_url, song_type), daemon=True).start()
 
@@ -1587,10 +1623,25 @@ class GhostOverlay:
         
         if search_recommendation != "":
             ll.print(f"Search recommendation: {search_recommendation}")
-            Thread(target=_trigger_search, args=(search_recommendation, True,), daemon=True).start()
+            self.search_overlay.after(0, _trigger_search, search_recommendation, True)
 
     def close_search_overlay(self, restore_main_overlay=False):
         if hasattr(self, 'search_overlay') and self.search_overlay and self.search_overlay.winfo_exists():
+            for attribute in ('_spinner_after_id', '_download_after_id'):
+                identity = getattr(self, attribute, None)
+                if identity:
+                    try:
+                        self.search_overlay.after_cancel(identity)
+                    except tk.TclError:
+                        pass
+                    setattr(self, attribute, None)
+            if self._search_after_id:
+                try:
+                    self.search_overlay.after_cancel(self._search_after_id)
+                except tk.TclError:
+                    pass
+                self._search_after_id = None
+            self._is_searching = False
             self.search_overlay.grab_release()
             self.search_overlay.destroy()
             self.search_overlay = None
@@ -1624,14 +1675,14 @@ class GhostOverlay:
             
     def _trigger_volume_up(self):
         try:
-            if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
+            if getattr(self, 'MusicPlayer', None) and self.playerState:
                 self.MusicPlayer.up_volume()
         except Exception as e:
             ll.error(f"Error in volume up trigger: {e}")
             
     def _trigger_volume_dwn(self):
         try:
-            if hasattr(self, 'MusicPlayer') and not getattr(self, "_eq_window", None) and not self._eq_window.winfo_exists() and self.playerState:
+            if getattr(self, 'MusicPlayer', None) and self.playerState:
                 self.MusicPlayer.dwn_volume()
         except Exception as e:
             ll.error(f"Error in volume down trigger: {e}")
@@ -1642,6 +1693,8 @@ class GhostOverlay:
             
     def _trigger_lyrics_toggle(self):
         self.display_lyrics = not self.display_lyrics
+        if self.MusicPlayer:
+            self.MusicPlayer.set_lyrics_enabled(self.display_lyrics)
         if self.window and self.running_lyrics:
             self.root.after(0, self.update_display)
                 
@@ -1712,13 +1765,19 @@ class GhostOverlay:
             "Restart Music Player",
             "Are you sure you want to restart the Music Player?"
         ):
-            try:
-                from adminRaise import Administrator
-            except:
-                from .adminRaise import Administrator
-                
-            ll.debug("Rebooting overlay and music player...")
-            Administrator.elevate(True)
+            import subprocess
+            import sys
+            from pathlib import Path
+            executable = sys.executable
+            if executable.lower().endswith('python.exe'):
+                windowless = Path(executable).with_name('pythonw.exe')
+                if windowless.is_file():
+                    executable = str(windowless)
+            from playerUtils import ProgramShutdown
+            ProgramShutdown().register_cleanup(lambda: subprocess.Popen(
+                [executable, str(Path(__file__).with_name('main.py'))],
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0))
+            self.close_application()
 
 #####################################################################################################
 
@@ -1745,7 +1804,7 @@ class GhostOverlay:
         
         # The condition for interactivity is now that the right mouse is down AND
         # the press that initiated it occurred within the overlay's bounds.
-        if self.mouseEvents.is_right_mouse_down() and self.mouseEvents.was_press_in_window():
+        if self.mouseEvents.is_right_mouse_down() and (self._overlay_dragging or self.mouseEvents.was_press_in_window()):
             # If we meet the drag condition, make the window interactive.
             if self.clickThroughState:
                 self.clickThroughState = False
@@ -1759,19 +1818,17 @@ class GhostOverlay:
                 self._overlay_dragging = True
                 self._win_start_x = self.window.winfo_x()
                 self._win_start_y = self.window.winfo_y()
+                self._win_start_size_width = ww
+                self._win_start_size_height = wh
                 
                 if self.window and self.window.winfo_exists():
-                    hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    ctypes.windll.user32.SetActiveWindow(hwnd)
-                    ctypes.windll.user32.SetFocus(hwnd)
-                    ctypes.windll.user32.BringWindowToTop(hwnd)
-                    
-                    # Simulate a right-click to ensure the window is focused and draggable.
-                    mouse_controller = mouse.Controller()
-                    mouse_controller.press(mouse.Button.right); mouse_controller.release(mouse.Button.right)
-                    mouse_controller.press(mouse.Button.left); mouse_controller.release(mouse.Button.left)
-                    mouse_controller.press(mouse.Button.right)
+                    # Track dragging directly; leave GTA focused and do not inject mouse clicks.
+                    pass
+            if self._overlay_dragging:
+                new_x = self._win_start_x + currentPosition[0] - self._drag_start_x
+                new_y = self._win_start_y + currentPosition[1] - self._drag_start_y
+                self.window.geometry(f"+{new_x}+{new_y}")
+                self._last_position = (new_x, new_y)
         else:
             # If the drag conditions are NOT met (e.g., mouse released, or press was outside):
             # 1. Reset the overlay to be click-through if it isn't already.
@@ -1817,8 +1874,7 @@ class GhostOverlay:
             self.running_lyrics = state
             if not state: self.player_metric['player_lyrics'] = ""
         
-        if self.window and self.window.winfo_exists():
-            self.root.after(0, self.update_display)
+        self.schedule_update()
 
     def wrap_text(self, text: str, max_chars_line: int = 30) -> str:
         if not text: return ""
@@ -1844,8 +1900,10 @@ class GhostOverlay:
 #####################################################################################################
 
     def display_overlay(self):
-        while not hasattr(self, 'MusicPlayer'): sleep(1)
-        self.root.after(0, self.open_overlay)
+        if self.MusicPlayer is None:
+            self.root.after(100, self.display_overlay)
+        else:
+            self.open_overlay()
 
     def keep_overlay_on_top_init(self):
         self.root.bind("<FocusIn>", self.keep_overlay_on_top)
@@ -1901,6 +1959,7 @@ class GhostOverlay:
         self.window.config(bg=transparent_color)
         self.toggle_overlay_clickthrough(self.clickThroughState)
 
+        self._layout_key = None
         self.canvas = RoundedCanvas(self.window, bg=transparent_color, highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
@@ -1951,6 +2010,13 @@ class GhostOverlay:
 
         try:
             self._create_canvas_items_if_needed(init_draw)
+            key = (self.player_metric['player_text'],
+                   self.player_metric['player_lyrics'] if self.running_lyrics and self.display_lyrics else '',
+                   len(self.player_metric['player_duration']))
+            if not init_draw and key == self._layout_key:
+                self.canvas.itemconfig(self.canvas_items['duration_text'], text=self.player_metric['player_duration'])
+                return
+            self._layout_key = key
 
             wrapped_player_text = self.wrap_text(self.player_metric['player_text'], 35)
             num_player_text_lines = wrapped_player_text.count('\n') + 1
@@ -2018,10 +2084,46 @@ class GhostOverlay:
 
 #####################################################################################################
 
+    def post_ui(self, callback, *args, **kwargs):
+        if not self._closing:
+            try:
+                self._ui_queue.put_nowait((callback, args, kwargs))
+            except Full:
+                pass
+
+    def _ui_tick(self):
+        if self._closing:
+            return
+        for _ in range(64):
+            try:
+                callback, args, kwargs = self._ui_queue.get_nowait()
+            except Empty:
+                break
+            try:
+                callback(*args, **kwargs)
+            except Exception as exc:
+                ll.error(f"Interface update: {exc}")
+        if self._display_dirty:
+            self._display_dirty = False
+            self.update_display()
+        now = monotonic()
+        if self.window and now - self._last_mouse_poll >= 0.25:
+            self._last_mouse_poll = now
+            try:
+                self.parse_mouse_over_overlay()
+            except tk.TclError:
+                pass
+        self.root.after(100, self._ui_tick)
+
     def schedule_update(self):
-        if self.window and not self._update_scheduled:
-            self._update_scheduled = True
-            self.root.after(100, self.update_display)
+        self._display_dirty = True
+
+    def close(self):
+        self._closing = True
+        self.readyForKeys = False
+        if self.listener:
+            self.listener.stop()
+        self.mouseEvents.stop()
             
     def set_text(self, text: str):
         with self.text_lock:
@@ -2030,7 +2132,13 @@ class GhostOverlay:
         self.schedule_update()
         
     def is_afk(self) -> bool:
-        return abs(monotonic() - self.mouseEvents.mouse_tracking["LastCheckedTime"]) >= self.mouseEvents.mouse_tracking["AFKTimeout"]
+        activity = _LastInput()
+        activity.size = ctypes.sizeof(activity)
+        if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(activity)):
+            ticks = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+            idle_seconds = ((ticks - activity.tick) & 0xFFFFFFFF) / 1000
+            return idle_seconds >= self.mouseEvents.mouse_tracking['AFKTimeout']
+        return monotonic() - self.mouseEvents.mouse_tracking['LastCheckedTime'] >= self.mouseEvents.mouse_tracking['AFKTimeout']
                 
     def set_duration(self, current_seconds: float, total_seconds: float):
         def format_time(seconds):
@@ -2047,6 +2155,8 @@ class GhostOverlay:
 
     def set_lyrics(self, text: str):
         with self.text_lock:
+            if self.player_metric['player_lyrics'] == (text or ""):
+                return
             self.player_metric['player_lyrics'] = text if text else ""
         self.schedule_update()
 
@@ -2057,8 +2167,8 @@ class GhostOverlay:
             self.radio_metric['availability'] = list(set(ip_list))
             if not self.radio_metric['availability'] or self.radio_metric['current_ip'] not in self.radio_metric['availability']:
                 self.radio_metric['current_ip'] = self.radio_metric['availability'][0] if self.radio_metric['availability'] else ''
-        if self.window and self.window.winfo_exists() and self.display_radio:
-             self.root.after(0, self.update_display)
+        if self.display_radio:
+            self.schedule_update()
         
     def _get_next_(self, items: list, value):
         if not items: return ''
@@ -2079,7 +2189,7 @@ class GhostOverlay:
         
     def close_application(self):
         """Properly close the entire application"""
-        self.root.destroy()
-        os._exit(0)
+        from playerUtils import ProgramShutdown
+        ProgramShutdown().shutdown()
 
 #####################################################################################################

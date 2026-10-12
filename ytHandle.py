@@ -1,34 +1,16 @@
-import os, re, sys, subprocess, yt_dlp
+"""YouTube jobs share one bounded queue and run in a low-priority child process."""
+import json
+import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT2, TPE1
-from yt_dlp.postprocessor import SponsorBlockPP
-from functools import lru_cache
+import re
+from threading import Event, Lock
+from time import monotonic
 import tkinter as tk
 from tkinter import ttk
+from log_loader import log_loader
+from runtime_policy import run_job, game_running
 
-try:
-    from log_loader import log_loader
-except:
-    from .log_loader import log_loader
-
-### Logging Handler ###
-
-ll = log_loader("YT Download")
-
-#######################
-
-class SilentLogger:
-    """A dummy logger to suppress all yt_dlp output."""
-    def debug(self, msg):
-        pass
-    def warning(self, msg):
-        pass
-    def error(self, msg):
-        pass
-
-#######################
+ll = log_loader("YouTube", debugging=False)
 
 class DownloadPopup:
     def __init__(self):
@@ -111,423 +93,147 @@ class DownloadPopup:
         root.after(100, update_progress)
         root.mainloop()
 
+
 class ytHandle:
-    def __init__(self, max_workers=8, sponsorblock_categories=None, video_name_callback=None):
-        self._check_dependencies()
-        self.max_workers = max_workers
+    def __init__(self, max_workers=1, sponsorblock_categories=None, video_name_callback=None):
+        self.max_workers = 1
         self.video_name_callback = video_name_callback
-        self.max_filename_length = 120
         self.sponsorblock_categories = sponsorblock_categories or [
-            'sponsor', 'intro', 'outro', 'selfpromo', 
-            'preview', 'filler', 'music_offtopic'
-        ]
-        
-        # Pre-compile regex patterns for better performance
+            "sponsor", "intro", "outro", "selfpromo", "preview", "filler", "music_offtopic"]
+        self._download_lock = Lock()
+        self._metadata_lock = Lock()
+        self.cancel = Event()
+        self._last_download = 0.0
         self._clean_regex = re.compile(r'[^\w _\-()&]')
         self._space_regex = re.compile(r'\s+')
-        
-        # Cache for YoutubeDL instances to avoid recreation overhead
-        self._ydl_cache = {}
-        
-        ll.debug(f"Initialized download handler with {max_workers} parallel workers")
+        self._cookies_provider = lambda: []
+        self._track_callback = None
+        self.target_dir = Path.home() / "MusicPlayerYoutubeDownloads"
 
-    def search_youtube(self, query: str, limit: int = 5):
-        """
-        Searches YouTube for a given query and returns a list of video titles and URLs.
-        """
-        ll.debug(f"Searching YouTube for: '{query}' with a limit of {limit}")
-        search_query = f"ytsearch{limit}:{query}"
-        
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'default_search': 'ytsearch',
-            'extract_flat': True, # Significantly faster as it doesn't fetch full metadata
-            'logger': SilentLogger(),
-        }
-        
-        results = []
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_result = ydl.extract_info(search_query, download=False)
-                if 'entries' in search_result:
-                    for entry in search_result['entries']:
-                        # Ensure the entry is a valid video
-                        if entry and entry.get('title') and entry.get('url'):
-                            results.append([entry['title'], entry['url'], 'url'])
-        except Exception as e:
-            ll.error(f"An error occurred during YouTube search: {e}")
+    def configure(self, cookies_provider=None, track_callback=None):
+        if cookies_provider:
+            self._cookies_provider = cookies_provider
+        if track_callback:
+            self._track_callback = track_callback
+
+    def close(self):
+        self.cancel.set()
+
+    def playlist_tracks(self, url, cookies=None):
+        with self._metadata_lock:
+            return run_job({"action": "playlist", "url": url,
+                            "cookies": self._cookies_provider() if cookies is None else cookies},
+                           self.cancel, timeout=300)
+
+    def search_youtube(self, query, limit=5):
+        if not query or self.cancel.is_set():
             return []
-            
-        ll.debug(f"Found {len(results)} results for '{query}'")
-        return results
-
-    def download_single_song_to_cache(self, url: str, youtube_download_permanently: bool = False, target_dir: str = None):
-        """
-        Downloads a single song from a YouTube URL.
-        
-        If youtube_download_permanently is False, it saves to a temporary cache file.
-        If True, it saves to the specified target_dir with a proper name.
-
-        Args:
-            url (str): The YouTube URL.
-            youtube_download_permanently (bool): If True, saves the file permanently.
-            target_dir (str, optional): The directory to save to. Required if youtube_download_permanently is True.
-
-        Returns:
-            str: The full path to the downloaded file, or None on failure.
-        """
-        ll.debug(f"Starting single song download from: {url} with permanency={youtube_download_permanently}")
-
-        # First, extract video info. This is needed for tagging and for the permanent filename.
         try:
-            with yt_dlp.YoutubeDL({'logger': SilentLogger(), 'quiet': True, 'no_warnings': True}) as ydl:
-                info_dict = ydl.extract_info(url, download=False)
-        except Exception as e:
-            ll.error(f"Failed to extract video info from {url}: {e}")
-            return None
-            
-        output_file_path = None
-        
-        if youtube_download_permanently:
-            if not target_dir:
-                # Fallback to a default directory if none is provided
-                target_dir = self.target_dir if hasattr(self, 'target_dir') else os.path.expanduser("~/MusicPlayerYoutubeDownloads")
+            with self._metadata_lock:
+                entries = run_job({"action": "search", "url": f"ytsearch{min(limit, 20)}:{query}"},
+                                  self.cancel, timeout=45)
+            return [[e["title"], f"https://www.youtube.com/watch?v={e['id']}", "url"]
+                    for e in entries]
+        except RuntimeError as exc:
+            ll.warn(f"YouTube search: {exc}")
+            return []
 
-            permanent_dir = self._find_valid_directory([target_dir])
-            if not permanent_dir:
-                ll.error(f"Invalid or unwritable target directory provided: {target_dir}")
+    def _download(self, url, directory, template=None, mp3=True, archive=None,
+                  sponsorblock=False, cookies=None, cancel=None):
+        cancel = cancel or self.cancel
+        while not self._download_lock.acquire(timeout=0.5):
+            if cancel.is_set() or self.cancel.is_set():
                 return None
-            
-            track_data = self._clean_track_data_optimized(info_dict)
-            if not track_data:
-                ll.error("Could not extract valid track data to generate a filename.")
+        try:
+            # Rate-limit across ALL playlists, not per playlist or per worker.
+            delay = 8.0 if game_running() else 5.0
+            if cancel.wait(max(0, delay - (monotonic() - self._last_download))):
                 return None
-            
-            output_file_path = permanent_dir / f"{track_data['safe_name']}.mp3"
-
-            # If the file already exists, skip the download and return the path.
-            if output_file_path.exists():
-                ll.print(f"File already exists, skipping download: {output_file_path}")
-                return str(output_file_path)
-
-        else:
-            # For temporary caching, always use the same file name and overwrite it.
-            output_file_path = Path.cwd() / ".youtubeCached.mp3"
-
-        # Configure downloader options
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': str(output_file_path.with_suffix('')),
-            'overwrites': not youtube_download_permanently,  # Overwrite cache, but not permanent files
-            'logger': SilentLogger(),
-            'quiet': True,
-            'no_warnings': True,
-        }
-
-        try:
-            # Download the file
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-            if output_file_path.exists():
-                ll.debug(f"Download successful. File at: {output_file_path}")
-                
-                # Create a mock track object for tagging
-                mock_track = {
-                    'title': info_dict.get('title', 'Unknown Title'),
-                    'uploader': info_dict.get('uploader', 'YouTube')
-                }
-                self._set_basic_tags_optimized(output_file_path, mock_track)
-                return str(output_file_path)
-            else:
-                ll.error(f"Download completed, but the output file was not found at {output_file_path}.")
-                return None
-        except Exception as e:
-            ll.error(f"Failed to download or process single YouTube song: {e}")
-            
-            # Only remove a corrupted cache file on error
-            if not youtube_download_permanently and output_file_path and output_file_path.exists():
-                try:
-                    os.remove(output_file_path)
-                except OSError as os_err:
-                    ll.error(f"Could not remove corrupted cache file: {os_err}")
-            return None
- 
-    def _check_dependencies(self):
-        try:
-            __import__('mutagen')
-        except ImportError:
-            subprocess.check_call(
-                [sys.executable, '-m', 'pip', 'install', 'mutagen'],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-
-    @lru_cache(maxsize=32)
-    def _get_cached_ydl_opts(self, extract_flat=False):
-        """Cache YoutubeDL options to avoid dict recreation"""
-        if extract_flat:
-            return {'extract_flat': True, 'quiet': True, 'no_warnings': True}
-        
-        return {
-            'format': 'bestaudio/best',
-            'postprocessors': [
-                {
-                    'key': 'SponsorBlock',
-                    'categories': self.sponsorblock_categories
-                },
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',  # Fixed quality for consistency
-                }
-            ],
-            'logger': SilentLogger(),
-            'quiet': True,
-            'no_warnings': True,
-            'sponsorblock_mark': 'all',
-            'sponsorblock_remove': 'all',
-        }
-
-    def parseUrl(self, url, possible_directories):
-        """Process a YouTube playlist and return downloaded file paths"""
-        ll.debug(f"\n▶ Processing playlist: {url}")
-        
-        # Early validation and setup
-        self.target_dir = self._find_valid_directory(possible_directories)
-        if not self.target_dir:
-            ll.error("⚠️ No valid download directory found!")
-            return []
-            
-        ll.debug(f"📂 Using directory: {self.target_dir}")
-        
-        # Parallel directory scanning for existing files
-        existing = self._get_existing_filenames_parallel(possible_directories)
-        ll.debug(f"🔍 Found {len(existing)} existing tracks")
-        
-        try:
-            # Batch fetch playlist data with optimized settings
-            tracks = self._get_playlist_tracks_optimized(url)
-            ll.debug(f"🎵 Playlist has {len(tracks)} tracks")
-        except Exception as e:
-            ll.error(f"🚨 Playlist error: {str(e)}")
-            return []
-        
-        # Filter new tracks with set intersection (faster than list comprehension)
-        track_names = {t['safe_name'] for t in tracks}
-        new_track_names = track_names - existing
-        new_tracks = [t for t in tracks if t['safe_name'] in new_track_names]
-        
-        ll.debug(f"🆕 Found {len(new_tracks)} new tracks\n")
-        
-        if not new_tracks:
-            return []
-
-        # Optimized parallel downloading with better resource management
-        return self._download_tracks_optimized(new_tracks, self.target_dir)
-
-    def _find_valid_directory(self, dirs):
-        """Find first writable directory with improved validation"""
-        for d in dirs:
-            # Skip invalid directory inputs
-            if not d:
-                continue
-            if isinstance(d, str) and ('://' in d or not d.strip()):
-                continue
-                
+            if self.video_name_callback:
+                self.video_name_callback("Downloading")
             try:
-                path = Path(d).expanduser().resolve()
-                
-                # Create directory if it doesn't exist
-                path.mkdir(parents=True, exist_ok=True)
-                
-                # Check if it's a directory and writable using os.access (more reliable)
-                if path.is_dir() and os.access(path, os.W_OK):
-                    ll.debug(f"✅ Valid directory found: {path}")
-                    return path
-                else:
-                    ll.debug(f"❌ Directory not writable: {path}")
-                    
-            except Exception as e:
-                ll.debug(f"❌ Directory error for '{d}': {str(e)}")
-                continue
-                
-        ll.error(f"❌ No valid directories found from: {dirs}")
+                result = run_job({"action": "download", "url": url,
+                                  "directory": str(directory), "template": template,
+                                  "mp3": mp3, "archive": str(archive) if archive else None,
+                                  "sponsorblock": self.sponsorblock_categories if sponsorblock else None,
+                                  "cookies": cookies or []}, cancel, timeout=600)
+                if result:
+                    path = Path(result["path"])
+                    if mp3:
+                        self._set_basic_tags_optimized(path, result)
+                    if self._track_callback and not path.name.startswith(".youtubeCached"):
+                        self._track_callback(str(path))
+                    return str(path) if result else None
+            finally:
+                self._last_download = monotonic()
+        finally:
+            self._download_lock.release()
         return None
 
-    def _get_existing_filenames_parallel(self, dirs):
-        """Parallel scan of directories for existing files"""
-        def scan_directory(d):
-            if isinstance(d, str) and '://' in d:
-                return set()
-            try:
-                dir_path = Path(d).expanduser()
-                if dir_path.exists() and dir_path.is_dir():
-                    # Use glob with stem extraction in one pass
-                    return {f.stem for f in dir_path.glob('*.mp3')}
-            except:
-                pass
-            return set()
-        
-        # Use smaller thread pool for I/O operations
-        with ThreadPoolExecutor(max_workers=min(4, len(dirs))) as executor:
-            futures = [executor.submit(scan_directory, d) for d in dirs]
-            existing = set()
-            for future in as_completed(futures):
-                existing.update(future.result())
-        
-        return existing
-
-    def _get_playlist_tracks_optimized(self, url):
-        """Optimized playlist data fetching"""
-        opts = self._get_cached_ydl_opts(extract_flat=True)
-        
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            entries = info.get('entries', [])
-            
-            # Batch process entries with pre-compiled regex
-            tracks = []
-            for entry in entries:
-                if entry and entry.get('id'):
-                    track = self._clean_track_data_optimized(entry)
-                    if track:
-                        tracks.append(track)
-            
-            return tracks
-
-    def _clean_track_data_optimized(self, entry):
-        """Optimized track data cleaning with pre-compiled regex"""
-        title = entry.get('title', 'Untitled')
-        if not title:
+    def download_single_song_to_cache(self, url, youtube_download_permanently=False, target_dir=None):
+        directory = self._find_valid_directory([target_dir or self.target_dir]) if youtube_download_permanently else Path(__file__).parent
+        if directory is None:
             return None
-            
-        # Use pre-compiled regex patterns
-        clean = self._clean_regex.sub('', title)
-        clean = self._space_regex.sub(' ', clean).strip()
-        
-        if not clean:
-            clean = 'Untitled'
-            
-        return {
-            'url': f"https://youtube.com/watch?v={entry['id']}",
-            'title': title,
-            'safe_name': clean[:self.max_filename_length],
-            'uploader': entry.get('uploader'),
-            'id': entry['id']  # Keep ID for potential caching
-        }
-
-    def _download_tracks_optimized(self, tracks, target_dir):
-        """Optimized parallel downloading with better resource management"""
-        results = []
-        
-        # Use as_completed for better progress tracking and early results
         try:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit all tasks with error handling
-                future_to_track = {}
-                for track in tracks:
-                    try:
-                        future = executor.submit(self._download_track_optimized, track, target_dir)
-                        future_to_track[future] = track
-                    except RuntimeError as e:
-                        if "interpreter shutdown" in str(e):
-                            ll.error("🛑 Interpreter shutting down, stopping downloads")
-                            break
-                        else:
-                            ll.error(f"⚠️ Failed to submit: {track['safe_name']} - {str(e)}")
-                
-                # Process completed downloads as they finish
-                completed_count = 0
-                for future in as_completed(future_to_track):
-                    completed_count += 1
-                    track = future_to_track[future]
-                    try:
-                        result = future.result(timeout=30)  # Add timeout
-                        if result:
-                            ll.debug(f"✅ Downloaded ({completed_count}/{len(future_to_track)}): {Path(result).name}")
-                            results.append(result)
-                        else:
-                            ll.error(f"⚠️ Failed ({completed_count}/{len(future_to_track)}): {track['safe_name']}")
-                    except Exception as e:
-                        ll.error(f"💥 Exception ({completed_count}/{len(future_to_track)}): {track['safe_name']} - {str(e)}")
-                
-                ll.debug(f"\n🔥 Success: {len(results)}/{len(future_to_track)} downloaded")
-                
-        except Exception as e:
-            ll.error(f"🚨 Download pool error: {str(e)}")
-            
+            # Keep temporary playback in its source format; only GTA-compatible copies need MP3.
+            return self._download(url, directory,
+                                  template=None if youtube_download_permanently else ".youtubeCached [%(id)s].%(ext)s",
+                                  mp3=youtube_download_permanently,
+                                  cookies=self._cookies_provider())
+        except RuntimeError as exc:
+            ll.warn(f"YouTube download: {exc}")
+            return None
+
+    def parseUrl(self, url, possible_directories):
+        directory = self._find_valid_directory(possible_directories)
+        if directory is None:
+            return []
+        self.target_dir = directory
+        existing = {path.stem for path in directory.glob("*.mp3")}
+        results = []
+        try:
+            tracks = self.playlist_tracks(url, cookies=[])
+            archive = directory / ".youtube_download_archive.txt"
+            for entry in tracks:
+                if self.cancel.is_set():
+                    break
+                # Honor older title-based downloads while using video IDs for new files.
+                clean = self._space_regex.sub(" ", self._clean_regex.sub("", entry["title"])).strip()[:120]
+                if clean in existing:
+                    continue
+                try:
+                    path = self._download(f"https://www.youtube.com/watch?v={entry['id']}",
+                                          directory, archive=archive, sponsorblock=True)
+                    if path:
+                        results.append(path)
+                except RuntimeError as exc:
+                    ll.warn(f"Playlist download skipped: {exc}")
+        except RuntimeError as exc:
+            ll.warn(f"Playlist sync: {exc}")
         return results
 
-    def _download_track_optimized(self, track, target_dir):
-        """Optimized single track download"""
-        mp3_path = target_dir / f"{track['safe_name']}.mp3"
-        
-        # Quick existence check
-        if mp3_path.exists():
-            return None
+    def _find_valid_directory(self, directories):
+        for value in directories:
+            if not value or "://" in str(value):
+                continue
+            try:
+                path = Path(value).expanduser().resolve()
+                path.mkdir(parents=True, exist_ok=True)
+                if path.is_dir() and os.access(path, os.W_OK):
+                    return path
+            except OSError:
+                continue
+        return None
 
-        try:
-            ll.debug(f"⏬ Starting: {track['safe_name']}")
-            self.video_name_callback(track['safe_name']) if self.video_name_callback else None
-            
-            # Use cached options and set output template
-            ydl_opts = self._get_cached_ydl_opts().copy()
-            ydl_opts['outtmpl'] = str(mp3_path.with_suffix(''))
-            
-            # Create YoutubeDL instance with optimized settings
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Add SponsorBlock processor
-                ydl.add_post_processor(SponsorBlockPP(ydl))
-                ydl.download([track['url']])
-            
-            # Verify download and add metadata
-            if mp3_path.exists():
-                self._set_basic_tags_optimized(mp3_path, track)
-                return str(mp3_path)
-            else:
-                ll.error(f"⚠️ File not found after download: {track['safe_name']}")
-                return None
-                
-        except yt_dlp.DownloadError as e:
-            error_msg = str(e).lower()
-            if "private" in error_msg or "unavailable" in error_msg:
-                ll.error(f"🔒 Video unavailable: {track['safe_name']}")
-            elif "copyright" in error_msg:
-                ll.error(f"📵 Copyright issue: {track['safe_name']}")
-            elif "age" in error_msg:
-                ll.error(f"🔞 Age restricted: {track['safe_name']}")
-            else:
-                ll.error(f"🚫 Download failed: {track['safe_name']} - {str(e)}")
-            return None
-        except Exception as e:
-            ll.error(f"💥 Unexpected error: {track['safe_name']} - {str(e)}")
-            return None
-        
     def _set_basic_tags_optimized(self, path, track):
-        """Optimized metadata setting with error handling"""
         try:
+            from mutagen.mp3 import MP3
+            from mutagen.id3 import ID3, TIT2, TPE1
             audio = MP3(path, ID3=ID3)
-            
-            # Only add tags if they don't exist to avoid overwrites
             if not audio.tags:
                 audio.add_tags()
-            
-            # Set title
-            if track.get('title'):
-                audio.tags.add(TIT2(encoding=3, text=track['title']))
-            
-            # Set artist if available
-            if track.get('uploader'):
-                audio.tags.add(TPE1(encoding=3, text=track['uploader']))
-            
+            audio.tags.add(TIT2(encoding=3, text=track.get("title", "YouTube")))
+            audio.tags.add(TPE1(encoding=3, text=track.get("artist") or "YouTube"))
             audio.save(v2_version=3)
-            
-        except Exception as e:
-            ll.debug(f"⚠️ Metadata warning for {Path(path).name}: {str(e)}")
+        except Exception as exc:
+            ll.debug(f"Could not tag downloaded audio: {exc}")

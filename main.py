@@ -1,53 +1,42 @@
+"""Start playback directly. Installation and source updates are explicit maintenance."""
 import os
+from pathlib import Path
+import sys
 
-DevMode = os.path.exists(".developer_options.json") # Enable developer mode
-FastLoad = os.path.exists(".fast_load.json") # Enable fast load mode
-
-try:
-    from adminRaise import Administrator
-    from autoDependency import AutoDependencies
-    from autoUpdate import AutoUpdater
-    from log_loader import log_loader, OutputRedirector
-except:
-    from .adminRaise import Administrator
-    from .autoDependency import AutoDependencies
-    from .autoUpdate import AutoUpdater
-    from .log_loader import log_loader, OutputRedirector
-
-### Install Handler ###
-
-if not DevMode and not FastLoad:
-    AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
-    Administrator()
-    AutoDependencies().install()
-
-### Logging Handler ###
-
-ll = log_loader("Main", debugging = False)
-ll.debug(f"Executing With Developer Mode: {DevMode}")
-
-#######################
-
-import tkinter as tk
-
-try:
-    from ghost import GhostOverlay
-    from playerUtils import MusicOverlayController, ProgramShutdown
-except ImportError:
-    from .ghost import GhostOverlay
-    from .playerUtils import MusicOverlayController, ProgramShutdown
 
 def main():
-    root = tk.Tk()
-    root.withdraw()
-    
-    # Create and register shutdown handler #
-    shutdown_handler = ProgramShutdown()
-    shutdown_handler.register_root(root)
-    
-    MusicOverlayController(GhostOverlay(root), fast_load=FastLoad)
-    root.mainloop()
+    os.chdir(Path(__file__).parent)
+    if "--setup" in sys.argv:
+        from autoDependency import AutoDependencies
+        AutoDependencies().install()
+        return
+    if "--update" in sys.argv:
+        from autoUpdate import AutoUpdater
+        AutoUpdater("https://github.com/The-Autonomous/MusicApp", branch="main").update()
+        return
 
-if __name__ == '__main__':
-    with OutputRedirector(enable_dual_logging = DevMode) as log_redirector:
-        main()
+    import tkinter as tk
+    from log_loader import OutputRedirector
+    from ghost import GhostOverlay
+    from playerUtils import MusicOverlayController, ProgramShutdown
+
+    with OutputRedirector(enable_dual_logging=False):
+        root = tk.Tk()
+        root.withdraw()
+        shutdown = ProgramShutdown()
+        shutdown.register_root(root)
+        overlay = GhostOverlay(root)
+        controller = MusicOverlayController(overlay, fast_load=Path(".fast_load.json").exists())
+        shutdown.register_cleanup(controller.close)
+        shutdown.register_cleanup(overlay.close)
+        root.protocol("WM_DELETE_WINDOW", shutdown.shutdown)
+        root.after(600, lambda: controller.youtube_sync.show(overlay, startup=True))
+        try:
+            root.mainloop()
+        finally:
+            controller.close()
+            overlay.close()
+
+
+if __name__ == "__main__":
+    main()

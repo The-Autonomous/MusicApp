@@ -154,7 +154,16 @@ class MusicOverlayController:
             fast_load=fast_load,
         )
         overlay.MusicPlayer = self.player
+        from youtube_sync import YouTubeSync
+        self.youtube_sync = YouTubeSync(self.player)
+        overlay.youtube_sync = self.youtube_sync
+        if self.youtube_sync.settings.get('host_radio', False):
+            self.player.set_hosting(True)
         self.start()
+
+    def close(self):
+        self.youtube_sync.close()
+        self.player.close()
     
     def load_playlists(self, file_path: str = 'Playlists.txt') -> List[str]:
         """
@@ -174,9 +183,9 @@ class MusicOverlayController:
                 f.write("")
             return []
         
-    def get_auto_directories(self, candidate_urls=[]):
+    def get_auto_directories(self, candidate_urls=None):
         """Automatically detects existing GTAV Enhanced User Music directories"""
-        valid_dirs = candidate_urls
+        valid_dirs = list(candidate_urls or [])
         
         # Determine base path based on OS
         if platform.system() == 'Windows':
@@ -191,6 +200,16 @@ class MusicOverlayController:
             Path("/Volumes/Games/Rockstar Games/GTAV Enhanced/User Music"),
             Path.home() / "Games" / "GTAV Enhanced" / "User Music"
         ]
+        if platform.system() == 'Windows':
+            # Documents may be redirected to another drive or OneDrive.
+            try:
+                import ctypes
+                documents = ctypes.create_unicode_buffer(260)
+                if ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, documents) == 0:
+                    candidate_paths.insert(0, Path(documents.value) / "Rockstar Games" / "GTAV Enhanced" / "User Music")
+                    candidate_paths.insert(1, Path(documents.value) / "Rockstar Games" / "GTA V" / "User Music")
+            except (AttributeError, OSError):
+                pass
         
         # Check which directories actually exist
         for path in candidate_paths:
@@ -205,7 +224,7 @@ class MusicOverlayController:
         for path in forcedPaths:
             os.makedirs(path, exist_ok=True)
 
-        return [*valid_dirs, *forcedPaths]
+        return list(dict.fromkeys([*valid_dirs, *forcedPaths]))
 
     def _update_text(self, artist: str = '', title: str = ''):
         text = self.cleaner.clean(f"{artist} - {title}" if artist != "Unknown Artist" and not artist in title else title)
@@ -226,95 +245,59 @@ class MusicOverlayController:
         self.overlay.set_radio_ips(ip_list)
 
     def start(self):
-        threading.Thread(target=self.player.core_handler, daemon=True).start()
+        self.player.core_handler()
         
 class ProgramShutdown:
-    """
-    Singleton class to handle complete program shutdown from anywhere.
-    Can be called from any thread or process.
-    """
-    
+    """Finish background work without bypassing saves or blocking Tk's event loop."""
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
-        
-        self._initialized = True
-        self.root = None
-        self.cleanup_callbacks = []
-        self.shutdown_event = threading.Event()
-        
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance.root = None
+                cls._instance.cleanup_callbacks = []
+                cls._instance.shutdown_event = threading.Event()
+            return cls._instance
+
     def register_root(self, root):
-        """Register the main Tkinter root window"""
         self.root = root
-        
+
     def register_cleanup(self, callback):
-        """Register a cleanup function to be called before shutdown"""
         self.cleanup_callbacks.append(callback)
-    
-    def shutdown(self, exit_code: int = 0, reason: str = ""):
-        """
-        Complete program shutdown that works from any thread.
-        
-        Args:
-            exit_code: Exit code for the program (0 = normal, non-zero = error)
-            reason: Optional reason for shutdown (for logging)
-        """
-        print(f"🔴 Initiating shutdown: {reason}" if reason else "🔴 Initiating shutdown")
-        
-        # Set shutdown event for any threads monitoring it
+
+    def shutdown(self, exit_code=0, reason=""):
+        if self.shutdown_event.is_set():
+            return
         self.shutdown_event.set()
-        
-        # Run cleanup callbacks
-        for callback in self.cleanup_callbacks:
+        finished = threading.Event()
+
+        def cleanup():
             try:
-                callback()
-            except Exception as e:
-                print(f"Cleanup error: {e}")
-        
-        # Handle Tkinter shutdown
+                for callback in self.cleanup_callbacks:
+                    try:
+                        callback()
+                    except Exception as exc:
+                        ll.warn(f"Cleanup: {exc}")
+            finally:
+                finished.set()
+
         if self.root:
-            try:
-                # Schedule GUI destruction on main thread
-                self.root.after(0, self._destroy_gui)
-                # Give it a moment to process
-                threading.Timer(0.5, self._force_exit, args=[exit_code]).start()
-            except:
-                # If Tkinter is already destroyed or errored
-                self._force_exit(exit_code)
+            # The overlay invokes shutdown from the Tk thread.
+            for window in self.root.winfo_children():
+                try:
+                    window.withdraw()
+                except Exception:
+                    pass
+            threading.Thread(target=cleanup, daemon=True, name="shutdown").start()
+
+            def finish():
+                if finished.is_set():
+                    self.root.quit()
+                    self.root.destroy()
+                else:
+                    self.root.after(100, finish)
+            self.root.after(100, finish)
         else:
-            self._force_exit(exit_code)
-    
-    def _destroy_gui(self):
-        """Destroy Tkinter GUI (must run on main thread)"""
-        try:
-            self.root.quit()
-            self.root.destroy()
-        except:
-            pass
-    
-    def _force_exit(self, exit_code: int):
-        """Force exit using multiple methods"""
-        try:
-            # Method 1: Clean Python exit
-            sys.exit(exit_code)
-        except SystemExit:
-            # Method 2: OS-level exit
-            os._exit(exit_code)
-        except:
-            # Method 3: Signal (Unix/Linux/Mac)
-            try:
-                os.kill(os.getpid(), signal.SIGTERM)
-            except:
-                # Method 4: Forceful OS exit
-                os._exit(exit_code)
+            cleanup()

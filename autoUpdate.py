@@ -59,7 +59,7 @@ class AutoUpdater:
         params = {'ref': self.branch}
         
         try:
-            resp = self.session.get(url, params=params)
+            resp = self.session.get(url, params=params, timeout=(5, 15))
             
             # Rate-limit detection
             if resp.status_code == 403 and 'X-RateLimit-Remaining' in resp.headers and resp.headers['X-RateLimit-Remaining'] == '0':
@@ -128,6 +128,8 @@ class AutoUpdater:
         try:
             with zipfile.ZipFile(backup_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(self.local_dir):
+                    dirs[:] = [directory for directory in dirs
+                               if directory not in {'.git', 'backup', '__pycache__', 'ffmpeg-bin', 'playwright'}]
                     # Exclude the backup directory itself
                     if self.backup_dir in root:
                         continue
@@ -150,7 +152,7 @@ class AutoUpdater:
         ll.debug(f"🔍 Checking: {path}")
         
         try:
-            r = self.session.get(raw_url)
+            r = self.session.get(raw_url, timeout=(5, 15))
             
             if r.status_code == 403 and 'X-RateLimit-Remaining' in r.headers and r.headers['X-RateLimit-Remaining'] == '0':
                 ll.warn("❌ Rate limit exceeded during file fetch. Can't continue updates.")
