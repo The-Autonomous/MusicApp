@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 from time import monotonic
+from download_progress import DownloadReporter, live_throttle
 
 
 class QuietLogger:
@@ -32,7 +33,7 @@ def prepare_support(job):
         packages = {"numpy": "numpy", "av": "av", "sounddevice": "sounddevice",
                     "mutagen": "mutagen", "pynput": "pynput", "requests": "requests",
                     "aiohttp": "aiohttp", "flask": "Flask", "flask_compress": "Flask-Compress",
-                    "waitress": "waitress"}
+                    "waitress": "waitress", "psutil": "psutil"}
     else:
         packages = {"yt_dlp": "yt-dlp[default]", "playwright": "playwright"}
         if job.get("music", True):
@@ -140,26 +141,10 @@ def execute(job):
             binary = next(ffmpeg_root.glob("**/ffmpeg.exe"), None)
             if binary:
                 options["ffmpeg_location"] = str(binary.parent)
-        last_policy_check = [0.0]
-
-        def adapt_to_game(progress):
-            if monotonic() - last_policy_check[0] < 15:
-                return
-            last_policy_check[0] = monotonic()
-            from runtime_policy import game_running
-            playing = game_running()
-            downloader.params["ratelimit"] = 512 * 1024 if playing else 8 * 1024 * 1024
-            try:
-                import psutil
-                overloaded = psutil.cpu_percent(interval=None) >= 80
-                if os.name == "nt":
-                    psutil.Process().nice(psutil.IDLE_PRIORITY_CLASS if playing or overloaded
-                                          else psutil.BELOW_NORMAL_PRIORITY_CLASS)
-            except Exception:
-                pass
-
-        options["progress_hooks"] = [adapt_to_game]
-    with yt_dlp.YoutubeDL(options) as downloader:
+        reporter = DownloadReporter(job.get("progress_file"))
+        options["progress_hooks"] = [reporter]
+        options["postprocessor_hooks"] = [reporter.postprocess]
+    with live_throttle(job.get("policy_file")), yt_dlp.YoutubeDL(options) as downloader:
         for cookie in job.get("cookies") or []:
             expires = cookie.get("expires", -1)
             domain = cookie["domain"]
@@ -180,7 +165,7 @@ def execute(job):
             if not info:
                 raise RuntimeError("YouTube returned no playlist information")
             return [{"id": entry.get("id"), "title": entry.get("title") or "Untitled",
-                     "artist": entry.get("artist") or entry.get("uploader") or "YouTube",
+                     "artist": entry.get("artist") or entry.get("uploader") or entry.get("channel") or "YouTube",
                      "duration": entry.get("duration"),
                      "availability": entry.get("availability"),
                      "url": entry.get("url") or entry.get("webpage_url")}
@@ -196,6 +181,7 @@ def execute(job):
                 path = Path(requested[0].get("filepath", path)) if requested else path
             if not path.is_file():
                 raise RuntimeError("Downloaded audio file was not found")
+            reporter.publish("finished", force=True)
             return {"path": str(path), "title": info.get("track") or info.get("title", "YouTube"),
                     "artist": info.get("artist") or info.get("uploader", "YouTube")}
         raise RuntimeError("Unknown YouTube operation")

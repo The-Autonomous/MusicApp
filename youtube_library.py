@@ -6,6 +6,7 @@ import stat
 import unicodedata
 
 from audio_cache import youtube_video_id
+from urllib.parse import parse_qs, urlsplit
 
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".opus", ".webm"}
@@ -15,6 +16,17 @@ _PROMOTION = re.compile(
     r"lyric(?:s)?(?: video)?|official lyric(?:s)?(?: video)?|visuali[sz]er)[\])]\s*$",
     re.IGNORECASE)
 _UNKNOWN = {"", "youtube", "unknownartist", "unknown", "untitled"}
+
+
+def permanent_download_directory(directories):
+    """Prefer GTA Enhanced's detected library for every permanent download."""
+    paths = [Path(value).expanduser() for value in directories
+             if value and "://" not in str(value)]
+    for game in ("gtav enhanced", "gta v"):
+        for path in paths:
+            if path.name.casefold() == "user music" and path.parent.name.casefold() == game:
+                return path
+    return paths[0] if paths else Path.home() / "MusicPlayerYoutubeDownloads"
 
 
 def audio_file_exists(value):
@@ -53,6 +65,37 @@ def eligible_tracks(tracks):
         # Preserve the first entry's metadata rather than replacing it with a duplicate.
         result.setdefault(identifier, entry)
     return list(result.values()), skipped
+
+
+def valid_playlist_url(url):
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        lists = parse_qs(parsed.query).get("list", [])
+        return (parsed.scheme in {"http", "https"} and not parsed.username and not parsed.password
+                and parsed.port in {None, 80, 443}
+                and parsed.hostname in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}
+                and parsed.path.rstrip("/") in {"/playlist", "/watch"}
+                and len(lists) == 1 and re.fullmatch(r"[A-Za-z0-9_-]+", lists[0]) is not None)
+    except ValueError:
+        return False
+
+
+def group_tracks(tracks):
+    """Queue a song once, retaining every video's ID to rebuild the saved record."""
+    groups = []
+    identities = {}
+    for track in tracks:
+        keys = song_keys(track)
+        group = next((identities[key] for key in sorted(keys) if key in identities), None)
+        if group is None:
+            group = []
+            groups.append(group)
+        group.append(track)
+        for key in keys:
+            identities[key] = group
+    return groups
 
 
 def _text(value):
@@ -109,7 +152,13 @@ class LocalSongIndex:
         for key in song_keys(track):
             self.by_song.setdefault(key, str(path))
 
-    def find(self, track, downloaded):
+    def find(self, track, downloaded, preferred_directory=None):
         candidates = [downloaded.get(track["id"]), self.by_id.get(track["id"])]
         candidates.extend(self.by_song.get(key) for key in sorted(song_keys(track)))
-        return next((str(path) for path in candidates if audio_file_exists(path)), None)
+        existing = [str(path) for path in candidates if audio_file_exists(path)]
+        if preferred_directory is not None:
+            preferred = os.path.normcase(os.path.abspath(preferred_directory))
+            for path in existing:
+                if os.path.normcase(os.path.abspath(Path(path).parent)) == preferred:
+                    return path
+        return existing[0] if existing else None

@@ -10,6 +10,8 @@ from tkinter import ttk
 from log_loader import log_loader
 from runtime_policy import run_job, game_running
 from audio_cache import AudioCache, youtube_video_id
+from youtube_library import permanent_download_directory
+from download_policy import DOWNLOAD_SLOTS
 
 ll = log_loader("YouTube", debugging=False)
 
@@ -96,13 +98,17 @@ class DownloadPopup:
 
 
 class ytHandle:
-    def __init__(self, max_workers=1, sponsorblock_categories=None, video_name_callback=None):
-        self.max_workers = 1
+    def __init__(self, max_workers=3, sponsorblock_categories=None, video_name_callback=None):
+        self.max_workers = 3
         self.video_name_callback = video_name_callback
         self.sponsorblock_categories = sponsorblock_categories or [
             "sponsor", "intro", "outro", "selfpromo", "preview", "filler", "music_offtopic"]
         self._download_lock = Lock()
         self._metadata_lock = Lock()
+        self._video_locks_lock = Lock()
+        self._video_locks = {}
+        self._completed = {}
+        self._batch_callback = None
         self.cancel = Event()
         self._last_download = 0.0
         self._clean_regex = re.compile(r'[^\w _\-()&]')
@@ -113,13 +119,15 @@ class ytHandle:
         self._audio_cache = AudioCache(Path(__file__).parent)
         self.target_dir = Path.home() / "MusicPlayerYoutubeDownloads"
 
-    def configure(self, cookies_provider=None, track_callback=None, active_path_provider=None):
+    def configure(self, cookies_provider=None, track_callback=None, active_path_provider=None, batch_callback=None):
         if cookies_provider:
             self._cookies_provider = cookies_provider
         if track_callback:
             self._track_callback = track_callback
         if active_path_provider is not None:
             self._active_path_provider = active_path_provider
+        if batch_callback is not None:
+            self._batch_callback = batch_callback
 
     def _prune_audio_cache(self, incoming=None):
         try:
@@ -152,13 +160,18 @@ class ytHandle:
             return []
 
     def _download(self, url, directory, template=None, mp3=True, archive=None,
-                  sponsorblock=False, cookies=None, cancel=None, cache_video_id=None):
+                  sponsorblock=False, cookies=None, cancel=None, cache_video_id=None, progress=None):
         cancel = cancel or self.cancel
         if cancel.is_set() or self.cancel.is_set():
             return None
-        while not self._download_lock.acquire(timeout=0.5):
+        key = (youtube_video_id(url) or url, os.path.normcase(os.path.abspath(directory)), mp3)
+        with self._video_locks_lock:
+            video_lock = self._video_locks.setdefault(key, Lock())
+        lock = video_lock if mp3 else self._download_lock
+        while not lock.acquire(timeout=0.1):
             if cancel.is_set() or self.cancel.is_set():
                 return None
+        slot = False
         try:
             if cancel.is_set() or self.cancel.is_set():
                 return None
@@ -168,20 +181,34 @@ class ytHandle:
                 if cached:
                     self._prune_audio_cache(cached)
                     return str(cached)
-            # Rate-limit across ALL playlists, not per playlist or per worker.
-            delay = 8.0 if game_running() else 5.0
-            if cancel.wait(max(0, delay - (monotonic() - self._last_download))) or self.cancel.is_set():
+            if mp3:
+                completed = self._completed.get(key)
+                if completed and Path(completed).is_file():
+                    return completed
+                identifier = youtube_video_id(url)
+                if identifier:
+                    # Survive lost download records and changed titles without
+                    # starting yt-dlp for a permanent file already on disk.
+                    for existing in Path(directory).glob("*.mp3"):
+                        if existing.stem.endswith(f" [{identifier}]") and existing.stat().st_size:
+                            return str(existing)
+            slot = DOWNLOAD_SLOTS.acquire(cancel, self.cancel)
+            if not slot:
                 return None
+            if progress:
+                progress({"phase": "preparing", "progress": None})
             if cache_video_id and cookies is None:
                 cookies = self._cookies_provider()
             if self.video_name_callback:
                 self.video_name_callback("Downloading")
             try:
-                result = run_job({"action": "download", "url": url,
+                job = {"action": "download", "url": url,
                                   "directory": str(directory), "template": template,
                                   "mp3": mp3, "archive": str(archive) if archive else None,
-                                  "sponsorblock": self.sponsorblock_categories if sponsorblock else None,
-                                  "cookies": cookies or []}, cancel, timeout=600)
+                                  "sponsorblock": self.sponsorblock_categories if mp3 or sponsorblock else None,
+                                  "cookies": cookies or []}
+                result = (run_job(job, cancel, timeout=600, progress=progress) if progress is not None
+                          else run_job(job, cancel, timeout=600))
                 if result:
                     path = Path(result["path"])
                     if mp3:
@@ -190,11 +217,15 @@ class ytHandle:
                         self._track_callback(str(path))
                     if cache_video_id:
                         self._prune_audio_cache(path)
+                    if mp3:
+                        self._completed[key] = str(path)
                     return str(path) if result else None
             finally:
                 self._last_download = monotonic()
         finally:
-            self._download_lock.release()
+            if slot:
+                DOWNLOAD_SLOTS.release()
+            lock.release()
         return None
 
     def download_single_song_to_cache(self, url, youtube_download_permanently=False, target_dir=None):
@@ -230,32 +261,11 @@ class ytHandle:
             return None
 
     def parseUrl(self, url, possible_directories):
-        directory = self._find_valid_directory(possible_directories)
-        if directory is None:
-            return []
-        self.target_dir = directory
-        existing = {path.stem for path in directory.glob("*.mp3")}
-        results = []
-        try:
-            tracks = self.playlist_tracks(url, cookies=[])
-            archive = directory / ".youtube_download_archive.txt"
-            for entry in tracks:
-                if self.cancel.is_set():
-                    break
-                # Honor older title-based downloads while using video IDs for new files.
-                clean = self._space_regex.sub(" ", self._clean_regex.sub("", entry["title"])).strip()[:120]
-                if clean in existing:
-                    continue
-                try:
-                    path = self._download(f"https://www.youtube.com/watch?v={entry['id']}",
-                                          directory, archive=archive, sponsorblock=True)
-                    if path:
-                        results.append(path)
-                except RuntimeError as exc:
-                    ll.warn(f"Playlist download skipped: {exc}")
-        except RuntimeError as exc:
-            ll.warn(f"Playlist sync: {exc}")
-        return results
+        # There is one queue and one library check for likes and every playlist.
+        if self._batch_callback:
+            return self._batch_callback([url])
+        ll.warn("Connect YouTube before syncing playlists.")
+        return []
 
     def _find_valid_directory(self, directories):
         for value in directories:

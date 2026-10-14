@@ -1,11 +1,22 @@
 """Song identity checks without network, accounts or audio playback."""
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from youtube_library import audio_file_exists, eligible_tracks, song_keys
+from youtube_library import audio_file_exists, eligible_tracks, permanent_download_directory, song_keys
 
 
 class SongIdentityTests(unittest.TestCase):
+    def test_enhanced_directory_wins_over_legacy_gta_and_personal_downloads(self):
+        enhanced = Path("Rockstar Games") / "GTAV Enhanced" / "User Music"
+        legacy = Path("Rockstar Games") / "GTA V" / "User Music"
+        self.assertEqual(permanent_download_directory(["https://youtube.com/playlist?list=LL",
+                                                      "personal downloads", str(legacy), str(enhanced)]), enhanced)
+
+    def test_download_directory_fallback_preserves_custom_library(self):
+        self.assertEqual(permanent_download_directory(["my music"]), Path("my music"))
+        self.assertEqual(permanent_download_directory([]), Path.home() / "MusicPlayerYoutubeDownloads")
+
     def test_tags_ignore_case_spacing_promotion_and_topic_suffix(self):
         local = {"title": "Artist — Don't Stop (Official Music Video) [Lyrics]",
                  "artist": "ARTIST - Topic"}

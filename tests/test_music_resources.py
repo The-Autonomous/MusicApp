@@ -323,6 +323,15 @@ class IdleAndLibraryTests(MusicFixture):
         with self.assertRaisesRegex(RuntimeError, "Cancelled"):
             list(self.player.local_songs_for_sync(cancel))
 
+    def test_permanent_youtube_downloads_share_gta_enhanced_target(self):
+        enhanced = str(self.directory / "GTAV Enhanced" / "User Music")
+        with patch.object(self.module.MusicPlayer, "initialize_cache"):
+            player = self.module.MusicPlayer([str(self.directory), enhanced], Mock(), Mock(), Mock(),
+                                             Mock(), lambda: False, startup_hold=True)
+        self.players.append(player)
+        player.initializer_thread.join(2)
+        self.assertEqual(player.ytHandle.target_dir, Path(enhanced))
+
 
 class LocalSearchTests(MusicFixture):
     def test_search_requires_all_tokens_and_ignores_common_stopwords(self):

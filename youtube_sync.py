@@ -3,6 +3,7 @@ import ctypes
 import json
 import os
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from math import isfinite
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -10,7 +11,9 @@ from time import monotonic, time
 
 from log_loader import log_loader
 from runtime_policy import run_job, YouTubeJobError
-from youtube_library import LocalSongIndex, eligible_tracks
+from youtube_library import (LocalSongIndex, eligible_tracks, permanent_download_directory,
+                             group_tracks, valid_playlist_url, audio_file_exists)
+from download_policy import download_budget
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "MusicApp"
@@ -67,6 +70,8 @@ class YouTubeSync:
         self._thread = None
         self._busy = Event()
         self._observer = None
+        self._progress_lock = Lock()
+        self._download_progress = {}
         self._cookies = None
         self._closed = False
         self.connected = False
@@ -80,8 +85,12 @@ class YouTubeSync:
         self.message = "Connect YouTube to start listening."
         self.settings = self._read(SETTINGS_FILE, {})
         self.settings.setdefault("source", "YouTube Music liked songs")
+        player.youtube_sync = self
         player.auto_gaming = self.settings.get("auto_gaming", True)
-        player.ytHandle.configure(cookies_provider=self.cookies, track_callback=player.add_downloaded_song)
+        player.ytHandle.configure(cookies_provider=self.cookies, track_callback=player.add_downloaded_song,
+                                  batch_callback=lambda urls: self.start(self._observer or (lambda _: None),
+                                                                         playlist_urls=urls,
+                                                                         on_ready=player.allow_playback))
 
     @staticmethod
     def _read(path, default):
@@ -146,7 +155,7 @@ class YouTubeSync:
         return "YouTube couldn't connect. Check your connection and retry."
 
     def start(self, status, source=None, login=False, browser=None, sync=True,
-              on_connected=None, on_ready=None, on_failed=None, on_finished=None):
+              on_connected=None, on_ready=None, on_failed=None, on_finished=None, playlist_urls=None):
         with self._lock:
             if self.busy() or self._closed:
                 return False
@@ -156,6 +165,8 @@ class YouTubeSync:
         self.total, self.saved = None, 0
         self.deferred = 0
         self.skipped = 0
+        with self._progress_lock:
+            self._download_progress.clear()
         if login:
             self.connected = False
         source = source or self.settings.get("source")
@@ -196,8 +207,6 @@ class YouTubeSync:
                 return run_job(job, self.cancel, timeout=timeout)
 
         def work():
-            downloaded = None
-            dirty = False
             try:
                 update("Preparing YouTube…", "connecting")
                 request({"action": "prepare", "music": source == "YouTube Music liked songs"}, timeout=270)
@@ -230,6 +239,20 @@ class YouTubeSync:
                 if not isinstance(sources, dict):
                     sources = {}
                 sources[source] = {"fetched_at": time(), "tracks": tracks}
+                combined = list(tracks)
+                if sync:
+                    urls = list(dict.fromkeys([*self.player._playlist_urls, *(playlist_urls or [])]))
+                    for number, url in enumerate(urls, 1):
+                        if self.cancel.is_set():
+                            raise RuntimeError("Cancelled")
+                        if not valid_playlist_url(url):
+                            self.skipped += 1
+                            continue
+                        update(f"Checking playlist {number} of {len(urls)}…", "connecting")
+                        with self.player.ytHandle._metadata_lock:
+                            entries = request({"action": "playlist", "url": url, "cookies": cookies}, timeout=600)
+                        sources[url] = {"fetched_at": time(), "tracks": entries}
+                        combined.extend(entries)
                 atomic_json(LIKES_FILE, {"sources": sources})
                 downloaded = self._read(DOWNLOADS_FILE, previous.get("downloaded", {}))
                 if self.cancel.is_set():
@@ -237,87 +260,12 @@ class YouTubeSync:
                 if not sync:
                     update("YouTube connected.", "connected")
                     return
-                directory = Path.home() / "MusicPlayerYoutubeDownloads"
+                directory = permanent_download_directory(self.player._directories)
                 directory.mkdir(parents=True, exist_ok=True)
-                # Re-read on every sync so deleting the file resets the cooldowns.
-                deferred = {identifier: record for identifier, record in self._read(DEFERRED_FILE, {}).items()
-                            if isinstance(record, dict)
-                            and isinstance(record.get("retry_after"), (int, float))
-                            and isfinite(record["retry_after"]) and record["retry_after"] > time()}
-                update("Checking songs already in your library…", "syncing")
-                download_tracks, self.skipped = eligible_tracks(tracks)
-                library = LocalSongIndex()
-                for song in self.player.local_songs_for_sync(self.cancel):
-                    library.add(song)
-                missing = []
-                for entry in download_tracks:
-                    if self.cancel.is_set():
-                        raise RuntimeError("Cancelled")
-                    path = library.find(entry, downloaded)
-                    if path:
-                        if downloaded.get(entry["id"]) != path:
-                            downloaded[entry["id"]] = path
-                            dirty = True
-                        self.player.add_downloaded_song(path)
-                    else:
-                        missing.append(entry)
-                self.deferred = sum(entry["id"] in deferred for entry in missing)
-                self.total = len(download_tracks) - self.deferred
-                self.saved = len(download_tracks) - len(missing)
-                queue = deque((entry, 1) for entry in missing if entry["id"] not in deferred)
-                completed = 0
-                saved_at = monotonic()
-                while queue:
-                    if self.cancel.is_set():
-                        break
-                    entry, attempt = queue.popleft()
-                    # Another liked upload of this song may have just completed.
-                    existing = library.find(entry, downloaded)
-                    if existing:
-                        downloaded[entry["id"]] = existing
-                        self.saved += 1
-                        dirty = True
-                        continue
-                    update(f"{self.saved} of {self.total} songs ready\n"
-                           + ("Retrying " if attempt == 2 else "Downloading ")
-                           + f"{entry.get('title', 'Untitled')}…", "syncing")
-                    try:
-                        path = self.player.ytHandle._download(
-                            f"https://www.youtube.com/watch?v={entry['id']}", directory,
-                            cookies=cookies, cancel=self.cancel)
-                        if not path or not Path(path).is_file():
-                            raise RuntimeError("Downloaded audio file was not found")
-                    except (RuntimeError, OSError) as exc:
-                        if self.cancel.is_set():
-                            break
-                        ll.warn(f"Download attempt {attempt} failed for {entry['id']}: {exc}")
-                        if attempt == 1:
-                            queue.append((entry, 2))
-                        else:
-                            deferred[entry["id"]] = {"title": entry.get("title", "Untitled"),
-                                                       "retry_after": time() + DOWNLOAD_COOLDOWN}
-                            atomic_json(DEFERRED_FILE, deferred)
-                            self.deferred += 1
-                            self.total -= 1
-                        continue
-                    downloaded[entry["id"]] = path
-                    library.add(dict(entry, path=path))
-                    completed += 1
-                    self.saved += 1
-                    dirty = True
-                    deferred.pop(entry["id"], None)
-                    if completed % 5 == 0 or monotonic() - saved_at >= 30:
-                        atomic_json(DOWNLOADS_FILE, downloaded)
-                        dirty = False
-                        saved_at = monotonic()
+                completed = self._download_all(combined, cookies, directory, downloaded, update)
                 if self.cancel.is_set():
                     update("Sync stopped. Your saved songs are kept. Resume setup to start listening.", "error")
                 else:
-                    if DEFERRED_FILE.exists() or deferred:
-                        atomic_json(DEFERRED_FILE, deferred)
-                    if dirty:
-                        atomic_json(DOWNLOADS_FILE, downloaded)
-                        dirty = False
                     if self.cancel.is_set() or self._closed:
                         raise RuntimeError("Cancelled")
                     self.ready = True
@@ -339,11 +287,6 @@ class YouTubeSync:
                     if on_failed:
                         on_failed(message)
             finally:
-                if downloaded is not None and dirty:
-                    try:
-                        atomic_json(DOWNLOADS_FILE, downloaded)
-                    except OSError:
-                        ll.warn("Couldn't save the latest sync progress.")
                 self._busy.clear()
                 observer = self._observer
                 if observer is not None and not self._closed:
@@ -358,6 +301,161 @@ class YouTubeSync:
             self._busy.clear()
             raise
         return True
+
+    def download_progress(self):
+        with self._progress_lock:
+            return [dict(report) for report in self._download_progress.values()]
+
+    def _download_all(self, tracks, cookies, directory, downloaded, update):
+        """One owner of the library index, retries, checkpoints and combined queue."""
+        dirty = False
+        completed = 0
+        saved_at = monotonic()
+        deferred = {identifier: record for identifier, record in self._read(DEFERRED_FILE, {}).items()
+                    if isinstance(record, dict)
+                    and isinstance(record.get("retry_after"), (int, float))
+                    and isfinite(record["retry_after"]) and record["retry_after"] > time()}
+        update("Checking songs already in your library…", "syncing")
+        eligible, skipped = eligible_tracks(tracks)
+        self.skipped += skipped
+        groups = group_tracks(eligible)
+        library = LocalSongIndex()
+        for song in self.player.local_songs_for_sync(self.cancel):
+            library.add(song)
+        queue = deque()
+        self.total, self.saved = len(groups), 0
+
+        def reuse(group):
+            return next((path for entry in group
+                         if (path := library.find(entry, downloaded, directory))), None)
+
+        def remember(group, path):
+            nonlocal dirty
+            for entry in group:
+                if downloaded.get(entry["id"]) != path:
+                    downloaded[entry["id"]] = path
+                    dirty = True
+                library.add(dict(entry, path=path))
+                deferred.pop(entry["id"], None)
+
+        def report(entry, value):
+            with self._progress_lock:
+                self._download_progress[entry["id"]] = dict(value, id=entry["id"], title=entry.get("title", "Untitled"))
+
+        def download(entry):
+            return self.player.ytHandle._download(
+                f"https://www.youtube.com/watch?v={entry['id']}", directory,
+                cookies=cookies, cancel=self.cancel, sponsorblock=True,
+                progress=lambda value: report(entry, value))
+
+        def show_progress(budget):
+            reports = self.download_progress()
+            lines = [f"{self.saved} of {self.total} songs ready · likes and playlists",
+                     f"{budget.label} · up to {budget.workers} at a time"]
+            if len(reports) > budget.workers:
+                lines[1] = f"{budget.label} · finishing {len(reports)} songs; next limit {budget.workers}"
+            if getattr(getattr(self, "loading_helper", None), "collapsed", False):
+                for item in reports:
+                    phase = item.get("phase")
+                    fraction = item.get("progress")
+                    detail = ("Removing non-music / converting" if phase == "processing" else
+                              f"{round(fraction * 100)}%" if isinstance(fraction, (int, float)) else "Preparing")
+                    lines.append(f"{item['title'][:75]} · {detail}")
+            update("\n".join(lines), "syncing")
+
+        active = {}
+        try:
+            for group in groups:
+                if self.cancel.is_set():
+                    raise RuntimeError("Cancelled")
+                path = reuse(group)
+                if path:
+                    remember(group, path)
+                    self.player.add_downloaded_song(path)
+                    self.saved += 1
+                else:
+                    available = [entry for entry in group if entry["id"] not in deferred]
+                    if available:
+                        queue.append((group, available, 1))
+                    else:
+                        self.deferred += 1
+                        self.total -= 1
+            # Persist recovered records even if a later source/download fails.
+            if dirty:
+                atomic_json(DOWNLOADS_FILE, downloaded)
+                dirty = False
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="youtube-download") as executor:
+                last_display = None
+                while queue or active:
+                    budget = download_budget()
+                    if self.cancel.is_set():
+                        queue.clear()
+                    while queue and not self.cancel.is_set() and len(active) < budget.workers:
+                        group, available, attempt = queue.popleft()
+                        path = reuse(group)
+                        if path:
+                            remember(group, path)
+                            self.saved += 1
+                            continue
+                        entry = available[(attempt - 1) % len(available)]
+                        future = executor.submit(download, entry)
+                        active[future] = (group, available, entry, attempt)
+                    signature = (self.saved, self.total, budget.label, budget.workers,
+                                 getattr(getattr(self, "loading_helper", None), "collapsed", False),
+                                 tuple((r['id'], r.get('phase'), r.get('progress'), r.get('processor'))
+                                       for r in self.download_progress()))
+                    if signature != last_display:
+                        show_progress(budget)
+                        last_display = signature
+                    if not active:
+                        continue
+                    finished, _ = wait(active, timeout=0.25, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        group, available, entry, attempt = active.pop(future)
+                        with self._progress_lock:
+                            self._download_progress.pop(entry["id"], None)
+                        try:
+                            path = future.result()
+                            if not audio_file_exists(path):
+                                raise RuntimeError("Downloaded audio file was not found")
+                        except (RuntimeError, OSError) as exc:
+                            if self.cancel.is_set():
+                                continue
+                            ll.warn(f"Download attempt {attempt} failed for {entry['id']}: {exc}")
+                            if attempt == 1:
+                                queue.append((group, available, 2))
+                            else:
+                                for alias in group:
+                                    deferred[alias["id"]] = {"title": alias.get("title", "Untitled"),
+                                                             "retry_after": time() + DOWNLOAD_COOLDOWN}
+                                atomic_json(DEFERRED_FILE, deferred)
+                                self.deferred += 1
+                                self.total -= 1
+                            continue
+                        remember(group, path)
+                        metadata = self.player.get_metadata(path)
+                        library.add(dict(metadata, path=path))
+                        completed += 1
+                        self.saved += 1
+                        if completed % 5 == 0 or monotonic() - saved_at >= 30:
+                            atomic_json(DOWNLOADS_FILE, downloaded)
+                            dirty = False
+                            saved_at = monotonic()
+            if DEFERRED_FILE.exists() or deferred:
+                atomic_json(DEFERRED_FILE, deferred)
+            if dirty:
+                atomic_json(DOWNLOADS_FILE, downloaded)
+                dirty = False
+            return completed
+        finally:
+            # The executor waits for all owned jobs before any final checkpoint.
+            with self._progress_lock:
+                self._download_progress.clear()
+            if dirty:
+                try:
+                    atomic_json(DOWNLOADS_FILE, downloaded)
+                except OSError:
+                    ll.warn("Couldn't save the latest sync progress.")
 
     def _status_text(self):
         return self.message + ("\nSign in next time: Windows couldn't remember this login."
@@ -438,8 +536,12 @@ class YouTubeSync:
                 return
             message.set(self._status_text())
             helper.set_progress(self.saved, self.total, self.busy())
+            helper.set_downloads(self.download_progress())
             signature = (self.phase == "error", self.busy(), self.connected, self.ready)
             if signature == rendered:
+                win.update_idletasks()
+                if not helper.collapsed:
+                    win.geometry(f"{max(440, frame.winfo_reqwidth())}x{max(245, frame.winfo_reqheight())}")
                 return
             rendered = signature
             for widget in buttons.winfo_children():
@@ -460,7 +562,7 @@ class YouTubeSync:
                 if self.busy():
                     button("Stop sync", self.cancel.set).pack(side="left")
                 else:
-                    button("Sync likes" if self.connected else "Sign in", lambda: begin(not self.connected), True).pack(side="left")
+                    button("Sync music" if self.connected else "Sign in", lambda: begin(not self.connected), True).pack(side="left")
                 button("Options", lambda: self._show_options(overlay, win)).pack(side="left", padx=8)
                 button("Minimize" if startup and not self.ready else "Close",
                        helper.collapse if startup and not self.ready else win.destroy).pack(side="right")

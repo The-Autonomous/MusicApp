@@ -41,9 +41,10 @@ accept focus when opened.
 
 Start `main.py` using your usual shortcut. A small sign-in card opens automatically.
 Music waits until the YouTube connection is verified and every eligible missing
-liked song has downloaded or been deferred after two failures. The loading card
-shows song counts and the current
-download; its custom minus button collapses it into a small status strip while
+song from likes and `Playlists.txt` has downloaded or been deferred after two
+failures. The loading card shows one overall progress bar for the combined queue
+and a list of active songs, each with its own progress bar and conversion/removal
+status. Its custom minus button collapses it into a small status strip while
 setup continues. Use the restore arrow to expand it. Reopen the card
 with **Right Alt + Y**, or through the controls window.
 
@@ -70,13 +71,17 @@ with **Right Alt + Y**, or through the controls window.
   missing tracks after checking the local library. It cannot recover likes that YouTube does not
   expose, or download deleted/private/unavailable videos. Unavailable downloads
   are counted and become eligible again on the first sync after their cooldown.
-- Startup automatically reuses and verifies the saved login, then syncs likes.
+- Startup automatically reuses and verifies the saved login, then syncs likes and playlists.
   Expired sessions reopen sign-in. **Stop sync** preserves completed downloads;
   **Forget YouTube login** under Options removes the saved session without
   deleting music. Progress is saved periodically and when a sync stops.
 
-Liked songs download to `~/MusicPlayerYoutubeDownloads`, which is included in
-the library automatically. Existing downloads are not deleted when unliked.
+Permanent YouTube downloads, including liked songs, go to the detected
+`GTAV Enhanced/User Music` folder. The original GTA V User Music folder is the
+next choice; without either GTA folder, the configured local library is used,
+falling back to `~/MusicPlayerYoutubeDownloads`. That older downloads folder
+remains included in the library so completed songs are reused. Existing downloads
+are not deleted when unliked.
 `.youtube_likes.json` holds the lists, `.youtube_downloads.json` holds the
 completed-file mapping, and `.youtube_sync.json` holds preferences. Login cookies
 are not stored in these files.
@@ -89,27 +94,47 @@ in their filename, then checks title and artist together. Matching ignores case,
 spacing, punctuation, artist `- Topic` suffixes and labels such as `(Official
 Video)` or `[Lyrics]`; live, remix, instrumental and other version labels remain
 distinct. Missing, empty, partial and cloud-only files do not count as downloads.
-Recovered matches are saved to the download mapping before playback starts.
+Recovered matches are saved to the download mapping before playback starts;
+deleting or losing that mapping does not force existing audio to download again.
 Invalid YouTube links and entries already marked private, deleted or unavailable
 are skipped before downloading. Other failures still use the retry policy above.
-The queue contains each video ID once and also reuses a matching song downloaded
-earlier in the same sync, even when another liked upload has a different video ID.
+The queue contains each video ID once and groups matching titles and artists
+across every playlist and the likes list before starting parallel downloads.
+Each video's ID is recorded against the shared audio file. A song present in
+several sources counts once in the overall progress total.
+
+New permanent downloads run SponsorBlock and remove reported sponsor segments,
+intros, outros, self-promotion, previews, filler and non-music sections before MP3
+conversion. This uses community-provided segment markers; songs without markers
+are saved normally. Existing music is reused without rewriting it.
 
 ## Playing alongside GTA
 
-Downloads share one queue, with one encoder and one fragment download at a time.
-Windows runs the worker below normal priority; while GTA is detected, the worker
-uses idle priority, limits downloads to 512 KiB/s and leaves a longer gap between
-tracks. Child encoders inherit the worker's priority and use one encoding thread.
-Process checks are cached for 15 seconds. This reduces contention but does not
-guarantee a particular frame rate.
+Downloads share one queue and a live resource budget. Free RAM, memory pressure
+and total CPU load are sampled every two seconds, protecting other workloads
+such as Python as well as games. GTA, Far Cry and executables in common game
+installation directories also select a conservative budget; process checks are
+cached for ten seconds.
+
+With healthy memory usage, at least 6 GiB available and CPU below 35%, up to three songs download
+together. Moderate load allows two. Games, less than 4 GiB available or CPU at
+60% and above use one. Higher pressure further reduces the shared bandwidth
+budget and increases the gap between starts; very low RAM uses 64 KiB/s overall.
+Bandwidth is divided among active downloads rather than multiplied by their
+count. Limits fall immediately and rise after ten stable seconds of recovery.
+Active downloads adjust their speed while running; existing jobs finish before
+the queue admits more at a lower concurrency. No app restart is needed as
+resources change. Windows adjusts the owned workers and encoders between below
+normal and idle priority. Each encoder and fragment downloader uses one thread.
+These limits reduce contention but cannot guarantee a particular frame rate.
 
 Automatic gaming audio bypasses EQ/echo while GTA runs and restores the chosen
 mode afterward. It can be disabled under YouTube Options. Manual Gaming Mode remains
 in the EQ window. Audio playback itself is not assigned idle priority.
 
-Playlist downloads from `Playlists.txt` are now explicit: use **Sync Playlists.txt**
-under YouTube Options. Radio discovery runs only when radio is selected or scanned,
+Playlist downloads from `Playlists.txt` join the startup queue automatically;
+**Sync Playlists.txt** under YouTube Options and **Sync music** refresh the same
+combined queue. Radio discovery runs only when radio is selected or scanned,
 with at most four request workers and bounded response sizes. Radio clients own
 their status/download threads, sessions and responses; stopping radio or closing
 the app cancels those requests and releases the owned resources.
@@ -175,8 +200,13 @@ with the upstream version.
 
 ## Validation of this revision
 
-All 149 automated checks passed on Windows with Python 3.13 in about 29
-seconds. Run them with `python -B -m unittest discover -s tests` after installing
+All 164 checks outside the native interface layout suite passed on Windows with
+Python 3.13. These include live resource changes, parallel downloads, combined
+playlist/likes matching, progress reporting, worker cleanup and real segment
+removal on short silent fixture audio. The native interface suite was left out
+to avoid opening and closing windows during an active download session; progress
+list behavior was checked with simulated widgets instead.
+Run the full suite with `python -B -m unittest discover -s tests` after installing
 the dependencies; test media, sessions and servers use disposable fixtures.
 The full suite opens and closes temporary windows for interface layout checks.
 For download matching checks without those windows, run

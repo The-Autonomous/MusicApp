@@ -7,6 +7,7 @@ import sys
 import tempfile
 from threading import Event, Lock
 from time import monotonic
+from download_policy import DOWNLOAD_SLOTS, download_budget
 
 _lock = Lock()
 _checked_at = 0.0
@@ -69,7 +70,35 @@ def stop_worker(process):
                 process.kill()
 
 
-def run_job(job, cancel=None, timeout=300):
+def _write_channel(path, value):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _download_control():
+    budget = download_budget()
+    return {"rate": max(16 * 1024, budget.bytes_per_second // max(1, DOWNLOAD_SLOTS.count())),
+            "limited": budget.limited}
+
+
+def _set_worker_priority(process, limited):
+    if os.name != "nt":
+        return
+    try:
+        import psutil
+        parent = psutil.Process(process.pid)
+        priority = psutil.IDLE_PRIORITY_CLASS if limited else psutil.BELOW_NORMAL_PRIORITY_CLASS
+        for child in [parent, *parent.children(recursive=True)]:
+            try:
+                child.nice(priority)
+            except psutil.Error:
+                pass
+    except Exception:
+        pass
+
+
+def run_job(job, cancel=None, timeout=300, progress=None):
     cancel = cancel or Event()
     if cancel.is_set():
         raise RuntimeError("Cancelled")
@@ -84,6 +113,17 @@ def run_job(job, cancel=None, timeout=300):
                        OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
                        NUMEXPR_NUM_THREADS="1", BLIS_NUM_THREADS="1")
     job = dict(job, gaming=game_running())
+    channels = None
+    if job["action"] == "download":
+        channels = tempfile.TemporaryDirectory(prefix="MusicApp-download-", ignore_cleanup_errors=True)
+        progress_file = Path(channels.name) / "progress.json"
+        policy_file = Path(channels.name) / "policy.json"
+        job.update(progress_file=str(progress_file), policy_file=str(policy_file))
+        try:
+            _write_channel(policy_file, _download_control())
+        except OSError:
+            channels.cleanup()
+            raise
     login_profile = None
     if job["action"] == "login":
         # Parent ownership also removes a cancelled sign-in's temporary files.
@@ -101,14 +141,35 @@ def run_job(job, cancel=None, timeout=300):
     except OSError:
         if login_profile:
             login_profile.cleanup()
+        if channels:
+            channels.cleanup()
         raise
     deadline = monotonic() + timeout
     payload = json.dumps(job, ensure_ascii=False)
+    next_policy_check = 0
+    last_progress = None
     try:
         while True:
             if cancel.is_set() or monotonic() >= deadline:
                 stop_worker(process)
                 raise RuntimeError("Cancelled" if cancel.is_set() else "YouTube operation timed out")
+            if channels:
+                if monotonic() >= next_policy_check:
+                    control = _download_control()
+                    _write_channel(policy_file, control)
+                    _set_worker_priority(process, control["limited"])
+                    next_policy_check = monotonic() + 2
+                try:
+                    report = json.loads(progress_file.read_text(encoding="utf-8"))
+                    if isinstance(report, dict) and report != last_progress:
+                        # A slow but progressing download should not expire mid-song.
+                        if last_progress is None or report.get("downloaded_bytes") != last_progress.get("downloaded_bytes"):
+                            deadline = monotonic() + timeout
+                        last_progress = report
+                        if progress:
+                            progress(report)
+                except (OSError, ValueError):
+                    pass
             try:
                 output, _ = process.communicate(payload, timeout=0.5)
                 break
@@ -130,3 +191,5 @@ def run_job(job, cancel=None, timeout=300):
                 stream.close()
         if login_profile:
             login_profile.cleanup()
+        if channels:
+            channels.cleanup()

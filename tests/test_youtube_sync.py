@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
+from download_policy import DownloadBudget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,9 @@ class FakePlayer:
                                         _download=downloader)
         self.add_downloaded_song = lambda *args, **kwargs: None
         self.local_songs = []
+        self._directories = []
+        self._playlist_urls = []
+        self.get_metadata = lambda path: {}
         self.local_songs_for_sync = lambda cancel: iter(self.local_songs)
 
     def allow_playback(self):
@@ -82,12 +86,16 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.finished = Event()
         self.tracks = [{"id": "synthetic-0", "title": "Fixture", "artist": "Fixture"}]
         self.download_count = 0
+        self.playlists = {}
         self.player = FakePlayer(self.download)
         self.sync = self.module.YouTubeSync(self.player)
         self.addCleanup(self.sync.close)
         job = patch.object(self.module, "run_job", side_effect=self.run_job)
         job.start()
         self.addCleanup(job.stop)
+        budget = patch.object(self.module, "download_budget", return_value=DownloadBudget(1, 1024 ** 2, 0, False, "Test"))
+        budget.start()
+        self.addCleanup(budget.stop)
 
     def clean_fixture(self):
         checked = self.directory.resolve()
@@ -109,6 +117,8 @@ class YouTubeSyncFlow(unittest.TestCase):
         if job["action"] in {"prepare", "setup"}:
             return None
         if job["action"] in {"playlist", "music_likes"}:
+            if job["action"] == "playlist" and job["url"] in self.playlists:
+                return list(self.playlists[job["url"]])
             return list(self.tracks)
         if job["action"] == "login":
             return [dict(cookie) for cookie in SYNTHETIC_COOKIES]
@@ -120,9 +130,9 @@ class YouTubeSyncFlow(unittest.TestCase):
             return str(path)
         raise AssertionError("Unexpected fixture action: " + job["action"])
 
-    def download(self, url, directory, *, cookies, cancel):
+    def download(self, url, directory, *, cookies, cancel, sponsorblock, progress):
         return self.module.run_job({"action": "download", "url": url, "directory": str(directory),
-                                    "cookies": cookies}, cancel, timeout=1)
+                                    "cookies": cookies, "sponsorblock": sponsorblock}, cancel, timeout=1)
 
     def start(self, *, sync=False, login=False, on_connected=None, source=None):
         self.assertTrue(self.sync.start(self.statuses.append, source=source, login=login, sync=sync,
@@ -453,6 +463,35 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.assertTrue(self.player.playback.is_set())
         self.assertEqual(self.download_count, 0)
 
+    def test_liked_downloads_use_gta_enhanced_directory(self):
+        self.cached_session()
+        preferred = self.directory / "Rockstar Games" / "GTAV Enhanced" / "User Music"
+        fallback = self.directory / "MusicPlayerYoutubeDownloads"
+        self.player._directories = [str(fallback), str(preferred)]
+        self.start(sync=True)
+        self.wait_finished()
+        downloads = [job for job in self.jobs if job["action"] == "download"]
+        self.assertEqual(len(downloads), 1)
+        self.assertEqual(downloads[0]["directory"], str(preferred))
+        self.assertTrue(preferred.is_dir())
+        self.assertFalse(fallback.exists())
+
+    def test_existing_gta_copy_replaces_personal_folder_mapping_without_download(self):
+        self.cached_session()
+        preferred = self.directory / "GTAV Enhanced" / "User Music"
+        preferred.mkdir(parents=True)
+        legacy = self.directory / "old.mp3"
+        legacy.write_bytes(b"existing audio")
+        gta = preferred / "song [synthetic-0].mp3"
+        gta.write_bytes(b"existing audio")
+        self.player._directories = [str(preferred)]
+        self.player.local_songs = [{"title": "Fixture", "artist": "Fixture", "path": str(gta)}]
+        self.module.atomic_json(self.module.DOWNLOADS_FILE, {"synthetic-0": str(legacy)})
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 0)
+        self.assertEqual(json.loads(self.module.DOWNLOADS_FILE.read_text())["synthetic-0"], str(gta))
+
     def test_duplicate_video_ids_are_queued_only_once_even_when_retrying(self):
         self.cached_session()
         self.tracks = [{"id": "synthetic-0", "title": "Original title"},
@@ -542,7 +581,7 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.assertEqual(self.download_count, 1)
         saved = json.loads(self.module.DOWNLOADS_FILE.read_text())
         self.assertEqual(saved["synthetic-0"], saved["synthetic-1"])
-        self.assertEqual((self.sync.saved, self.sync.total), (2, 2))
+        self.assertEqual((self.sync.saved, self.sync.total), (1, 1))
         self.assertTrue(self.sync.ready)
 
     def test_invalid_links_and_known_unavailable_entries_are_not_downloaded(self):
@@ -586,6 +625,92 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.assertEqual(self.download_count, 0)
         self.assertFalse(self.player.playback.is_set())
         self.assertFalse(self.sync.ready)
+
+    def test_likes_and_multiple_playlists_share_one_deduplicated_queue(self):
+        self.cached_session()
+        first = "https://www.youtube.com/playlist?list=FixtureOne"
+        second = "https://www.youtube.com/playlist?list=FixtureTwo"
+        self.player._playlist_urls = [first, second, first]
+        self.tracks = [{"id": "synthetic-0", "title": "Shared Song", "artist": "Artist"}]
+        self.playlists = {
+            first: [self.tracks[0], {"id": "synthetic-1", "title": "New Song", "artist": "Artist"}],
+            second: [{"id": "synthetic-2", "title": "Shared Song (Official Audio)", "artist": "Artist - Topic"},
+                     {"id": "synthetic-1", "title": "New Song", "artist": "Artist"}],
+        }
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 2)
+        self.assertEqual((self.sync.saved, self.sync.total), (2, 2))
+        self.assertEqual(len([job for job in self.jobs if job['action'] == 'playlist']), 2)
+        self.assertTrue(all(job['sponsorblock'] for job in self.jobs if job['action'] == 'download'))
+        saved = json.loads(self.module.DOWNLOADS_FILE.read_text())
+        self.assertEqual(saved['synthetic-0'], saved['synthetic-2'])
+        self.assertEqual(len(saved), 3)
+        self.assertTrue(self.player.playback.is_set())
+
+    def test_missing_download_record_is_rebuilt_from_files_across_all_sources(self):
+        self.cached_session()
+        self.local_song(title="Fixture", artist="Fixture")
+        url = "https://www.youtube.com/playlist?list=Fixture"
+        self.player._playlist_urls = [url]
+        self.playlists[url] = [{"id": "synthetic-1", "title": "Fixture", "artist": "Fixture"}]
+        self.assertFalse(self.module.DOWNLOADS_FILE.exists())
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 0)
+        self.assertEqual(len(json.loads(self.module.DOWNLOADS_FILE.read_text())), 2)
+        self.assertEqual(self.sync.total, 1)
+
+    def test_parallel_queue_reduces_to_one_then_recovers_to_three_live(self):
+        self.cached_session()
+        self.tracks = [{"id": f"synthetic-{i}", "title": f"Song {i}", "artist": "Artist"} for i in range(6)]
+        initial_started = [Event() for _ in range(3)]
+        release_initial = [Event() for _ in range(3)]
+        later_started = [Event() for _ in range(3)]
+        release_later = Event()
+        for event in [*release_initial, release_later]:
+            self.addCleanup(event.set)
+        current = [DownloadBudget(3, 1024 ** 2, 0, False, "Idle")]
+        actual_download = self.player.ytHandle._download
+
+        def download(url, directory, **kwargs):
+            number = int(url[-1])
+            if number < 3:
+                initial_started[number].set()
+                if not release_initial[number].wait(3):
+                    raise RuntimeError("Fixture release timed out")
+            else:
+                kwargs['progress']({'phase': 'downloading', 'progress': 0.5})
+                later_started[number - 3].set()
+                if not release_later.wait(3):
+                    raise RuntimeError("Fixture release timed out")
+            return actual_download(url, directory, **kwargs)
+
+        self.player.ytHandle._download = download
+        with patch.object(self.module, "download_budget", side_effect=lambda: current[0]):
+            self.start(sync=True)
+            try:
+                for event in initial_started:
+                    self.assertTrue(event.wait(2))
+                current[0] = DownloadBudget(1, 64 * 1024, 0, True, "Low")
+                release_initial[0].set()
+                release_initial[1].set()
+                self.assertFalse(later_started[0].wait(0.35))
+                release_initial[2].set()
+                self.assertTrue(later_started[0].wait(2))
+                self.assertFalse(later_started[1].wait(0.35))
+                self.assertFalse(self.player.playback.is_set())
+                self.assertEqual(self.sync.download_progress()[0]['progress'], 0.5)
+                current[0] = DownloadBudget(3, 1024 ** 2, 0, False, "Idle")
+                self.assertTrue(later_started[1].wait(2))
+                self.assertTrue(later_started[2].wait(2))
+            finally:
+                for event in [*release_initial, release_later]:
+                    event.set()
+            self.wait_finished()
+        self.assertEqual(self.download_count, 6)
+        self.assertTrue(self.player.playback.is_set())
+        self.assertEqual(self.sync.download_progress(), [])
 
     def test_stopping_downloads_keeps_completed_progress(self):
         self.cached_session()

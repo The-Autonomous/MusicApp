@@ -181,7 +181,7 @@ class WindowLayouts(unittest.TestCase):
         sync._observer(sync._status_text())
         self.root.update()
         texts = [widget.cget("text") for widget in descendants(sync.window) if isinstance(widget, tk.Button)]
-        self.assertIn("Sync likes", texts)
+        self.assertIn("Sync music", texts)
         self.assertNotIn("Stop sync", texts)
         labels = [widget.cget("text") for widget in descendants(sync.window) if isinstance(widget, tk.Label)]
         self.assertIn(sync.message, labels)

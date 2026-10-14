@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from audio_cache import AudioCache, youtube_video_id
 from ytHandle import ytHandle
+from download_policy import DownloadSlots, DownloadBudget
 
 VIDEO_ID = "Abc_123-xYz"
 URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
@@ -139,6 +140,9 @@ class DownloaderCacheTests(WorkspaceTemporaryFiles):
         self.handle._audio_cache = self.cache
         self.cookies = Mock(return_value=[])
         self.handle.configure(cookies_provider=self.cookies)
+        slots = patch("ytHandle.DOWNLOAD_SLOTS", DownloadSlots(lambda: DownloadBudget(3, 8 * 1024 ** 2, 0, False, "Test")))
+        slots.start()
+        self.addCleanup(slots.stop)
 
     def test_cached_song_bypasses_worker_policy_and_credentials(self):
         path = self.file()
@@ -224,6 +228,49 @@ class DownloaderCacheTests(WorkspaceTemporaryFiles):
         self.assertTrue(self.handle._download_lock.acquire(blocking=False))
         self.handle._download_lock.release()
         self.assertEqual(legacy.read_bytes(), b"legacy")
+
+    def test_permanent_downloads_can_run_three_at_once_and_all_use_sponsorblock(self):
+        release = Event()
+        started = [Event() for _ in range(3)]
+        jobs = []
+        results = []
+
+        def worker(job, cancel, timeout):
+            identifier = job['url'].rsplit('=', 1)[-1]
+            number = int(identifier[-1])
+            jobs.append(job)
+            started[number].set()
+            if not release.wait(2):
+                raise RuntimeError('Fixture timed out')
+            path = self.directory / f'song [{identifier}].mp3'
+            path.write_bytes(b'fixture audio')
+            return {'path': str(path), 'title': 'Song', 'artist': 'Artist'}
+
+        threads = [Thread(target=lambda i=i: results.append(self.handle._download(
+            f'https://www.youtube.com/watch?v=synthetic-{i}', self.directory))) for i in range(3)]
+        with patch('ytHandle.run_job', side_effect=worker), patch.object(self.handle, '_set_basic_tags_optimized'):
+            try:
+                for thread in threads:
+                    thread.start()
+                for event in started:
+                    self.assertTrue(event.wait(1))
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(2)
+        self.assertEqual(len(results), 3)
+        for job in jobs:
+            self.assertIn('music_offtopic', job['sponsorblock'])
+            self.assertIn('filler', job['sponsorblock'])
+            self.assertIn('intro', job['sponsorblock'])
+
+    def test_permanent_filename_id_survives_lost_records_and_changed_title(self):
+        path = self.directory / f'old name [{VIDEO_ID}].mp3'
+        path.write_bytes(b'existing audio')
+        with patch('ytHandle.run_job') as worker:
+            result = self.handle._download(URL, self.directory)
+        self.assertEqual(result, str(path))
+        worker.assert_not_called()
 
 
 if __name__ == "__main__":

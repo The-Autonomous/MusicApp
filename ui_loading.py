@@ -1,6 +1,20 @@
 """A collapsible loading card with app-drawn controls and live progress."""
 import tkinter as tk
 from tkinter import ttk
+from math import isfinite
+
+
+def song_progress_display(report):
+    fraction = report.get("progress")
+    fraction = (max(0, min(1, fraction)) if isinstance(fraction, (int, float)) and isfinite(fraction)
+                else None)
+    if report.get("phase") == "processing":
+        processor = report.get("processor", "")
+        detail = ("Removing non-music sections" if processor == "ModifyChapters" else
+                  "Checking SponsorBlock" if processor == "SponsorBlock" else "Converting / saving")
+    else:
+        detail = f"{round(fraction * 100)}%" if fraction is not None else "Preparing download"
+    return f"{report.get('title', 'Untitled')} · {detail}", fraction
 
 
 class LoadingHelper:
@@ -10,6 +24,9 @@ class LoadingHelper:
         self.full_geometry = None
         self._animation = None
         self._indeterminate = True
+        self.colors = colors
+        self.download_rows = []
+        self.download_frame = None
         self.mini = tk.Frame(window, bg=colors["window_bg"], padx=16, pady=12)
         self.summary = tk.Label(self.mini, textvariable=message, bg=colors["window_bg"],
                                 fg=colors["text"], font=("Segoe UI", 10),
@@ -19,6 +36,7 @@ class LoadingHelper:
         style.configure("MusicApp.Horizontal.TProgressbar", troughcolor=colors["frame_bg"],
                         background=colors["accent"], borderwidth=0, thickness=5)
         footer = body.winfo_children()[-1]
+        self.footer = footer
         self.progress = ttk.Progressbar(body, style="MusicApp.Horizontal.TProgressbar",
                                        mode="indeterminate", maximum=100)
         self.progress.pack(fill="x", before=footer, pady=(0, 16))
@@ -46,6 +64,8 @@ class LoadingHelper:
         self.full_geometry = self.window.geometry()
         self.collapsed = True
         self._stop_animation()
+        for row, label, progress in self.download_rows:
+            progress.stop()
         self.body.pack_forget()
         self.mini.pack(fill="both", expand=True)
         self.window.update_idletasks()
@@ -82,3 +102,36 @@ class LoadingHelper:
         if self.collapsed:
             self.window.update_idletasks()
             self.window.geometry(f"330x{max(64, self.mini.winfo_reqheight())}")
+
+    def set_downloads(self, reports):
+        """Reuse three rows; progress updates never recreate the window/buttons."""
+        if not reports and self.download_frame is None:
+            return
+        if self.download_frame is None:
+            self.download_frame = tk.Frame(self.body, bg=self.colors["window_bg"])
+            for _ in range(3):
+                row = tk.Frame(self.download_frame, bg=self.colors["window_bg"])
+                label = tk.Label(row, bg=self.colors["window_bg"], fg=self.colors["text"],
+                                 font=("Segoe UI", 9), anchor="w", justify="left", wraplength=382)
+                label.pack(fill="x")
+                progress = ttk.Progressbar(row, style="MusicApp.Horizontal.TProgressbar", maximum=100)
+                progress.pack(fill="x", pady=(4, 10))
+                self.download_rows.append((row, label, progress))
+        if reports:
+            self.download_frame.pack(fill="x", before=self.footer)
+        else:
+            self.download_frame.pack_forget()
+        for index, (row, label, progress) in enumerate(self.download_rows):
+            progress.stop()
+            if index >= len(reports):
+                row.pack_forget()
+                continue
+            text, fraction = song_progress_display(reports[index])
+            label.configure(text=text)
+            row.pack(fill="x")
+            if fraction is None:
+                progress.configure(mode="indeterminate")
+                if not self.collapsed:
+                    progress.start(100)
+            else:
+                progress.configure(mode="determinate", value=fraction * 100)

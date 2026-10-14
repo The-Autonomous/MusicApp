@@ -16,6 +16,7 @@ from log_loader import log_loader
 from playerRecommend import PlayerRecommender
 from ytHandle import ytHandle
 from runtime_policy import game_running
+from youtube_library import permanent_download_directory
 
 ll = log_loader("Music Player", debugging=False)
 APP_DIR = Path(__file__).parent
@@ -124,6 +125,7 @@ class MusicPlayer:
         self._last_save = self._last_meta_save = monotonic()
         self.AudioPlayer = AudioPlayer
         self.ytHandle = ytHandle()
+        self.ytHandle.target_dir = permanent_download_directory(self._directories)
         self.ytHandle.configure(track_callback=self.add_downloaded_song,
                                 active_path_provider=lambda: self.current_song["path"] if self.current_song else None)
         self.recommend = PlayerRecommender()
@@ -568,16 +570,10 @@ class MusicPlayer:
             return False
 
     def sync_playlists(self):
-        if self._download_thread and self._download_thread.is_alive():
-            return
-        def work():
-            for url in self._playlist_urls:
-                if self._shutdown.is_set():
-                    break
-                self.ytHandle.parseUrl(url, self._directories or [str(Path.home() / "MusicPlayerYoutubeDownloads")])
-            self.save_meta_cache()
-        self._download_thread = Thread(target=work, daemon=True, name="playlist-sync")
-        self._download_thread.start()
+        sync = getattr(self, "youtube_sync", None)
+        if sync is not None and not self._shutdown.is_set():
+            return sync.start(sync._observer or (lambda _: None), on_ready=self.allow_playback)
+        return False
 
     def load_radio_ips(self, seconds_to_scan=None):
         if self._scan_thread and self._scan_thread.is_alive():

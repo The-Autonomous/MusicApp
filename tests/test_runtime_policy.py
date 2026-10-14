@@ -13,6 +13,7 @@ from unittest.mock import patch
 import uuid
 
 import psutil
+from download_policy import DownloadBudget
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,16 @@ elif action == "error":
     print(json.dumps(result, ensure_ascii=False))
 elif action == "malformed":
     print("fixture output is not JSON")
+elif action == "download":
+    progress = pathlib.Path(job["progress_file"])
+    policy = pathlib.Path(job["policy_file"])
+    first = json.loads(policy.read_text(encoding="utf-8"))["rate"]
+    progress.write_text(json.dumps({"phase": "downloading", "progress": 0.5,
+                                   "downloaded_bytes": 50, "total_bytes": 100}), encoding="utf-8")
+    time.sleep(2.6)
+    final = json.loads(policy.read_text(encoding="utf-8"))["rate"]
+    print(json.dumps({"ok": True, "result": {"first_rate": first, "final_rate": final,
+                                            "channel": str(progress.parent)}}))
 elif action == "block":
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     child = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(60)"],
@@ -129,6 +140,22 @@ class NativeWorkerProtocol(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Cancelled"):
             self.module.run_job({"action": "echo", "value": "unused"}, cancelled, timeout=3)
         self.assertEqual(self.processes, [])
+
+    def test_progress_channel_updates_policy_in_same_worker_and_is_cleaned(self):
+        reports = []
+        budgets = [DownloadBudget(3, 8 * 1024 ** 2, 0, False, 'Idle')]
+
+        def progress(value):
+            reports.append(value)
+            budgets[0] = DownloadBudget(1, 64 * 1024, 0, True, 'Low')
+
+        with patch.object(self.module, 'download_budget', side_effect=lambda: budgets[0]):
+            result = self.module.run_job({'action': 'download'}, timeout=5, progress=progress)
+        self.assertEqual(reports[0]['progress'], 0.5)
+        self.assertEqual(result['first_rate'], 8 * 1024 ** 2)
+        self.assertEqual(result['final_rate'], 64 * 1024)
+        self.assertFalse(Path(result['channel']).exists())
+        self.assertEqual(len(self.processes), 1)
 
     def test_timeout_terminates_worker_and_owned_descendant(self):
         record = self.fixture / "timeout.json"

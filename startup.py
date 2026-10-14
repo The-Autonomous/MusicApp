@@ -7,7 +7,7 @@ from threading import Event, Thread
 
 
 CORE_MODULES = ("numpy", "av", "sounddevice", "mutagen", "pynput", "requests",
-                "aiohttp", "flask", "flask_compress", "waitress")
+                "aiohttp", "flask", "flask_compress", "waitress", "psutil")
 
 
 def missing_runtime_modules(modules=CORE_MODULES):
