@@ -418,6 +418,41 @@ class MusicPlayer:
         if wake:
             self._wake.set()
 
+    def local_songs_for_sync(self, cancel):
+        """Read the full library, including files omitted by optional fast loading."""
+        while not self._cache_ready.wait(0.1):
+            if cancel.is_set() or self._shutdown.is_set():
+                raise RuntimeError("Cancelled")
+        with self._library_lock:
+            songs = [dict(song) for song in self._library.values()]
+        seen = set()
+        for song in songs:
+            if cancel.is_set() or self._shutdown.is_set():
+                raise RuntimeError("Cancelled")
+            seen.add(os.path.normcase(song["path"]))
+            # Refresh metadata if the file was changed after startup.
+            current = self._song_from_path(song["path"])
+            if current:
+                yield current
+        for directory in self._directories:
+            for root, dirs, files in os.walk(directory):
+                if cancel.is_set() or self._shutdown.is_set():
+                    raise RuntimeError("Cancelled")
+                dirs[:] = [name for name in dirs if not name.startswith(".")]
+                for name in files:
+                    if cancel.is_set() or self._shutdown.is_set():
+                        raise RuntimeError("Cancelled")
+                    if name.startswith(".") or not name.lower().endswith(_SUPPORTED):
+                        continue
+                    path = os.path.abspath(os.path.join(root, name))
+                    key = os.path.normcase(path)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    song = self._song_from_path(path)
+                    if song:
+                        yield song
+
     def initialize_cache(self, directories, fast_load=False, fast_load_limit=20):
         seen = set()
         original_paths = set(self.meta)

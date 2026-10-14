@@ -299,6 +299,30 @@ class IdleAndLibraryTests(MusicFixture):
             self.player.initialize_cache([str(self.directory)])
         self.assertEqual(notifications, [1, 1])  # First valid file and completion only.
 
+    def test_sync_library_scan_includes_files_beyond_fast_load_and_deduplicates_paths(self):
+        first = self.song(identity="first")
+        self.add(first)
+        self.player._directories = [str(self.directory), str(self.directory)]
+        paths = []
+
+        def metadata(path):
+            paths.append(Path(path).name)
+            return self.song(identity=Path(path).stem)
+
+        names = ["first.mp3", "later.flac", ".youtubeCached.mp3", "partial.mp3.part"]
+        with patch.object(self.module.os, "walk", return_value=[(str(self.directory), [], names)]), patch.object(
+                self.player, "_song_from_path", side_effect=metadata):
+            songs = list(self.player.local_songs_for_sync(Event()))
+        self.assertEqual(paths, ["first.mp3", "later.flac"])
+        self.assertEqual(len(songs), 2)
+
+    def test_sync_library_scan_can_be_cancelled_while_startup_scan_is_pending(self):
+        self.player._cache_ready.clear()
+        cancel = Event()
+        cancel.set()
+        with self.assertRaisesRegex(RuntimeError, "Cancelled"):
+            list(self.player.local_songs_for_sync(cancel))
+
 
 class LocalSearchTests(MusicFixture):
     def test_search_requires_all_tokens_and_ignores_common_stopwords(self):

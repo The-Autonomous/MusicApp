@@ -1,5 +1,6 @@
 """Isolated sync tests; no accounts, browser, installation, or audio playback."""
 import importlib.util
+import ctypes  # Keep native ctypes types loaded across the isolated module import.
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,8 @@ class FakePlayer:
         self.ytHandle = SimpleNamespace(_metadata_lock=Lock(), configure=lambda **kwargs: None,
                                         _download=downloader)
         self.add_downloaded_song = lambda *args, **kwargs: None
+        self.local_songs = []
+        self.local_songs_for_sync = lambda cancel: iter(self.local_songs)
 
     def allow_playback(self):
         self.connection_callbacks += 1
@@ -485,6 +488,104 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.assertEqual(self.download_count, 0)
         self.assertEqual(self.sync.saved, 1)
         self.assertTrue(self.sync.ready)
+
+    def local_song(self, title="Fixture", artist="Fixture", filename="existing.mp3"):
+        path = self.directory / filename
+        path.write_bytes(b"synthetic existing audio")
+        song = {"title": title, "artist": artist, "path": str(path)}
+        self.player.local_songs.append(song)
+        return str(path)
+
+    def test_unrecorded_library_match_is_reused_and_saved_before_playback(self):
+        self.cached_session()
+        path = self.local_song(title="Song (Official Audio)", artist="BoBurnham - Topic")
+        self.tracks = [{"id": "synthetic-0", "title": "SONG", "artist": "Bo Burnham"}]
+        self.module.atomic_json(self.module.DOWNLOADS_FILE, {"synthetic-0": str(self.directory / "moved.mp3")})
+        self.module.atomic_json(self.module.DEFERRED_FILE,
+                                {"synthetic-0": {"title": "Song", "retry_after": self.module.time() + 100}})
+        ready = self.player.allow_playback
+
+        def check_saved():
+            self.assertEqual(json.loads(self.module.DOWNLOADS_FILE.read_text()), {"synthetic-0": path})
+            ready()
+
+        self.player.allow_playback = check_saved
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 0)
+        self.assertEqual((self.sync.saved, self.sync.total, self.sync.deferred), (1, 1, 0))
+        self.assertTrue(self.player.playback.is_set())
+
+    def test_filename_video_id_recovers_download_without_matching_tags(self):
+        self.cached_session()
+        path = self.local_song(title="Changed title", artist="Unknown Artist",
+                               filename="old title [synthetic-0].mp3")
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 0)
+        self.assertEqual(json.loads(self.module.DOWNLOADS_FILE.read_text()), {"synthetic-0": path})
+
+    def test_same_title_different_artist_or_version_still_downloads(self):
+        self.cached_session()
+        self.local_song(title="Fixture", artist="Someone Else")
+        self.local_song(title="Fixture (Live)", artist="Fixture", filename="live.mp3")
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 1)
+
+    def test_distinct_liked_uploads_of_same_song_download_only_once(self):
+        self.cached_session()
+        self.tracks = [{"id": "synthetic-0", "title": "Song", "artist": "Artist"},
+                       {"id": "synthetic-1", "title": "Artist - Song (Official Video)", "artist": "Artist - Topic"}]
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 1)
+        saved = json.loads(self.module.DOWNLOADS_FILE.read_text())
+        self.assertEqual(saved["synthetic-0"], saved["synthetic-1"])
+        self.assertEqual((self.sync.saved, self.sync.total), (2, 2))
+        self.assertTrue(self.sync.ready)
+
+    def test_invalid_links_and_known_unavailable_entries_are_not_downloaded(self):
+        self.cached_session()
+        self.tracks = [None, {}, {"id": "bad-id"}, {"id": ["synthetic-0"]},
+                       {"id": "synthetic-1", "url": "https://example.com/watch?v=synthetic-1"},
+                       {"id": "synthetic-2", "url": "https://youtu.be/synthetic-3"},
+                       {"id": "synthetic-4", "is_available": False},
+                       {"id": "synthetic-5", "availability": "private"},
+                       {"id": "synthetic-6", "title": "[Deleted video]"},
+                       {"id": "synthetic-7", "title": "Available", "url": "https://youtu.be/synthetic-7"}]
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 1)
+        self.assertEqual(self.sync.skipped, 9)
+        self.assertEqual((self.sync.saved, self.sync.total), (1, 1))
+        self.assertTrue(self.player.playback.is_set())
+        self.assertIn("9 invalid or unavailable skipped", self.sync.message)
+
+    def test_missing_empty_and_partial_files_do_not_block_download(self):
+        self.cached_session()
+        for filename in ("empty.mp3", "partial.mp3.part", ".youtubeCached [synthetic-0].mp3"):
+            path = self.directory / filename
+            path.write_bytes(b"" if filename == "empty.mp3" else b"unfinished audio")
+            self.player.local_songs.append({"title": "Fixture", "artist": "Fixture", "path": str(path)})
+        self.module.atomic_json(self.module.DOWNLOADS_FILE, {"synthetic-0": str(self.directory / "empty.mp3")})
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 1)
+
+    def test_cancellation_during_library_check_keeps_playback_held(self):
+        self.cached_session()
+
+        def scan(cancel):
+            cancel.set()
+            return []
+
+        self.player.local_songs_for_sync = scan
+        self.start(sync=True)
+        self.wait_finished()
+        self.assertEqual(self.download_count, 0)
+        self.assertFalse(self.player.playback.is_set())
+        self.assertFalse(self.sync.ready)
 
     def test_stopping_downloads_keeps_completed_progress(self):
         self.cached_session()

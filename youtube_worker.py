@@ -93,6 +93,7 @@ def execute(job):
             return [{'id': track['videoId'], 'title': track.get('title', 'Untitled'),
                      'artist': ', '.join(artist.get('name', '') for artist in track.get('artists', [])) or 'YouTube',
                      'duration': track.get('duration_seconds'),
+                     'is_available': track.get('isAvailable', True),
                      'url': 'https://www.youtube.com/watch?v=' + track['videoId']}
                     for track in playlist.get('tracks', []) if track.get('videoId')]
     import yt_dlp
@@ -181,6 +182,7 @@ def execute(job):
             return [{"id": entry.get("id"), "title": entry.get("title") or "Untitled",
                      "artist": entry.get("artist") or entry.get("uploader") or "YouTube",
                      "duration": entry.get("duration"),
+                     "availability": entry.get("availability"),
                      "url": entry.get("url") or entry.get("webpage_url")}
                     for entry in info.get("entries", []) if entry and entry.get("id")]
         if action == "download":

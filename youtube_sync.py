@@ -10,6 +10,7 @@ from time import monotonic, time
 
 from log_loader import log_loader
 from runtime_policy import run_job, YouTubeJobError
+from youtube_library import LocalSongIndex, eligible_tracks
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "MusicApp"
@@ -73,6 +74,7 @@ class YouTubeSync:
         self.total = None
         self.saved = 0
         self.deferred = 0
+        self.skipped = 0
         self.session_remembered = True
         self.phase = "idle"
         self.message = "Connect YouTube to start listening."
@@ -153,6 +155,7 @@ class YouTubeSync:
         self.ready = False
         self.total, self.saved = None, 0
         self.deferred = 0
+        self.skipped = 0
         if login:
             self.connected = False
         source = source or self.settings.get("source")
@@ -241,9 +244,23 @@ class YouTubeSync:
                             if isinstance(record, dict)
                             and isinstance(record.get("retry_after"), (int, float))
                             and isfinite(record["retry_after"]) and record["retry_after"] > time()}
-                download_tracks = list({entry["id"]: entry for entry in tracks}.values())
-                missing = [entry for entry in download_tracks
-                           if not Path(downloaded.get(entry["id"], "")).is_file()]
+                update("Checking songs already in your library…", "syncing")
+                download_tracks, self.skipped = eligible_tracks(tracks)
+                library = LocalSongIndex()
+                for song in self.player.local_songs_for_sync(self.cancel):
+                    library.add(song)
+                missing = []
+                for entry in download_tracks:
+                    if self.cancel.is_set():
+                        raise RuntimeError("Cancelled")
+                    path = library.find(entry, downloaded)
+                    if path:
+                        if downloaded.get(entry["id"]) != path:
+                            downloaded[entry["id"]] = path
+                            dirty = True
+                        self.player.add_downloaded_song(path)
+                    else:
+                        missing.append(entry)
                 self.deferred = sum(entry["id"] in deferred for entry in missing)
                 self.total = len(download_tracks) - self.deferred
                 self.saved = len(download_tracks) - len(missing)
@@ -254,6 +271,13 @@ class YouTubeSync:
                     if self.cancel.is_set():
                         break
                     entry, attempt = queue.popleft()
+                    # Another liked upload of this song may have just completed.
+                    existing = library.find(entry, downloaded)
+                    if existing:
+                        downloaded[entry["id"]] = existing
+                        self.saved += 1
+                        dirty = True
+                        continue
                     update(f"{self.saved} of {self.total} songs ready\n"
                            + ("Retrying " if attempt == 2 else "Downloading ")
                            + f"{entry.get('title', 'Untitled')}…", "syncing")
@@ -277,6 +301,7 @@ class YouTubeSync:
                             self.total -= 1
                         continue
                     downloaded[entry["id"]] = path
+                    library.add(dict(entry, path=path))
                     completed += 1
                     self.saved += 1
                     dirty = True
@@ -297,6 +322,7 @@ class YouTubeSync:
                         raise RuntimeError("Cancelled")
                     self.ready = True
                     update(f"{self.saved} songs ready · {completed} new songs saved"
+                           + (f" · {self.skipped} invalid or unavailable skipped" if self.skipped else "")
                            + (f" · {self.deferred} deferred for up to 30 days" if self.deferred else ""), "connected")
                     if on_ready:
                         on_ready()

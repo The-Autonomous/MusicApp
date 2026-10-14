@@ -67,7 +67,7 @@ with **Right Alt + Y**, or through the controls window.
   Esc minimizes the loading card without stopping setup.
 - Under **Options**, choose **YouTube Music liked songs** or **YouTube liked videos**. Sync fetches
   every entry YouTube makes available, saves the list locally and downloads
-  missing tracks by video ID. It cannot recover likes that YouTube does not
+  missing tracks after checking the local library. It cannot recover likes that YouTube does not
   expose, or download deleted/private/unavailable videos. Unavailable downloads
   are counted and become eligible again on the first sync after their cooldown.
 - Startup automatically reuses and verifies the saved login, then syncs likes.
@@ -83,8 +83,17 @@ are not stored in these files.
 `.youtube_deferred_downloads.json` stores deferred video IDs, titles and retry
 timestamps, and is ignored by Git. Delete it to make those songs eligible again
 on the next sync.
-The download queue contains each video ID only once, even if it appears more than
-once in the likes list; existing recorded downloads are reused regardless of title.
+Before downloading, sync scans the full local library, including songs omitted by
+fast loading. It first reuses recorded downloads or files with the same video ID
+in their filename, then checks title and artist together. Matching ignores case,
+spacing, punctuation, artist `- Topic` suffixes and labels such as `(Official
+Video)` or `[Lyrics]`; live, remix, instrumental and other version labels remain
+distinct. Missing, empty, partial and cloud-only files do not count as downloads.
+Recovered matches are saved to the download mapping before playback starts.
+Invalid YouTube links and entries already marked private, deleted or unavailable
+are skipped before downloading. Other failures still use the retry policy above.
+The queue contains each video ID once and also reuses a matching song downloaded
+earlier in the same sync, even when another liked upload has a different video ID.
 
 ## Playing alongside GTA
 
@@ -166,9 +175,12 @@ with the upstream version.
 
 ## Validation of this revision
 
-All 132 automated checks passed on Windows with Python 3.13 in about eight
+All 149 automated checks passed on Windows with Python 3.13 in about 29
 seconds. Run them with `python -B -m unittest discover -s tests` after installing
 the dependencies; test media, sessions and servers use disposable fixtures.
+The full suite opens and closes temporary windows for interface layout checks.
+For download matching checks without those windows, run
+`python -B -m unittest discover -s tests -p 'test_youtube*.py'`.
 
 Automated checks cover startup preparation and cancellation, sign-in verification,
 playback gating until the final download and checkpoint, retrying failed downloads,
