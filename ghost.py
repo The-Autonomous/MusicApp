@@ -10,6 +10,27 @@ from typing import Iterator
 import json
 
 try:
+    from ui_controls import (ACTION_LABELS, build_controls_window, conflicting_action,
+                             replacement_chord, shortcut_label)
+except ImportError:
+    from .ui_controls import (ACTION_LABELS, build_controls_window, conflicting_action,
+                              replacement_chord, shortcut_label)
+
+# Tk window handles are pointer-sized on 64-bit Windows.
+if os.name == "nt":
+    from ctypes import wintypes
+    _user32 = ctypes.windll.user32
+    _user32.GetParent.argtypes = [wintypes.HWND]
+    _user32.GetParent.restype = wintypes.HWND
+    _user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    _user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    _user32.SetWindowPos.restype = wintypes.BOOL
+
+try:
     from log_loader import log_loader
     from playerUtils import TitleCleaner
     from audio_eq import EQKnob, PercentKnob, VolumeSlider
@@ -85,7 +106,8 @@ class ThemeManager:
             "ui_list": ("Segoe UI", 12),
             "ui_small_italic": ("Segoe UI", 10, "italic"),
             "fixed_width": ("Consolas", 12),
-            "icon": ("Arial Unicode MS", 11)
+            "icon": ("Arial Unicode MS", 11),
+            "hint": font.Font(family='Segoe UI', size=9)
         }
 
     def apply_ttk_styles(self, root):
@@ -163,6 +185,15 @@ class ThemeManager:
             bordercolor=[("focus", self.COLORS["accent"])],
             fieldbackground=[("!disabled", self.COLORS["entry_bg"])]
         )
+
+        style.configure("TCombobox", fieldbackground=self.COLORS["entry_bg"],
+                        background=self.COLORS["entry_bg"], foreground=self.COLORS["text"],
+                        arrowcolor=self.COLORS["text_dark"], bordercolor=self.COLORS["border"],
+                        selectbackground=self.COLORS["entry_bg"], selectforeground=self.COLORS["text"],
+                        font=self.FONTS["ui_list"], padding=5)
+        style.map("TCombobox", fieldbackground=[("readonly", self.COLORS["entry_bg"])],
+                  foreground=[("readonly", self.COLORS["text"])],
+                  bordercolor=[("focus", self.COLORS["accent"])])
 
         # --- OptionMenu ---
         style.configure("TMenubutton",
@@ -434,7 +465,8 @@ class GhostOverlay:
             'bg': None,
             'player_text': None,
             'duration_text': None,
-            'lyrics_text': None
+            'lyrics_text': None,
+            'controls_hint': None
         }
         self._update_scheduled = False
 
@@ -648,7 +680,8 @@ class GhostOverlay:
         for act in self.key_actions:
             for k_raw in act['required']:
                 self.all_existing_keys.add(k_raw.lower()) # Ensure lowercase
-            for f_raw in act.get('forbidden', []):
+            forbidden = () if act.get('_forbid_other_keys') else act.get('forbidden', ())
+            for f_raw in forbidden:
                 if f_raw != 'ALL':
                     self.all_existing_keys.add(f_raw.lower()) # Ensure lowercase
         
@@ -656,7 +689,9 @@ class GhostOverlay:
 
         for act in self.key_actions:
             act['required'] = [key.lower() for key in act['required']] # Ensure required keys are lowercase
-            if 'forbidden' in act and 'ALL' in act['forbidden']:
+            if 'ALL' in act.get('forbidden', ()):
+                act['_forbid_other_keys'] = True
+            if act.get('_forbid_other_keys'):
                 act['forbidden'] = [
                     k_norm for k_norm in self.all_existing_keys
                     if k_norm not in act['required']
@@ -686,8 +721,7 @@ class GhostOverlay:
             # The 'name' here is the new_key.
             # Ignore standalone modifiers as the new distinguishing key, unless it's shift for e.g. Alt+Shift
             # For simplicity, we take any non-'alt' key as the new distinguishing key.
-            if name in ('alt', 'ctrl'): # Cannot use alt or ctrl as the distinguishing key with 'alt'
-                self.post_ui(messagebox.showwarning, "Invalid Key", f"Cannot use '{name.upper()}' with ALT. Try another key.")
+            if name in ('alt', 'right alt', 'ctrl'):
                 return # Wait for a different key
 
             # If 'name' is 'shift', 'right shift', or 'right alt', it's a valid part of a combo
@@ -793,294 +827,120 @@ class GhostOverlay:
 #####################################################################################################
 
     def initiate_key_modification(self, action_id_to_modify):
+        action = next((item for item in self.key_actions if item['id'] == action_id_to_modify), None)
+        if not action or not action.get('modifiable'):
+            return
         self.action_id_being_modified = action_id_to_modify
         self.is_listening_for_modification = True
-
-        action_hint = "this action"
-        for act in self.key_actions:
-            if act['id'] == action_id_to_modify:
-                action_hint = f"'{act['hint']}'"
-                break
-        
-        if self.key_hints_popup and self.key_hints_popup.winfo_exists() and self.modification_status_label:
+        modifier = 'Right Alt' if 'right alt' in action['required'] and 'alt' not in action['required'] else 'Left Alt'
+        if self.modification_status_label:
             self.modification_status_label.config(
-                text=f"Press desired key to combine with ALT for {action_hint}.\n(e.g., press 'P' for ALT+P). Esc to cancel."
-            )
-            self.key_hints_popup.bind("<Escape>", self._cancel_key_modification_event)
-        else:
-            self.key_hints_popup.withdraw() # Hide while dialog is open
-            messagebox.showinfo("Modify Key", f"Listening for new key for {action_hint}.\nPress the key you want to use with ALT. Press Esc in this message box to cancel (if main window doesn't catch it).")
-            self.key_hints_popup.lift()
-            # Fallback if popup isn't ideal for this state
+                text=f"Changing {ACTION_LABELS.get(action['id'], action['hint'])}: press a key for {modifier} + key. Esc cancels.")
+        if self.key_hints_popup and self.key_hints_popup.winfo_exists():
+            self.key_hints_popup.bind('<Escape>', self._cancel_key_modification_event)
 
-    def _cancel_key_modification_event(self, event=None): # For tkinter event binding
-        self._cancel_key_modification(refresh_hints=True)
+    def _cancel_key_modification_event(self, event=None):
+        self._cancel_key_modification()
+        return 'break'
 
     def _cancel_key_modification(self, refresh_hints=False):
         self.is_listening_for_modification = False
         self.action_id_being_modified = None
         if self.modification_status_label:
-            self.modification_status_label.config(text="")
-        
+            try:
+                self.modification_status_label.config(text='')
+            except tk.TclError:
+                pass
         if self.key_hints_popup and self.key_hints_popup.winfo_exists():
-            self.key_hints_popup.unbind("<Escape>") # Unbind specific escape
-            self.key_hints_popup.bind("<Escape>", lambda e: self.key_hints_popup.destroy()) # Rebind general close
-            if refresh_hints: # If cancel came from an actual modification attempt
-                self.key_hints_popup.destroy()
-                self.key_hints_popup = None
-                self.show_key_hints()
-
+            self.key_hints_popup.bind('<Escape>', self._close_key_hints)
 
     def finalize_key_modification(self, new_distinguishing_key_name):
-        self.is_listening_for_modification = False # Moved here, set immediately
-        if self.modification_status_label:
-            self.modification_status_label.config(text="")
-
-        action_to_modify = next((a for a in self.key_actions if a['id'] == self.action_id_being_modified), None)
-        if not action_to_modify:
-            self._cancel_key_modification()
+        action = next((item for item in self.key_actions if item['id'] == self.action_id_being_modified), None)
+        if not action or not self.is_listening_for_modification:
             return
-
-        original_keys = list(action_to_modify['required'])
-        
-        # New binding is always ['alt', new_distinguishing_key_name]
-        # Ensure new_distinguishing_key_name is not 'alt' itself.
-        if new_distinguishing_key_name == 'alt':
-            self.key_hints_popup.withdraw() # Hide while dialog is open
-            messagebox.showerror("Invalid Key", "'ALT' itself cannot be the distinguishing key when 'ALT' is already the base. Modification cancelled.")
-            self.key_hints_popup.lift()
-            self._cancel_key_modification(refresh_hints=True)
+        if new_distinguishing_key_name in ('alt', 'right alt', 'ctrl'):
             return
-
-        new_required_keys = ['alt', new_distinguishing_key_name.lower()]
-
-        # Check for conflicts
-        for action in self.key_actions:
-            if action['id'] != self.action_id_being_modified and action['required'] == new_required_keys:
-                self.key_hints_popup.withdraw() # Hide while dialog is open
-                messagebox.showerror("Conflict", f"The combination '{' + '.join(k.upper() for k in new_required_keys)}' is already used by '{action['hint']}'.")
-                self.key_hints_popup.lift()
-                self._cancel_key_modification(refresh_hints=True)
-                return
-            
-        current_keys_str = " + ".join(k.upper() for k in original_keys)
-        new_keys_str = " + ".join(k.upper() for k in new_required_keys)
-
-        self.key_hints_popup.withdraw() # Hide while dialog is open
-        try:
-            # Adding parent=self.key_hints_popup also helps position the box correctly
-            confirmed = messagebox.askyesno("Confirm Key Change",
-                                            f"Change binding for '{action_to_modify['hint']}'\n"
-                                            f"From: {current_keys_str}\n"
-                                            f"To:   {new_keys_str}\n\n"
-                                            f"Are you sure?",
-                                            parent=self.key_hints_popup)
-        finally:
-            # This block ALWAYS runs, ensuring the hints window is visible again
-            self.key_hints_popup.lift()
-
-        if confirmed:
-            action_to_modify['required'] = new_required_keys
-            settings_to_save = {
-                'required': new_required_keys,
-                'alt_needed': action_to_modify.get('alt_needed', True) 
-            }
-            self.bindings_handler.update_setting(action_to_modify['id'], settings_to_save)
-            self._rebuild_key_maps()
-            
-            if self.key_hints_popup and self.key_hints_popup.winfo_exists():
-                self.key_hints_popup.destroy()
-                self.key_hints_popup = None
-            self.show_key_hints() # Reopen with updated bindings
-        else:
-            self._cancel_key_modification(refresh_hints=True) # User said no, refresh hints to clear state
-
-        self.action_id_being_modified = None # Ensure reset after modification attempt
+        new_required = replacement_chord(action, new_distinguishing_key_name)
+        candidate = dict(action, required=new_required)
+        conflict = conflicting_action(self.key_actions, candidate, action['id'])
+        if conflict:
+            self.modification_status_label.config(
+                text=f"{shortcut_label(candidate)} already controls {ACTION_LABELS.get(conflict['id'], conflict['hint'])}. Choose another key, or Esc to cancel.")
+            return
+        action['required'] = new_required
+        self.bindings_handler.update_setting(action['id'], {
+            'required': new_required, 'alt_needed': action.get('alt_needed', True)})
+        self._rebuild_key_maps()
+        self._cancel_key_modification()
+        self._refresh_key_hints(f"Saved: {ACTION_LABELS.get(action['id'], action['hint'])} · {shortcut_label(action)}")
 
     def _confirm_reset_bindings(self):
-        self.key_hints_popup.withdraw() # Hide while dialog is open
-        try:
-            # Adding parent=self.key_hints_popup also helps position the box correctly
-            confirmed = messagebox.askyesno("Reset Key Bindings", 
-                               "Are you sure you want to reset all modifiable key bindings to their defaults?\nThis cannot be undone.",
-                               icon='warning')
-        finally:
-            # This block ALWAYS runs, ensuring the hints window is visible again
-            self.key_hints_popup.lift()
-
-        if confirmed:
+        if not self.key_hints_popup or not self.key_hints_popup.winfo_exists():
+            return
+        if messagebox.askyesno('Restore shortcuts', 'Restore the original shortcuts? Your custom shortcuts will be replaced.',
+                              parent=self.key_hints_popup):
             self.bindings_handler.reset_settings()
-            self._define_default_key_actions() # Reloads hardcoded defaults into self.key_actions
-            # self._load_custom_bindings() # Not strictly needed as JSON is empty, but good for consistency
+            self._define_default_key_actions()
             self._rebuild_key_maps()
-            
-            if self.key_hints_popup and self.key_hints_popup.winfo_exists():
-                self.key_hints_popup.destroy()
-                self.key_hints_popup = None
-            self.show_key_hints()
-            
+            self._refresh_key_hints('Default shortcuts restored.')
+
     def _on_alt_toggle(self, action):
-        """Handles the logic for the 'Alt Not Required' checkbox."""
-        is_alt_needed = not action.get('alt_needed', True)
-        action['alt_needed'] = is_alt_needed
-        settings_to_save = {
-            'required': action.get('required', None),
-            'alt_needed': action.get('alt_needed', True) 
-        }
-        self.bindings_handler.update_setting(action['id'], settings_to_save)
-
-        # Rebuild key maps to reflect the change
+        if 'alt' not in action['required']:
+            return
+        candidate = dict(action, alt_needed=not action.get('alt_needed', True))
+        conflict = conflicting_action(self.key_actions, candidate, action['id'])
+        if conflict:
+            self._refresh_key_hints(f"{shortcut_label(candidate)} is already used by {ACTION_LABELS.get(conflict['id'], conflict['hint'])}.")
+            return
+        action['alt_needed'] = candidate['alt_needed']
+        self.bindings_handler.update_setting(action['id'], {
+            'required': action['required'], 'alt_needed': action['alt_needed']})
         self._rebuild_key_maps()
-        
-        # Close and reopen the hints popup to reflect changes
-        if self.key_hints_popup and self.key_hints_popup.winfo_exists():
-            self.key_hints_popup.destroy()
-            self.key_hints_popup = None  # Reset the variable
+        self._refresh_key_hints('Shortcut updated.')
 
-        self.show_key_hints(force_state=True) # Re-open with the new info
-            
-    def show_key_hints(self, force_state: bool = None):
-        """ Show a popup with all key hints and their actions. """
-        def close_popup(event=None):
-            if self.key_hints_popup:
-                try: self.key_hints_popup.destroy()
-                except Exception: pass
-                self.key_hints_popup = None
-        
+    def _close_key_hints(self, event=None):
+        popup, self.key_hints_popup = self.key_hints_popup, None
+        self.is_listening_for_modification = False
+        self.action_id_being_modified = None
+        self.modification_status_label = None
+        if popup:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+        return 'break'
+
+    def _refresh_key_hints(self, status=''):
+        customize = bool(self.key_hints_popup and getattr(self.key_hints_popup, '_customize_controls', False))
+        geometry = self.key_hints_popup.geometry() if self.key_hints_popup else None
+        self._close_key_hints()
+        self.show_key_hints(force_state=True, customize=customize)
+        if geometry:
+            self.key_hints_popup.geometry(geometry)
+        self.modification_status_label.config(text=status)
+        self._layout_key = None
+        self.schedule_update()
+
+    def _run_controls_action(self, action):
+        callback = action.get('action')
+        if callable(callback):
+            if action['id'] in ('show_search', 'show_eq_menu', 'youtube_sync', 'player_on_off'):
+                self._close_key_hints()
+            callback()
+
+    def show_key_hints(self, force_state: bool = None, customize=False):
         if force_state is False:
-            close_popup()
+            self._close_key_hints()
             return
-        elif self.key_hints_popup and self.key_hints_popup.winfo_exists() and force_state is not True:
-            close_popup()
+        if self.key_hints_popup and self.key_hints_popup.winfo_exists():
+            if force_state is not True:
+                self._close_key_hints()
             return
-
-        self.key_hints_popup = tk.Toplevel(self.root)
-        self.key_hints_popup.withdraw()
-        self.key_hints_popup.overrideredirect(True)
-        self.key_hints_popup.configure(bg=self.theme.COLORS["window_bg"])
-        self.key_hints_popup.attributes("-topmost", True)
-
-        main_frame = ttk.Frame(self.key_hints_popup, style="TFrame", padding=20)
-        main_frame.pack(fill="both", expand=True)
-
-        self.key_hints_popup.bind("<Escape>", close_popup)
-        
-        title_label = ttk.Label(main_frame, text="Music Player Controls", style="Header.TLabel")
-        title_label.pack(pady=(0, 15), anchor="center")
-
-        separator = tk.Frame(main_frame, height=2, bg=self.theme.COLORS["border"])
-        separator.pack(fill="x", pady=(0, 15))
-
-        list_container = ttk.Frame(main_frame)
-        list_container.pack(fill="both", expand=True)
-
-        canvas = tk.Canvas(list_container, bg=self.theme.COLORS["frame_bg"], highlightthickness=0)
-        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        self.modification_status_label = ttk.Label(main_frame, text="", style="Status.TLabel", anchor="w", justify=tk.LEFT, wraplength=580)
-        self.modification_status_label.pack(pady=(10, 5), padx=10, anchor="w")
-
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        self.key_hints_popup.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        self.key_hints_popup._binding_variables = []
-        for i, action in enumerate(self.key_actions):
-            keys_display = " + ".join(k.upper() for k in action['required'])
-            
-            # If alt is not needed, remove it from display (less clunky than a for loop)
-            if not action.get('alt_needed', True):
-                keys_display = keys_display.removeprefix("ALT + ")
-            
-            hint_text = action['hint']
-
-            action_row_frame = ttk.Frame(scrollable_frame, style="TFrame")
-            action_row_frame.pack(fill="x", pady=2, padx=5)
-
-            # Use grid for better alignment
-            action_row_frame.columnconfigure(0, weight=1)
-            action_row_frame.columnconfigure(1, weight=3)
-            action_row_frame.columnconfigure(2, weight=0)
-            action_row_frame.columnconfigure(3, weight=0)
-
-            key_label = ttk.Label(action_row_frame, text=keys_display, font=self.theme.FONTS["fixed_width"], anchor="w")
-            key_label.grid(row=0, column=0, sticky="ew", padx=(10, 5))
-
-            hint_label = ttk.Label(action_row_frame, text=f"→  {hint_text}", anchor="w", wraplength=400)
-            hint_label.grid(row=0, column=1, sticky="ew", padx=5)
-
-            if action.get('modifiable'):
-                edit_btn = ttk.Button(
-                    action_row_frame,
-                    text="⚙️",
-                    style="TButton",
-                    command=lambda act_id=action['id']: self.initiate_key_modification(act_id)
-                )
-                edit_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
-                
-                required_variable = tk.BooleanVar(master=self.key_hints_popup, value=action.get('alt_needed', True))
-                self.key_hints_popup._binding_variables.append(required_variable)
-                alt_required_check = ttk.Checkbutton(
-                    action_row_frame,
-                    text=f" ALT{"" if action.get('alt_needed', True) else " Not"} Needed",
-                    style="TCheckbutton",
-                    variable=required_variable,
-                    command=lambda act=action: self._on_alt_toggle(act)
-                )
-                alt_required_check.grid(row=0, column=3, sticky="e", padx=(0, 10))
-            
-            # Hover effect
-            widgets_in_row = [action_row_frame, key_label, hint_label]
-            #if action.get('modifiable'): widgets_in_row.append(edit_btn)
-            
-            def on_enter(e, widgets=widgets_in_row):
-                for w in widgets: w.configure(style="Hover.TFrame" if isinstance(w, ttk.Frame) else "Hover.TLabel")
-            def on_leave(e, widgets=widgets_in_row):
-                for w in widgets: w.configure(style="TFrame" if isinstance(w, ttk.Frame) else "TLabel")
-            
-            action_row_frame.bind("<Enter>", on_enter)
-            action_row_frame.bind("<Leave>", on_leave)
-
-        buttons_frame = ttk.Frame(main_frame)
-        buttons_frame.pack(fill="x", pady=(15, 0), padx=10)
-        buttons_frame.columnconfigure(0, weight=1)
-        buttons_frame.columnconfigure(1, weight=1)
-
-        reset_btn = ttk.Button(buttons_frame, text="Reset Bindings", command=self._confirm_reset_bindings, style="Warning.TButton")
-        reset_btn.grid(row=0, column=0, sticky="ew", padx=5)
-
-        close_btn = ttk.Button(buttons_frame, text="✖ Close", command=close_popup, style="Danger.TButton")
-        close_btn.grid(row=0, column=1, sticky="ew", padx=5)
-
-        def start_move(e):
-            self.key_hints_popup._offset_x = e.x_root - self.key_hints_popup.winfo_rootx()
-            self.key_hints_popup._offset_y = e.y_root - self.key_hints_popup.winfo_rooty()
-
-        def do_move(e):
-            x = e.x_root - self.key_hints_popup._offset_x
-            y = e.y_root - self.key_hints_popup._offset_y
-            self.key_hints_popup.geometry(f"+{x}+{y}")
-
-        title_label.bind("<Button-1>", start_move)
-        title_label.bind("<B1-Motion>", do_move)
-        main_frame.bind("<Button-1>", start_move)
-        main_frame.bind("<B1-Motion>", do_move)
-        
-        self.key_hints_popup.update_idletasks()
-        width = max(720, self.key_hints_popup.winfo_reqwidth())
-        height = max(500, self.key_hints_popup.winfo_reqheight())
-        x_coord = (self.key_hints_popup.winfo_screenwidth() // 2) - (width // 2)
-        y_coord = (self.key_hints_popup.winfo_screenheight() // 2) - (height // 2)
-
-        self.key_hints_popup.geometry(f"{width}x{height}+{x_coord}+{y_coord}")
-        self.key_hints_popup.deiconify()
-        self.key_hints_popup.lift()
+        self.key_hints_popup, self.modification_status_label = build_controls_window(
+            self.root, self.theme.COLORS, self.key_actions,
+            run_action=self._run_controls_action, on_edit=self.initiate_key_modification,
+            on_alt_toggle=self._on_alt_toggle, on_reset=self._confirm_reset_bindings,
+            on_close=self._close_key_hints, customize=customize)
 
 #####################################################################################################
 
@@ -1441,7 +1301,8 @@ class GhostOverlay:
             
             # Make the entire animation window ignore mouse clicks.
             try:
-                hwnd = ctypes.windll.user32.GetParent(self.search_overlay.winfo_id())
+                window_id = self.search_overlay.winfo_id()
+                hwnd = ctypes.windll.user32.GetParent(window_id) or window_id
                 style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
                 style = style | WS_EX_LAYERED | WS_EX_TRANSPARENT
                 ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
@@ -1783,13 +1644,18 @@ class GhostOverlay:
 
     def toggle_overlay_clickthrough(self, mode: bool):
         """Toggle Whether The Mouse Ignores The Display Or Not"""
-        hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id())
+        if not self.window or not self.window.winfo_exists():
+            return
+        window_id = self.window.winfo_id()
+        hwnd = ctypes.windll.user32.GetParent(window_id) or window_id
         current_style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         
         if mode: new_style = current_style | WS_EX_LAYERED | WS_EX_TRANSPARENT
         else: new_style = current_style & ~ WS_EX_TRANSPARENT
-        
+        new_style |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
         ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style)
+        ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def parse_mouse_over_overlay(self):
         if not self.window or not self.window.winfo_exists(): return
@@ -1939,6 +1805,9 @@ class GhostOverlay:
             self.canvas_items['player_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["main"], fill=self.theme.COLORS["text"], anchor=tk.N, justify=tk.CENTER)
             self.canvas_items['duration_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["time"], fill=self.theme.COLORS["text_dark"], anchor=tk.N, justify=tk.CENTER)
             self.canvas_items['lyrics_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["lyrics"], fill=self.theme.COLORS["text"], anchor=tk.N, justify=tk.CENTER)
+            self.canvas_items['controls_hint'] = self.canvas.create_text(
+                0, 0, text='Both Alt keys · Controls', font=self.theme.FONTS['hint'],
+                fill=self.theme.COLORS['text_dark'], anchor=tk.N, justify=tk.CENTER)
 
     def open_overlay(self):
         if hasattr(self, 'search_overlay'):
@@ -1950,6 +1819,7 @@ class GhostOverlay:
             return
 
         self.window = tk.Toplevel(self.root)
+        self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes('-alpha', 0.7)
         self.window.attributes('-topmost', True)
@@ -1967,6 +1837,7 @@ class GhostOverlay:
         
         if self._last_position: self.window.geometry(f"+{self._last_position[0]}+{self._last_position[1]}")
         else: self.root.after(0, self.center_window)
+        self.window.deiconify()
 
         self._drag_start_x, self._drag_start_y = 0, 0
         self._win_start_x, self._win_start_y = 0, 0
@@ -2029,18 +1900,21 @@ class GhostOverlay:
             main_font = self.theme.FONTS["main"]
             time_font = self.theme.FONTS["time"]
             lyrics_font = self.theme.FONTS["lyrics"]
+            hint_font = self.theme.FONTS['hint']
 
             main_width = max(main_font.measure(line) for line in wrapped_player_text.split('\n')) if wrapped_player_text else 0
             time_width = time_font.measure(self.player_metric['player_duration'])
             lyrics_width = max(lyrics_font.measure(line) for line in display_lyrics_text.split('\n')) if display_lyrics_text else 0
 
-            total_width = max(main_width, time_width, lyrics_width) + 2 * self.overlay_text_padding
+            total_width = max(main_width, time_width, lyrics_width,
+                              hint_font.measure('Both Alt keys · Controls')) + 2 * self.overlay_text_padding
             
             height_for_main_text = main_font.metrics("linespace") * num_player_text_lines
             height_for_time = time_font.metrics("linespace")
             num_lyrics_lines = display_lyrics_text.count('\n') + 1 if lyrics_visible else 0
             height_for_lyrics = (lyrics_font.metrics("linespace") * num_lyrics_lines) + (self.overlay_text_padding / 2) if lyrics_visible else 0
-            total_height = height_for_main_text + height_for_time + height_for_lyrics + (2 * self.overlay_text_padding)
+            height_for_hint = hint_font.metrics('linespace') + self.overlay_text_padding
+            total_height = height_for_main_text + height_for_time + height_for_lyrics + height_for_hint + (2 * self.overlay_text_padding)
 
             self.canvas.delete(self.canvas_items['bg'])
             self.canvas_items['bg'] = self.canvas.create_rounded_box(0, 0, total_width, total_height, radius=self.overlay_corner_radius, color=self.bg_color)
@@ -2060,6 +1934,8 @@ class GhostOverlay:
                 self.canvas.coords(self.canvas_items['lyrics_text'], total_width / 2, current_y)
             else:
                 self.canvas.itemconfig(self.canvas_items['lyrics_text'], state='hidden')
+            self.canvas.coords(self.canvas_items['controls_hint'], total_width / 2,
+                               total_height - self.overlay_text_padding - hint_font.metrics('linespace'))
 
             if self.window and self.window.winfo_exists():
                 parts = self.window.geometry().split('+')

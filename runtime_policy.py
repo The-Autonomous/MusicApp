@@ -4,12 +4,19 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from threading import Event, Lock
 from time import monotonic
 
 _lock = Lock()
 _checked_at = 0.0
 _gaming = False
+
+
+class YouTubeJobError(RuntimeError):
+    def __init__(self, message, code="operation_failed"):
+        super().__init__(message)
+        self.code = code
 
 
 def game_running():
@@ -71,16 +78,30 @@ def run_job(job, cancel=None, timeout=300):
     if executable.lower().endswith("pythonw.exe"):
         executable = str(Path(executable).with_name("python.exe"))
     environment = os.environ.copy()
-    environment.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    # Both ends of the JSON pipe must use UTF-8 even on a Windows locale whose
+    # default console encoding cannot represent a song title or search query.
+    environment.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                       OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
+                       NUMEXPR_NUM_THREADS="1", BLIS_NUM_THREADS="1")
     job = dict(job, gaming=game_running())
+    login_profile = None
+    if job["action"] == "login":
+        # Parent ownership also removes a cancelled sign-in's temporary files.
+        login_profile = tempfile.TemporaryDirectory(prefix="MusicApp-signin-", ignore_cleanup_errors=True)
+        job["profile_dir"] = login_profile.name
     flags = 0
     if os.name == "nt":
         priority = subprocess.IDLE_PRIORITY_CLASS if job['gaming'] and job['action'] != 'login' else subprocess.BELOW_NORMAL_PRIORITY_CLASS
         flags = subprocess.CREATE_NO_WINDOW | priority
-    process = subprocess.Popen([executable, str(worker)], stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, encoding="utf-8", env=environment,
-                               creationflags=flags)
+    try:
+        process = subprocess.Popen([executable, str(worker)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, encoding="utf-8", env=environment,
+                                   creationflags=flags)
+    except OSError:
+        if login_profile:
+            login_profile.cleanup()
+        raise
     deadline = monotonic() + timeout
     payload = json.dumps(job, ensure_ascii=False)
     try:
@@ -98,7 +119,8 @@ def run_job(job, cancel=None, timeout=300):
         except (ValueError, TypeError):
             raise RuntimeError("YouTube worker failed; check that yt-dlp is installed") from None
         if not result.get("ok"):
-            raise RuntimeError(result.get("error", "YouTube operation failed"))
+            raise YouTubeJobError(result.get("error", "YouTube operation failed"),
+                                  result.get("code", "operation_failed"))
         return result.get("result")
     finally:
         if process.poll() is None:
@@ -106,3 +128,5 @@ def run_job(job, cancel=None, timeout=300):
         for stream in (process.stdin, process.stdout):
             if stream:
                 stream.close()
+        if login_profile:
+            login_profile.cleanup()

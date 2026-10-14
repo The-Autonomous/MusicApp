@@ -2,6 +2,7 @@ import os, socket, threading, requests
 from flask import Flask, send_from_directory, make_response, jsonify, request
 from flask_compress import Compress
 from waitress import create_server
+from waitress.task import ThreadedTaskDispatcher
 from html import escape
 import json
 import mimetypes
@@ -51,6 +52,9 @@ class RadioHost:
         self.MusicPlayer = player
         self._host = ip or self._get_local_ip()
         self._server = None
+        self._dispatcher = None
+        self._server_thread = None
+        self._socket_map = {}
         self._log_lock = threading.Lock()
         self._log_offsets = {0: 0}
         self._log_identity = None
@@ -251,24 +255,59 @@ class RadioHost:
 
         if not fake_load:
             # Binding reports an occupied port; never terminate another application's process.
-            self._server = create_server(self.app, host=self._host, port=port, threads=2,
-                                         connection_limit=16, channel_timeout=30,
-                                         outbuf_high_watermark=512 * 1024,
-                                         outbuf_overflow=256 * 1024,
-                                         max_request_body_size=64 * 1024)
-            self._server_thread = threading.Thread(target=self._server.run, daemon=True,
-                                                    name="radio-host")
-            self._server_thread.start()
-            ll.print(f"Phone controls: http://{self._host}:{port}/app_pad")
+            # Waitress otherwise starts workers before binding, leaking idle
+            # threads when construction fails on an already occupied port.
+            self._dispatcher = ThreadedTaskDispatcher()
+            try:
+                self._server = create_server(self.app, host=self._host, port=port, threads=2,
+                                             map=self._socket_map, _dispatcher=self._dispatcher,
+                                             connection_limit=16, channel_timeout=30,
+                                             outbuf_high_watermark=512 * 1024,
+                                             outbuf_overflow=256 * 1024,
+                                             max_request_body_size=64 * 1024)
+                self._dispatcher.set_thread_count(2)
+                self._server_thread = threading.Thread(target=self._server.run, daemon=True,
+                                                        name="radio-host")
+                self._server_thread.start()
+                ll.print(f"Phone controls: http://{self._host}:{port}/app_pad")
+            except BaseException:
+                self.close()
+                raise
 
     def close(self):
-        if self._server:
-            for channel in list(self._server.active_channels.values()):
-                channel.close()
-            self._server.task_dispatcher.shutdown(timeout=1)
-            self._server.close()
-            self._server = None
-            self._server_thread.join(timeout=1)
+        self._server = None
+        # The map also owns a partially constructed server and its trigger if
+        # binding failed before create_server could return the server object.
+        dispatcher = self._dispatcher
+        owned_sockets = tuple(self._socket_map.values())
+        owned_servers = [connection for connection in owned_sockets
+                         if getattr(connection, "task_dispatcher", None) is dispatcher
+                         and hasattr(connection, "application")]
+        trigger_ids = {id(connection.trigger) for connection in owned_servers}
+        for owned_socket in owned_sockets:
+            try:
+                if owned_socket in owned_servers:
+                    # Stop accepting new clients while leaving the trigger
+                    # available for workers finishing their current response.
+                    owned_socket.del_channel()
+                    if owned_socket.socket:
+                        owned_socket.socket.close()
+                elif id(owned_socket) not in trigger_ids:
+                    owned_socket.close()
+            except Exception as exc:
+                ll.debug(f"Closing radio connection: {exc}")
+        if dispatcher:
+            dispatcher.shutdown(timeout=1)
+        self._dispatcher = None
+        for owned_socket in owned_servers + list(self._socket_map.values()):
+            try:
+                owned_socket.close()
+            except Exception as exc:
+                ll.debug(f"Closing radio listener: {exc}")
+        self._socket_map.clear()
+        if (self._server_thread and self._server_thread.is_alive()
+                and self._server_thread is not threading.current_thread()):
+            self._server_thread.join(timeout=2)
 
     def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics="",
                  duration=None, track_id=None):

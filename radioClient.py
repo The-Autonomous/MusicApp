@@ -1,5 +1,6 @@
 """Radio uses two bounded workers, reusable connections, and cancellable downloads."""
 import ast
+from contextlib import contextmanager
 from html import unescape
 import json
 import os
@@ -12,6 +13,23 @@ import requests
 from log_loader import log_loader
 
 ll = log_loader("Radio Client", debugging=False)
+
+
+def _read_limited_response(response, limit, cancel=None):
+    """Read at most the permitted decoded body and release oversized replies."""
+    body = bytearray()
+    for block in response.iter_content(chunk_size=8192):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("Radio request cancelled")
+        if len(body) + len(block) > limit:
+            raise ValueError("Radio response exceeds the size limit")
+        body.extend(block)
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError("Radio request cancelled")
+    try:
+        return body.decode(response.encoding or "utf-8", errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
 
 
 class TimeSync:
@@ -54,6 +72,8 @@ class RadioClient:
         self._download_wake = Event()
         self._lifecycle = RLock()
         self._data_lock = Lock()
+        self._response_lock = Lock()
+        self._responses = set()
         self._generation = 0
         self._pending = None
         self._track_id = None
@@ -81,6 +101,9 @@ class RadioClient:
         self._ip = ip
         if self._running.is_set():
             return
+        if any(thread.is_alive() for thread in self._threads):
+            # Do not revive a cancelled request by clearing its shared event.
+            return
         self._stop.clear()
         self._running.set()
         self._threads = [Thread(target=self._update_loop, daemon=True, name="radio-status"),
@@ -89,11 +112,20 @@ class RadioClient:
             thread.start()
 
     def stopListening(self):
+        self._running.clear()
+        self._stop.set()
+        self._download_wake.set()
+        # Close only replies owned by this listener. This also interrupts a
+        # pending body read instead of waiting for another complete download.
+        with self._response_lock:
+            responses = tuple(self._responses)
+        for response in responses:
+            try:
+                response.close()
+            except Exception:
+                pass
         with self._lifecycle:
-            self._running.clear()
-            self._stop.set()
             self._generation += 1
-            self._download_wake.set()
             self.AudioPlayer.stop()
             self._restore_local_eq()
         for thread in self._threads:
@@ -104,6 +136,22 @@ class RadioClient:
             except OSError:
                 pass
             self._playing_path = None
+
+    @contextmanager
+    def _response(self, session, url, **options):
+        if self._stop.is_set():
+            raise InterruptedError("Radio request cancelled")
+        response = session.get(url, stream=True, **options)
+        try:
+            with self._response_lock:
+                if self._stop.is_set():
+                    raise InterruptedError("Radio request cancelled")
+                self._responses.add(response)
+            yield response
+        finally:
+            with self._response_lock:
+                self._responses.discard(response)
+            response.close()
 
     def _restore_local_eq(self):
         if self._original_eq_state is not None:
@@ -133,9 +181,9 @@ class RadioClient:
 
     def _fetch_data(self, session):
         start = monotonic()
-        with session.get(f"http://{self._ip}:8080/", timeout=(2, 2)) as response:
+        with self._response(session, f"http://{self._ip}:8080/", timeout=(2, 2)) as response:
             response.raise_for_status()
-            content = response.text
+            content = _read_limited_response(response, 64 * 1024, self._stop)
         received = monotonic()
 
         def extract(tag, default=""):
@@ -201,7 +249,7 @@ class RadioClient:
                     backoff = 1
                     self._stop.wait(self.update_interval)
                 except (requests.RequestException, ValueError, OSError) as exc:
-                    if backoff == 1:
+                    if self._running.is_set() and backoff == 1:
                         ll.warn(f"Radio connection interrupted: {exc}")
                     self._stop.wait(backoff)
                     backoff = min(backoff * 2, 30)
@@ -233,7 +281,7 @@ class RadioClient:
                     if not played:
                         self._stream_failed = True
                         path = Path(__file__).parent / f".radio-{uuid4().hex}.audio"
-                        with session.get(data["url"], stream=True, timeout=(3, 6)) as response:
+                        with self._response(session, data["url"], timeout=(3, 2)) as response:
                             response.raise_for_status()
                             total = 0
                             with path.open("wb") as output:
@@ -270,9 +318,9 @@ class RadioClient:
                             except OSError:
                                 pass
                     try:
-                        with session.get(f"http://{self._ip}:8080/lyrics", timeout=3) as response:
+                        with self._response(session, f"http://{self._ip}:8080/lyrics", timeout=(2, 2)) as response:
                             response.raise_for_status()
-                            raw = response.text[:128 * 1024]
+                            raw = _read_limited_response(response, 128 * 1024, self._stop)
                         try:
                             lyrics = json.loads(raw)
                         except ValueError:
@@ -282,7 +330,7 @@ class RadioClient:
                                 self.client_data["lyrics"] = sorted(
                                     (float(line[0]), str(line[1])) for line in lyrics
                                     if isinstance(line, (list, tuple)) and len(line) == 2)
-                    except (requests.RequestException, ValueError, SyntaxError, TypeError):
+                    except (requests.RequestException, ValueError, SyntaxError, TypeError, OSError):
                         pass
                 except Exception as exc:
                     if self._running.is_set():

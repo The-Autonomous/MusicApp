@@ -152,6 +152,7 @@ class MusicOverlayController:
             set_ips=self._update_ips,
             is_afk=self.is_afk,
             fast_load=fast_load,
+            startup_hold=True,
         )
         overlay.MusicPlayer = self.player
         from youtube_sync import YouTubeSync

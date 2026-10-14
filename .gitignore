@@ -2,6 +2,7 @@
 /__pycache__
 *.mp3
 *.json
+/.youtube_deferred_downloads.json
 LOCAL_autoUpdate.py
 *.txt
 *.lnk

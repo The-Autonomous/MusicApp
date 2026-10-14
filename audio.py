@@ -1,13 +1,30 @@
 """Bounded audio playback. Decoding and effects stay off the output callback."""
 from threading import Condition, Event, RLock, Thread
 from time import monotonic
-import av
+from importlib import import_module
 import numpy as np
-import sounddevice as sd
 from audio_eq import AudioEQ, AudioEcho
 from log_loader import log_loader
 
 ll = log_loader("Audio", debugging=False)
+
+
+class _LazyAudioModule:
+    def __init__(self, name):
+        self._name = name
+        self._module = None
+
+    def __getattr__(self, name):
+        if self._module is None:
+            self._module = import_module(self._name)
+        value = getattr(self._module, name)
+        setattr(self, name, value)
+        return value
+
+
+# Signing in and opening controls do not need codecs or an audio device runtime.
+av = _LazyAudioModule("av")
+sd = _LazyAudioModule("sounddevice")
 
 
 class RobustAudioBuffer:
@@ -135,6 +152,7 @@ class AudioPlayerRoot:
                 remote = str(filepath).startswith(('http://', 'https://'))
                 self._container = av.open(filepath, timeout=(3, 1)) if remote else av.open(filepath)
                 stream = next(s for s in self._container.streams if s.type == "audio")
+                stream.codec_context.thread_count = 1
                 self._duration = (float(stream.duration * stream.time_base)
                                   if stream.duration is not None else
                                   float(self._container.duration or 0) / av.time_base)

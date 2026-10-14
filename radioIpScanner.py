@@ -1,154 +1,114 @@
-import asyncio, socket, re, ipaddress
-from aiohttp import ClientSession, ClientTimeout, ClientConnectorError, TCPConnector
+"""On-demand radio discovery with bounded requests and owned cancellation."""
+import asyncio
+from html import unescape
+import ipaddress
+import re
+import socket
+from threading import Event
+
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
+
 
 def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # doesn't actually send data, but picks the right outbound interface
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
+        # This selects an outbound interface without transmitting a packet.
+        connection.connect(("8.8.8.8", 80))
+        return connection.getsockname()[0]
     finally:
-        s.close()
+        connection.close()
+
 
 class IPRadioScanner:
-    def __init__(self, timeout: float = 2.0, concurrency: int = 4, debug: bool = False):
-        self.timeout   = timeout
-        self.concurrency = concurrency
-        self.semaphore = None
-        self.debug     = debug
+    MAX_RESPONSE_BYTES = 64 * 1024
 
-        host_ip       = get_local_ip()
-        self.local_ip = host_ip
-        self.network  = ipaddress.ip_network(f"{host_ip}/24", strict=False)
-        
-        if self.debug:
-            print(f"Local IP: {self.local_ip}")
-            print(f"Scanning network: {self.network}")
-            print(f"Total hosts to scan: {len(list(self.network.hosts()))}")
+    def __init__(self, timeout=2.0, concurrency=4, debug=False, cancel=None):
+        self.timeout = max(0.1, min(30.0, float(timeout)))
+        self.concurrency = max(1, min(4, int(concurrency)))
+        self.debug = debug
+        self.cancel = cancel if cancel is not None else Event()
+        self.local_ip = get_local_ip()
+        self.network = ipaddress.ip_network(f"{self.local_ip}/24", strict=False)
 
-    async def _fetch(self, session: ClientSession, ip: str):
-        if ip == self.local_ip or ip == "0.0.0.0":
+    async def _fetch(self, session, ip):
+        if self.cancel.is_set() or ip == self.local_ip or ip == "0.0.0.0":
             return None
-            
-        url = f"http://{ip}:8080"
-        
         try:
-            if self.debug:
-                print(f"Trying {url}...")
-                
-            async with self.semaphore, session.get(url) as resp:
-                if self.debug:
-                    print(f"  {url} - Status: {resp.status}")
-                    
-                if resp.status != 200:
+            async with session.get(f"http://{ip}:8080") as response:
+                if response.status != 200:
                     return None
-                    
-                text = await resp.text()
-                
-                if self.debug:
-                    print(f"  {url} - Response: {text[:200]}...")  # First 200 chars
-                    
-        except ClientConnectorError as e:
-            if self.debug:
-                print(f"  {url} - Connection failed: {e}")
+                body = bytearray()
+                async for block in response.content.iter_chunked(8192):
+                    if self.cancel.is_set() or len(body) + len(block) > self.MAX_RESPONSE_BYTES:
+                        return None
+                    body.extend(block)
+                text = body.decode("utf-8", errors="replace")
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception:
             return None
-        except asyncio.TimeoutError:
-            if self.debug:
-                print(f"  {url} - Timeout")
-            return None
-        except Exception as e:
-            if self.debug:
-                print(f"  {url} - Error: {e}")
-            return None
-
-        # Parse response for radio data
-        title_match = re.search(r'<title>(.*?)</title>', text)
-        location_match = re.search(r'<location>(.*?)</location>', text)
-        
-        if title_match:
-            title = title_match.group(1)
-            location = location_match.group(1) if location_match else "0"
-            
-            if self.debug:
-                print(f"  ✓ Found radio at {ip}: {title}")
-                
-            return ip, title, location
-            
+        title = re.search(r"<title>(.*?)</title>", text, re.DOTALL)
+        if title:
+            location = re.search(r"<location>(.*?)</location>", text, re.DOTALL)
+            return ip, unescape(title[1]), location[1] if location else "0"
         return None
 
-    async def getAllIps(self, callback):
-        self.semaphore = asyncio.Semaphore(self.concurrency)
-        timeout = ClientTimeout(total=self.timeout)
-        async with ClientSession(timeout=timeout, connector=TCPConnector(limit=self.concurrency)) as session:
-            tasks = [
-                asyncio.create_task(self._fetch(session, str(ip)))
-                for ip in self.network.hosts()
-            ]
-            
-            results_found = 0
-            for coro in asyncio.as_completed(tasks):
-                result = await coro
+    async def _scan(self, callback, first_only=False):
+        if self.cancel.is_set():
+            return
+        # Share an iterator between a fixed number of workers. A /24 does not
+        # allocate one coroutine and pending request for each of its 254 hosts.
+        addresses = iter(self.network.hosts())
+        found_first = asyncio.Event()
+
+        async def worker(session):
+            for address in addresses:
+                if self.cancel.is_set() or found_first.is_set():
+                    return
+                result = await self._fetch(session, str(address))
+                if self.cancel.is_set() or found_first.is_set():
+                    return
                 if result:
-                    ip, title, location = result
-                    callback(ip, title, location)
-                    results_found += 1
-                    
-            if self.debug:
-                print(f"Scan complete. Found {results_found} radio servers.")
+                    callback(*result)
+                    if first_only:
+                        found_first.set()
+                        return
+
+        timeout = ClientTimeout(total=self.timeout)
+        connector = TCPConnector(limit=self.concurrency, limit_per_host=1)
+        async with ClientSession(timeout=timeout, connector=connector) as session:
+            workers = [asyncio.create_task(worker(session)) for _ in range(self.concurrency)]
+            pending = set(workers)
+            try:
+                while pending and not self.cancel.is_set() and not found_first.is_set():
+                    completed, pending = await asyncio.wait(
+                        pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
+                    for task in completed:
+                        task.result()
+            finally:
+                for task in workers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+    async def getAllIps(self, callback):
+        await self._scan(callback)
 
     async def getFirstIp(self, callback):
-        self.semaphore = asyncio.Semaphore(self.concurrency)
-        timeout = ClientTimeout(total=self.timeout)
-        async with ClientSession(timeout=timeout) as session:
-            tasks = [
-                asyncio.create_task(self._fetch(session, str(ip)))
-                for ip in self.network.hosts()
-            ]
-            
-            for coro in asyncio.as_completed(tasks):
-                result = await coro
-                if result:
-                    ip, title, location = result
-                    callback(ip, title, location)
-                    # Cancel remaining tasks
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    return
-                    
-            if self.debug:
-                print("No radio servers found in scan.")
+        await self._scan(callback, first_only=True)
+
 
 class SimpleRadioScan:
-    """
-    Synchronous wrapper around IPRadioScanner for easy calls.
-    """
-    def __init__(self, timeout: float = 2.0, concurrency: int = 4, debug: bool = False):
-        self.scanner = IPRadioScanner(timeout=timeout, concurrency=concurrency, debug=debug)
+    def __init__(self, timeout=2.0, concurrency=4, debug=False, cancel=None):
+        self.scanner = IPRadioScanner(timeout, concurrency, debug, cancel)
 
     def scan_all(self, callback):
-        """
-        Scan the entire /24, calling callback(ip, title, location)
-        for every match.
-        """
         asyncio.run(self.scanner.getAllIps(callback))
 
     def scan_first(self, callback):
-        """
-        Scan until the first match, then call callback(ip, title, location)
-        and stop.
-        """
         asyncio.run(self.scanner.getFirstIp(callback))
-        
-if __name__ == "__main__":
-    def print_result(ip, title, location):
-        print(f"Found Radio - IP: {ip}, Title: {title}, Location: {location}")
 
-    scanner = SimpleRadioScan(timeout=3.0, concurrency=100, debug=True)
-    
-    print("Scanning for all radios...")
-    scanner.scan_all(print_result)
-    
-    print("\nScanning for first radio...")
-    scanner.scan_first(print_result)
+
+if __name__ == "__main__":
+    scanner = SimpleRadioScan()
+    scanner.scan_all(lambda ip, title, location: print(ip, title, location))

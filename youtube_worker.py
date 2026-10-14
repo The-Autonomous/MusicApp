@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import shutil
 import subprocess
-from time import monotonic, sleep
+from time import monotonic
 
 
 class QuietLogger:
@@ -21,58 +21,60 @@ class QuietLogger:
 
 
 def browser_login(job):
+    from youtube_login import browser_login as open_default_browser
+    return open_default_browser(job)
+
+
+def prepare_support(job):
+    from importlib.util import find_spec
+    from runtime_policy import YouTubeJobError
+    if job["action"] == "prepare_app":
+        packages = {"numpy": "numpy", "av": "av", "sounddevice": "sounddevice",
+                    "mutagen": "mutagen", "pynput": "pynput", "requests": "requests",
+                    "aiohttp": "aiohttp", "flask": "Flask", "flask_compress": "Flask-Compress",
+                    "waitress": "waitress"}
+    else:
+        packages = {"yt_dlp": "yt-dlp[default]", "playwright": "playwright"}
+        if job.get("music", True):
+            packages["ytmusicapi"] = "ytmusicapi"
+    missing = [package for module, package in packages.items() if find_spec(module) is None]
+    if not missing and job["action"] != "setup":
+        return
+    requested = list(packages.values()) if job["action"] == "setup" else missing
+    support = "MusicApp essentials" if job["action"] == "prepare_app" else "YouTube support"
+    command = [sys.executable, "-m", "pip", "install", "--only-binary=:all:",
+               "--disable-pip-version-check", "--no-input", "--timeout", "15", "--retries", "1"]
+    if job["action"] == "setup":
+        command.append("--upgrade")
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        raise RuntimeError("Browser sign-in needs Playwright. Run Setup when you are ready.") from None
-    with sync_playwright() as playwright:
-        browser = None
-        for channel in ("msedge", "chrome", None):
-            try:
-                browser = playwright.chromium.launch(headless=False, channel=channel)
-                break
-            except Exception:
-                continue
-        if browser is None:
-            raise RuntimeError("Install Chrome or Edge, or install Playwright's Chromium browser.")
-        try:
-            context = browser.new_context(viewport={"width": 960, "height": 720})
-            # Avoid audio/video playback during sign-in; leave login/challenge resources intact.
-            context.route("**/*", lambda route: route.abort() if route.request.resource_type == "media"
-                          else route.continue_())
-            page = context.new_page()
-            page.goto("https://www.youtube.com/playlist?list=LL", wait_until="domcontentloaded")
-            deadline = monotonic() + 300
-            while monotonic() < deadline:
-                if page.is_closed():
-                    raise RuntimeError("Sign-in window closed")
-                cookies = context.cookies(["https://www.youtube.com", "https://music.youtube.com"])
-                signed_in = any(c["name"] in {"SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"}
-                                for c in cookies)
-                if signed_in and "youtube.com" in page.url:
-                    # Stop cookie rotation before taking the session snapshot.
-                    page.goto("https://www.youtube.com/robots.txt", wait_until="domcontentloaded")
-                    return context.cookies(["https://www.youtube.com", "https://music.youtube.com"])
-                page.wait_for_timeout(1500)
-            raise RuntimeError("Sign-in timed out; you can try again from YouTube Sync")
-        finally:
-            browser.close()
+        result = subprocess.run([*command, *requested], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                                errors="replace", timeout=240)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise YouTubeJobError(f"{support} couldn't be installed: {exc}",
+                              "setup_failed") from None
+    if result.returncode:
+        details = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+        errors = [line for line in details if line.startswith("ERROR:")]
+        reason = " ".join(errors or details[-2:])[:500] or "The package installer failed."
+        raise YouTubeJobError(f"{support} couldn't be installed ({', '.join(requested)}). {reason}",
+                              "setup_failed")
+    return f"{support} is ready."
 
 
 def execute(job):
     if job["action"] == "login":
         return browser_login(job)
-    if job['action'] == 'setup':
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', '--only-binary=:all:',
-                        'yt-dlp[default]', 'playwright', 'ytmusicapi'], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return 'YouTube support installed / updated. You can connect or retry sync now.'
+    if job['action'] in {'prepare', 'setup', 'prepare_app'}:
+        return prepare_support(job)
     if job['action'] == 'music_likes':
         try:
             from ytmusicapi import YTMusic
             from ytmusicapi.helpers import initialize_headers, get_authorization
         except ImportError:
-            raise RuntimeError('Use Install / update YouTube support to enable YouTube Music liked songs.') from None
+            from runtime_policy import YouTubeJobError
+            raise YouTubeJobError('YouTube support needs repairing. Retry to repair it automatically.',
+                                  'missing_dependency') from None
         import requests
         from functools import partial
         cookies = {cookie['name']: cookie['value'] for cookie in job.get('cookies', [])}
@@ -204,5 +206,7 @@ if __name__ == "__main__":
             result = execute(job)
         response = {"ok": True, "result": result}
     except Exception as exc:
-        response = {"ok": False, "error": str(exc)}
+        response = {"ok": False, "error": str(exc)[:1000],
+                    "code": getattr(exc, "code", "missing_dependency" if isinstance(exc, ImportError)
+                                    else "operation_failed")}
     sys.stdout.write(json.dumps(response, ensure_ascii=False))
