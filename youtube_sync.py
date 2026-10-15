@@ -478,12 +478,24 @@ class YouTubeSync:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
 
+    def toggle(self, overlay):
+        """Hide only the card; downloads and playback gating keep running."""
+        existing = getattr(self, "window", None)
+        if existing is not None and existing.winfo_exists() and existing.state() != "withdrawn":
+            options = getattr(self, "options_window", None)
+            if options is not None and options.winfo_exists():
+                options.destroy()
+            existing.withdraw()
+        else:
+            self.show(overlay)
+
     def show(self, overlay, startup=False):
         import tkinter as tk
         startup = startup or not self.player._playback_ready.is_set()
         existing = getattr(self, "window", None)
         if existing is not None and existing.winfo_exists():
             self.loading_helper.restore()
+            existing.deiconify()
             existing.lift()
             return
         colors = overlay.theme.COLORS

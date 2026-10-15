@@ -16,11 +16,13 @@ class AudioEQ:
     def __init__(self, samplerate, channels, chunk_size, gains_db=None):
         self.sr, self.ch, self.chunk_size = int(samplerate), int(channels), int(chunk_size)
         self.lock = RLock()
+        self._process_lock = RLock()
         loaded = self._load_settings()
         self.gains_db = [float(loaded.get(str(f), (gains_db or [0] * 10)[i]))
                          for i, f in enumerate(self.ISO_BANDS)]
         self._ready = False
-        self._dirty = True
+        self._curve_gains = None
+        self._reset_pending = False
         self._settings_dirty = False
         atexit.register(self._save_settings)
 
@@ -48,21 +50,24 @@ class AudioEQ:
 
     def reset_state(self):
         with self.lock:
-            if self._ready:
-                self._overlap.fill(0)
-                self._input_buffer.fill(0)
+            self._reset_pending = True
 
     def set_gain(self, freq_hz, gain_db):
+        self.set_gains({freq_hz: gain_db})
+
+    def set_gains(self, gains):
+        """Publish controls quickly; the decoder owns all FFT and buffer work."""
         with self.lock:
-            if freq_hz not in self.ISO_BANDS:
-                return
-            idx = self.ISO_BANDS.index(freq_hz)
-            gain = max(-12.0, min(12.0, float(gain_db)))
-            if self.gains_db[idx] != gain:
-                self.gains_db[idx] = gain
-                self._dirty = self._settings_dirty = True
-                if not any(self.gains_db):
-                    self.reset_state()
+            for freq_hz, gain_db in gains.items():
+                if freq_hz not in self.ISO_BANDS:
+                    continue
+                idx = self.ISO_BANDS.index(freq_hz)
+                gain = max(-12.0, min(12.0, float(gain_db)))
+                if self.gains_db[idx] != gain:
+                    self.gains_db[idx] = gain
+                    self._settings_dirty = True
+            if not any(self.gains_db):
+                self._reset_pending = True
 
     def get_gains(self):
         with self.lock:
@@ -72,13 +77,21 @@ class AudioEQ:
         return self.get_gains().get(freq_hz, default)
 
     def process(self, chunk):
-        with self.lock:
-            if not any(self.gains_db) or not len(chunk):
+        with self._process_lock:
+            with self.lock:
+                gains = tuple(self.gains_db)
+                reset = self._reset_pending
+                self._reset_pending = False
+            if reset and self._ready:
+                self._overlap.fill(0)
+                self._input_buffer.fill(0)
+            if not any(gains) or not len(chunk):
                 return chunk
             if not self._ready:
                 self._initialize()
-            if self._dirty:
-                self._rebuild_gain_curve()
+            if self._curve_gains != gains:
+                self._rebuild_gain_curve(gains)
+                self._curve_gains = gains
             length = len(chunk)
             if length < self.chunk_size:
                 chunk = np.pad(chunk, ((0, self.chunk_size - length), (0, 0)))
@@ -101,15 +114,14 @@ class AudioEQ:
             np.clip(out, -1, 1, out=out)
             return out[:length]
 
-    def _rebuild_gain_curve(self):
-        gains = np.power(10, np.asarray(self.gains_db) / 20)
+    def _rebuild_gain_curve(self, gains_db):
+        gains = np.power(10, np.asarray(gains_db) / 20)
         # Ignore bands above Nyquist instead of creating unsorted interpolation points.
         pairs = [(f, g) for f, g in zip(self.ISO_BANDS, gains) if f < self.sr / 2]
         freqs = [0] + [f for f, _ in pairs] + [self.sr / 2]
         values = [gains[0]] + [g for _, g in pairs] + [pairs[-1][1]]
         self._gain_curve = np.interp(np.log10(self._freq_bins + 1e-6),
                                     np.log10(np.asarray(freqs) + 1e-6), values).astype(np.float32)
-        self._dirty = False
 
     def _load_settings(self):
         try:
@@ -120,23 +132,30 @@ class AudioEQ:
             return {}
 
     def _save_settings(self):
-        if not self._settings_dirty:
-            return
         with self.lock:
-            try:
-                temporary = self.SETTINGS_FILE + ".tmp"
-                with open(temporary, "w", encoding="utf-8") as handle:
-                    json.dump({str(f): g for f, g in self.get_gains().items()}, handle)
-                os.replace(temporary, self.SETTINGS_FILE)
-                self._settings_dirty = False
-            except OSError:
-                pass
+            if not self._settings_dirty:
+                return
+            gains = tuple(self.gains_db)
+        try:
+            temporary = self.SETTINGS_FILE + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(dict(zip(map(str, self.ISO_BANDS), gains)), handle)
+            os.replace(temporary, self.SETTINGS_FILE)
+            with self.lock:
+                if tuple(self.gains_db) == gains:
+                    self._settings_dirty = False
+        except OSError:
+            pass
 
 
 class AudioEcho:
     def __init__(self, samplerate, channels, delay_ms=350, feedback=0.35, wet=0.5):
         self.sr, self.ch = int(samplerate), int(channels)
         self.lock = RLock()
+        self._process_lock = RLock()
+        self._buf = None
+        self._idx = 0
+        self._reset_pending = False
         self.set_params(delay_ms, feedback, wet)
 
     def set_params(self, delay_ms=None, feedback=None, wet=None):
@@ -147,28 +166,34 @@ class AudioEcho:
                 self.feedback = max(0, min(0.95, float(feedback)))
             if wet is not None:
                 self.wet = max(0, min(1, float(wet)))
-            length = max(1, int(self.sr * self.delay_ms / 1000))
-            if not hasattr(self, "_buf") or len(self._buf) != length:
-                self._buf = np.zeros((length, self.ch), dtype=np.float32)
-                self._idx = 0
 
     def reset_state(self):
         with self.lock:
-            self._buf.fill(0)
-            self._idx = 0
+            self._reset_pending = True
 
     def process(self, x):
-        with self.lock:
-            if not self.wet or not len(x):
+        with self._process_lock:
+            with self.lock:
+                delay_ms, feedback, wet = self.delay_ms, self.feedback, self.wet
+                reset = self._reset_pending
+                self._reset_pending = False
+            if reset and self._buf is not None:
+                self._buf.fill(0)
+                self._idx = 0
+            if not wet or not len(x):
                 return x
+            length = max(1, int(self.sr * delay_ms / 1000))
+            if self._buf is None or len(self._buf) != length:
+                self._buf = np.zeros((length, self.ch), dtype=np.float32)
+                self._idx = 0
             out = np.empty_like(x)
             offset = 0
             while offset < len(x):
                 count = min(len(x) - offset, len(self._buf) - self._idx)
                 source = x[offset:offset + count]
                 delayed = self._buf[self._idx:self._idx + count].copy()
-                self._buf[self._idx:self._idx + count] = source + delayed * self.feedback
-                out[offset:offset + count] = source * (1 - self.wet) + delayed * self.wet
+                self._buf[self._idx:self._idx + count] = source + delayed * feedback
+                out[offset:offset + count] = source * (1 - wet) + delayed * wet
                 self._idx = (self._idx + count) % len(self._buf)
                 offset += count
             return out

@@ -140,6 +140,15 @@ class MusicFixture(unittest.TestCase):
 
 
 class StartupAndControlTests(MusicFixture):
+    def test_player_enable_intent_is_preserved_while_setup_blocks_playback(self):
+        self.player.set_enabled(False)
+        self.assertTrue(self.player.pause_event.is_set())
+        self.player.set_enabled(True)
+        self.assertFalse(self.player.pause_event.is_set())
+        self.assertFalse(self.player._playback_ready.is_set())
+        self.assertTrue(self.player._commands.empty())
+        self.module.AudioPlayer._start_playback_session.assert_not_called()
+
     def test_hold_preserves_saved_pause_and_position_and_rejects_play(self):
         for paused in (False, True):
             with self.subTest(paused=paused):

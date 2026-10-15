@@ -41,8 +41,13 @@ class DownloadReporter:
         value = {"phase": phase, "processor": processor, "progress": fraction,
                  "downloaded_bytes": self.downloaded, "total_bytes": self.total}
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(value), encoding="utf-8")
-        os.replace(temporary, self.path)
+        try:
+            temporary.write_text(json.dumps(value), encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError:
+            # Windows may briefly deny replacement while the parent reads the
+            # last report. Progress is optional and must never fail the audio job.
+            pass
 
 
 class LiveThrottle:

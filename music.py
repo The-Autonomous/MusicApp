@@ -198,6 +198,9 @@ class MusicPlayer:
     def set_band(self, freq_hz, gain_db, Q=1.0):
         AudioPlayer.eq.set_gain(freq_hz, gain_db)
 
+    def set_bands(self, gains):
+        AudioPlayer.eq.set_gains(gains)
+
     def get_band(self, freq_hz, default=0.0):
         return AudioPlayer.eq.get_band(freq_hz, default)
 
@@ -251,6 +254,13 @@ class MusicPlayer:
         should_play = self.pause_event.is_set() if forcedState is None else forcedState
         self.pause_event.clear() if should_play else self.pause_event.set()
         self._command("pause", not should_play)
+
+    def set_enabled(self, enabled):
+        """Remember the on/off intent even while startup is holding playback."""
+        self.pause_event.clear() if enabled else self.pause_event.set()
+        self._save_due = True
+        self._command('pause', not enabled)
+        self._wake.set()
 
     def repeat(self, forcedState=None):
         enabled = not self.repeat_event.is_set() if forcedState is None else bool(forcedState)

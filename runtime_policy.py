@@ -73,7 +73,12 @@ def stop_worker(process):
 def _write_channel(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        os.replace(temporary, path)
+    except PermissionError:
+        # Keep the previous resource budget during a brief reader collision.
+        if not path.is_file():
+            raise
 
 
 def _download_control():

@@ -18,3 +18,5 @@ LOCAL_autoUpdate.py
 *.m4a
 *.webm
 *.tmp
+/rust_reference_backup
+/rust_musicapp

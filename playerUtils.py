@@ -155,6 +155,8 @@ class MusicOverlayController:
             startup_hold=True,
         )
         overlay.MusicPlayer = self.player
+        if not overlay.playerState:
+            self.player.set_enabled(False)
         from youtube_sync import YouTubeSync
         self.youtube_sync = YouTubeSync(self.player)
         overlay.youtube_sync = self.youtube_sync

@@ -9,7 +9,7 @@ import sys
 from threading import Event, Lock
 from types import ModuleType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 from download_policy import DownloadBudget
 
@@ -42,6 +42,7 @@ def isolated_sync_module():
 class FakePlayer:
     def __init__(self, downloader):
         self.playback = Event()
+        self._playback_ready = self.playback
         self.connection_callbacks = 0
         self.ytHandle = SimpleNamespace(_metadata_lock=Lock(), configure=lambda **kwargs: None,
                                         _download=downloader)
@@ -109,6 +110,35 @@ class YouTubeSyncFlow(unittest.TestCase):
 
     def cached_session(self):
         self.module.SESSION_FILE.write_bytes(b"protected synthetic fixture")
+
+    def test_youtube_hotkey_hides_and_reopens_card_without_stopping_sync(self):
+        window = self.sync.window = Mock()
+        window.winfo_exists.return_value = True
+        window.state.return_value = 'normal'
+        self.sync.loading_helper = Mock()
+        self.sync._busy.set()
+        self.sync.toggle(Mock())
+        window.withdraw.assert_called_once()
+        self.assertFalse(self.sync.cancel.is_set())
+        self.assertFalse(self.player.playback.is_set())
+        window.state.return_value = 'withdrawn'
+        self.sync.toggle(Mock())
+        window.deiconify.assert_called_once()
+        self.sync.loading_helper.restore.assert_called_once()
+        self.assertTrue(self.sync.busy())
+
+    def test_youtube_hotkey_opens_missing_card_and_closes_options_with_visible_card(self):
+        with patch.object(self.sync, 'show') as show:
+            overlay = Mock()
+            self.sync.toggle(overlay)
+            show.assert_called_once_with(overlay)
+        self.sync.window = Mock()
+        self.sync.window.winfo_exists.return_value = True
+        self.sync.window.state.return_value = 'normal'
+        self.sync.options_window = Mock()
+        self.sync.options_window.winfo_exists.return_value = True
+        self.sync.toggle(Mock())
+        self.sync.options_window.destroy.assert_called_once()
 
     def run_job(self, job, cancel=None, timeout=None):
         if cancel is not None and cancel.is_set():

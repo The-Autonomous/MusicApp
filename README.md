@@ -36,6 +36,15 @@ Its window stays above other windows without taking keyboard focus. Use
 **borderless fullscreen** in GTA to keep it visible; a normal Windows overlay
 may be hidden by exclusive fullscreen. Interactive controls and sign-in cards
 accept focus when opened.
+The player retains its translucent black background when hidden and reopened.
+Left Alt + Left Shift shows or hides it even when the player is switched off.
+Visibility, the player on/off setting and its screen position are saved in
+`.musicapp_overlay.json`. The player restores those preferences on launch and
+keeps its window inside a connected monitor's usable area, including monitors
+with negative desktop coordinates. It recovers automatically after a saved
+off-screen position, a monitor disconnection or a layout change.
+EQ and echo controls publish changes without waiting for audio processing or
+buffer setup; presets update all bands together.
 
 ## Start and connect YouTube
 
@@ -46,7 +55,8 @@ failures. The loading card shows one overall progress bar for the combined queue
 and a list of active songs, each with its own progress bar and conversion/removal
 status. Its custom minus button collapses it into a small status strip while
 setup continues. Use the restore arrow to expand it. Reopen the card
-with **Right Alt + Y**, or through the controls window.
+with **Right Alt + Y**, or through the controls window. Press **Right Alt + Y**
+again to hide the YouTube card; downloads continue while it is hidden.
 
 - Without a working saved login, your Windows default browser opens directly
   at YouTube sign-in. Sign in yourself; MusicApp never asks for your password.
@@ -200,10 +210,19 @@ with the upstream version.
 
 ## Validation of this revision
 
-All 164 checks outside the native interface layout suite passed on Windows with
+All 182 checks outside the native interface layout suite passed on Windows with
 Python 3.13. These include live resource changes, parallel downloads, combined
 playlist/likes matching, progress reporting, worker cleanup and real segment
-removal on short silent fixture audio. The native interface suite was left out
+removal on short silent fixture audio, overlay background drawing, YouTube
+window toggling and effect-control responsiveness during blocked DSP work.
+Live keyboard input against the real overlay confirmed showing and hiding while
+the player was disabled, automatic recovery from `(50000, 50000)`, and restoring
+hidden/disabled state and position across restarts. The live tests used a separate
+preferences file and silent effects processing without opening an audio device.
+Windows Computer Use screenshot capture timed out; window mapping and actual
+native coordinates were verified through the live test's state instead.
+Temporary progress-file reader collisions are also covered and cannot fail an
+audio download. The native interface suite was left out
 to avoid opening and closing windows during an active download session; progress
 list behavior was checked with simulated widgets instead.
 Run the full suite with `python -B -m unittest discover -s tests` after installing

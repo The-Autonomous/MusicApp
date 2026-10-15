@@ -29,6 +29,14 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(song_progress_display({'title': 'Song', 'progress': float('nan')})[1], None)
         self.assertEqual(song_progress_display({'title': 'Song', 'progress': 1.5})[1], 1)
 
+    def test_busy_progress_file_never_fails_download_or_postprocessing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            reporter = DownloadReporter(Path(folder) / 'progress.json')
+            with patch('download_progress.os.replace', side_effect=PermissionError('Reader has file open')):
+                reporter({'status': 'downloading', 'downloaded_bytes': 25, 'total_bytes': 100})
+                reporter.postprocess({'postprocessor': 'ModifyChapters'})
+                reporter.publish('finished', force=True)
+
     def test_list_rows_follow_active_downloads_and_keep_each_fraction(self):
         helper = LoadingHelper.__new__(LoadingHelper)
         helper.download_frame = Mock()

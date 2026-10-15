@@ -281,6 +281,59 @@ class EffectsTests(unittest.TestCase):
             self.assertLessEqual(float(np.max(np.abs(processed))), 1)
         self.assertGreater(float(np.max(np.abs(eq.process(data)))), 0)
 
+    def test_eq_controls_do_not_wait_for_decoder_fft_initialization(self):
+        eq = self.make_eq()
+        eq.set_gain(31, 3)
+        entered, release, edited = Event(), Event(), Event()
+        original = eq._initialize
+        results = []
+
+        def initialize():
+            entered.set()
+            if not release.wait(2):
+                raise RuntimeError('Fixture release timed out')
+            original()
+
+        def edit():
+            eq.set_gains({31: 6, 1000: -3})
+            results.append(eq.get_gains())
+            eq.reset_state()
+            edited.set()
+
+        decoder = Thread(target=lambda: eq.process(np.ones((64, 2), dtype=np.float32)))
+        controls = Thread(target=edit)
+        with patch.object(eq, '_initialize', side_effect=initialize):
+            try:
+                decoder.start()
+                self.assertTrue(entered.wait(1))
+                controls.start()
+                self.assertTrue(edited.wait(0.3), 'EQ controls waited for DSP work')
+            finally:
+                release.set()
+                decoder.join(2)
+                if controls.ident:
+                    controls.join(2)
+        self.assertEqual(results[0][31], 6)
+        self.assertEqual(results[0][1000], -3)
+        eq.process(np.ones((64, 2), dtype=np.float32))
+        self.assertEqual(eq._curve_gains, tuple(eq.gains_db))
+
+    def test_eq_updates_during_curve_build_are_applied_on_the_next_block(self):
+        eq = self.make_eq()
+        eq.set_gain(31, 3)
+        original = eq._rebuild_gain_curve
+
+        def rebuild(snapshot):
+            eq.set_gain(31, 8)
+            original(snapshot)
+
+        data = np.ones((64, 2), dtype=np.float32)
+        with patch.object(eq, '_rebuild_gain_curve', side_effect=rebuild):
+            eq.process(data)
+        self.assertEqual(eq._curve_gains[0], 3)
+        eq.process(data)
+        self.assertEqual(eq._curve_gains[0], 8)
+
     def test_echo_delay_feedback_and_wet_mix_across_block_boundaries(self):
         echo = audio_eq.AudioEcho(1000, 2, delay_ms=10, feedback=0.5, wet=0.5)
         data = np.zeros((31, 2), dtype=np.float32)
@@ -296,6 +349,41 @@ class EffectsTests(unittest.TestCase):
         echo = audio_eq.AudioEcho(44100, 2, wet=0)
         data = np.ones((64, 2), dtype=np.float32)
         self.assertIs(echo.process(data), data)
+
+    def test_echo_controls_do_not_wait_for_decoder_buffer_allocation(self):
+        echo = audio_eq.AudioEcho(1000, 2, delay_ms=10, wet=0.5)
+        entered, release, edited = Event(), Event(), Event()
+        data = np.ones((64, 2), dtype=np.float32)
+        original = np.zeros
+
+        def allocate(*args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(2):
+                    raise RuntimeError('Fixture release timed out')
+            return original(*args, **kwargs)
+
+        def edit():
+            echo.set_params(delay_ms=20, wet=0.25)
+            echo.reset_state()
+            edited.set()
+
+        decoder = Thread(target=lambda: echo.process(data))
+        controls = Thread(target=edit)
+        with patch.object(audio_eq.np, 'zeros', side_effect=allocate):
+            try:
+                decoder.start()
+                self.assertTrue(entered.wait(1))
+                controls.start()
+                self.assertTrue(edited.wait(0.3), 'Echo controls waited for decoder work')
+            finally:
+                release.set()
+                decoder.join(2)
+                if controls.ident:
+                    controls.join(2)
+        output = echo.process(data)
+        self.assertEqual(len(echo._buf), 20)
+        self.assertTrue(np.isfinite(output).all())
 
 
 if __name__ == "__main__":

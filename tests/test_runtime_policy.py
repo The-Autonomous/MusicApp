@@ -141,6 +141,13 @@ class NativeWorkerProtocol(unittest.TestCase):
             self.module.run_job({"action": "echo", "value": "unused"}, cancelled, timeout=3)
         self.assertEqual(self.processes, [])
 
+    def test_busy_policy_file_keeps_previous_budget_without_failing_job(self):
+        path = self.fixture / 'policy.json'
+        path.write_text('{"rate":65536}')
+        with patch.object(self.module.os, 'replace', side_effect=PermissionError('Reader has file open')):
+            self.module._write_channel(path, {'rate': 1024})
+        self.assertEqual(json.loads(path.read_text())['rate'], 65536)
+
     def test_progress_channel_updates_policy_in_same_worker_and_is_cleaned(self):
         reports = []
         budgets = [DownloadBudget(3, 8 * 1024 ** 2, 0, False, 'Idle')]

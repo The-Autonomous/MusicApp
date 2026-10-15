@@ -8,6 +8,8 @@ from time import monotonic, sleep
 from math import cos, pi, sin, ceil
 from typing import Iterator
 import json
+from pathlib import Path
+from overlay_state import OverlayPreferences, clamp_position, monitor_work_areas, place_window
 
 try:
     from ui_controls import (ACTION_LABELS, build_controls_window, conflicting_action,
@@ -94,7 +96,7 @@ class ThemeManager:
             "button": "#555555",
             "button_active": "#777777",
             "border": "#555555",
-            "transparent": "gray1"
+            "transparent": "#ff00ff"
         }
 
         self.FONTS = {
@@ -292,7 +294,7 @@ class RoundedCanvas(tk.Canvas):
             points.append((x0 - sin_r, y1 + cos_r))
         for cos_r, sin_r in cos_sin_r:
             points.append((x0 - cos_r, y0 - sin_r))
-        return self.create_polygon(points, fill=color)
+        return self.create_polygon(points, fill=color, outline="")
 
 class MouseTracker:
     def __init__(self):
@@ -429,7 +431,7 @@ class GhostOverlay:
     
     MusicPlayer = None # Will be set externally after initialization
     
-    def __init__(self, root):
+    def __init__(self, root, overlay_settings_file=None):
         ### Root ###
         self.root = root
         self._closing = False
@@ -442,7 +444,10 @@ class GhostOverlay:
         
         self.window = None
         self.canvas = None
-        self._last_position = None
+        self.overlay_preferences = OverlayPreferences(overlay_settings_file or Path(__file__).with_name('.musicapp_overlay.json'))
+        self._last_position = self.overlay_preferences.position
+        self._overlay_visible = self.overlay_preferences.visible
+        self._screen_check_due = 0
         self.key_hints_popup = None
         self.modification_status_label = None # For "Listening..." message
         
@@ -481,7 +486,7 @@ class GhostOverlay:
         self.bg_color = '#000000'
         self.last_toggle_state = False # Last toggle state for debouncing
         self.readyForKeys = False # True If Keys Are Ready False If Not
-        self.playerState = True # True If Player Is On False If Player Is Off
+        self.playerState = self.overlay_preferences.player_enabled
         
         ### Overlay Dragging Variables ###
         self._win_start_size_width = 0
@@ -616,7 +621,7 @@ class GhostOverlay:
                 'id': 'youtube_sync',
                 'required': ['right alt', 'y'],
                 'alt_needed': True,
-                'action': lambda: self.youtube_sync.show(self),
+                'action': lambda: self.youtube_sync.toggle(self),
                 'hint': 'Connect YouTube / Sync Liked Songs',
                 'modifiable': True
             },
@@ -990,7 +995,8 @@ class GhostOverlay:
         _eq_target = getattr(self, "MusicPlayer", None)
         if _eq_target is None:
             ll.warn("No MusicPlayer with EQ/echo found."); return
-        bands = sorted(_eq_target.get_bands().keys())
+        initial_gains = _eq_target.get_bands()
+        bands = sorted(initial_gains)
 
         win = tk.Toplevel(self.root); win.overrideredirect(True)
         win.attributes("-topmost", True); win.configure(bg="#000")
@@ -1023,7 +1029,8 @@ class GhostOverlay:
 
         def knob_changed(gain, freq):
             _eq_target.set_band(freq, gain)
-            current = tuple(_eq_target.get_band(f) for f in bands)
+            gains = _eq_target.get_bands()
+            current = tuple(gains[f] for f in bands)
             preset_var.set(preset_map.get(current, "Custom"))
 
         for i, freq in enumerate(bands):
@@ -1031,7 +1038,7 @@ class GhostOverlay:
             col.grid(row=i//max_cols, column=i%max_cols, padx=6, pady=2)
             lbl = f"{freq//1000}k" if freq >= 1000 else str(freq)
             ttk.Label(col, background=self.theme.COLORS["window_bg"], text=lbl).pack()
-            init = _eq_target.get_band(freq, 0.0)
+            init = initial_gains.get(freq, 0.0)
             if isinstance(init, tuple): init = init[0]
             callback = lambda g, f=freq: knob_changed(g, f)
             knob = EQKnob(col, radius=26, init_gain=init, callback=callback, bg=self.theme.COLORS["window_bg"])
@@ -1041,10 +1048,10 @@ class GhostOverlay:
 
         def apply_preset(name):
             if name == "Custom": return
+            _eq_target.set_bands(dict(zip(bands, self.EQ_PRESETS[name])))
             for f, g in zip(bands, self.EQ_PRESETS[name]):
                 self.eq_knobs[f].gain = g
                 self.eq_knobs[f]._draw()
-                _eq_target.set_band(f, g)
             preset_var.set(name)
 
         preset_menu = ttk.OptionMenu(card, preset_var, "Flat", *self.EQ_PRESETS.keys(), command=apply_preset, style="TMenubutton")
@@ -1052,7 +1059,7 @@ class GhostOverlay:
                                    activebackground=self.theme.COLORS["button"], activeforeground=self.theme.COLORS["accent"], relief="flat")
         card.create_window(w//2, int(h*0.48), window=preset_menu, anchor="n")
         self.eq_preset_menu = preset_menu
-        preset_var.set(preset_map.get(tuple(_eq_target.get_band(f) for f in bands), "Custom"))
+        preset_var.set(preset_map.get(tuple(initial_gains[f] for f in bands), "Custom"))
 
         echo_frame = ttk.Frame(card, style="Accent.TFrame")
         echo_frame.place(relx=0.5, rely=0.63, anchor="n")
@@ -1140,7 +1147,7 @@ class GhostOverlay:
         self.show_key_hints(force_state=False)
         self._was_main_overlay_open_before_search = bool(self.window and self.window.winfo_exists())
         if self._was_main_overlay_open_before_search:
-            self.close_overlay()
+            self.close_overlay(remember=False)
         
         search_recommendation = ""
         if hasattr(self, 'MusicPlayer'):
@@ -1584,19 +1591,30 @@ class GhostOverlay:
                 ll.warn("Radio scan debounce: please wait.")
 
     def toggle_overlay(self):
-        if self.playerState:
-            if self.window and self.window.winfo_exists():
-                self.close_overlay()
-            else:
-                if not hasattr(self, 'MusicPlayer'):
-                    ll.warn("MusicPlayer not initialized yet. Cannot open overlay properly.")
-                    return
-                try:
-                    self.root.after(0, self.open_overlay)
-                except tk.TclError as e:
-                    ll.warn(f"Could not open overlay yet (TclError): {e}")
-                except Exception as e:
-                    ll.error(f"An unexpected error occurred trying to open overlay: {e}")
+        # Showing controls is independent of whether audio was switched off.
+        if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+            self.close_overlay()
+        else:
+            self.open_overlay()
+
+    def _save_overlay_state(self):
+        self.overlay_preferences.save(self._overlay_visible, self.playerState, self._last_position)
+
+    def _place_overlay(self, position=None, width=None, height=None):
+        if not self.window or not self.window.winfo_exists():
+            return
+        width = max(1, int(width if width is not None else self.window.winfo_width()))
+        height = max(1, int(height if height is not None else self.window.winfo_height()))
+        position = position if position is not None else (
+            (self.window.winfo_x(), self.window.winfo_y()) if self._last_position is not None else None)
+        corrected = clamp_position(position, width, height, monitor_work_areas(self.root))
+        if (width != self.window.winfo_width() or height != self.window.winfo_height()
+                or corrected != (self.window.winfo_x(), self.window.winfo_y())):
+            place_window(self.window, corrected, width, height)
+        if corrected != self._last_position:
+            self._last_position = corrected
+            if not getattr(self, '_overlay_dragging', False):
+                self._save_overlay_state()
 
     def toggle_player(self): # Turns the whole media player functionality On/Off
         if monotonic() - self.triggerDebounce[0] >= self.triggerDebounce[1]:
@@ -1607,14 +1625,14 @@ class GhostOverlay:
                 ll.print("Player enabled. Opening overlay.")
                 self.open_overlay()
                 if hasattr(self, 'MusicPlayer'):
-                    self.MusicPlayer.pause(True) # True to unpause/play
+                    self.MusicPlayer.set_enabled(True)
             else: # Transitioning to OFF
                 ll.print("Player disabled. Closing overlay and pausing music.")
                 if hasattr(self, 'MusicPlayer'):
                     if self.display_radio:
                         self.display_radio = False
                         self.MusicPlayer.toggle_loop_cycle(self.display_radio)
-                    self.MusicPlayer.pause(False) # False to pause
+                    self.MusicPlayer.set_enabled(False)
                 self.close_overlay()
                 if self.key_hints_popup:
                     self.key_hints_popup.destroy()
@@ -1693,8 +1711,7 @@ class GhostOverlay:
             if self._overlay_dragging:
                 new_x = self._win_start_x + currentPosition[0] - self._drag_start_x
                 new_y = self._win_start_y + currentPosition[1] - self._drag_start_y
-                self.window.geometry(f"+{new_x}+{new_y}")
-                self._last_position = (new_x, new_y)
+                self._place_overlay((new_x, new_y))
         else:
             # If the drag conditions are NOT met (e.g., mouse released, or press was outside):
             # 1. Reset the overlay to be click-through if it isn't already.
@@ -1705,7 +1722,10 @@ class GhostOverlay:
                 except: ll.error("Couldn't Load Root After.")
             
             # 2. Ensure the dragging state is turned off.
+            was_dragging = self._overlay_dragging
             self._overlay_dragging = False
+            if was_dragging:
+                self._save_overlay_state()
                     
     def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):
         """Loop To Handle Draggability - OPTIMIZED FOR GAMING"""
@@ -1768,7 +1788,7 @@ class GhostOverlay:
     def display_overlay(self):
         if self.MusicPlayer is None:
             self.root.after(100, self.display_overlay)
-        else:
+        elif self._overlay_visible:
             self.open_overlay()
 
     def keep_overlay_on_top_init(self):
@@ -1795,9 +1815,8 @@ class GhostOverlay:
             self.root.after(100, self.center_window)
             return
         
-        x = (self.window.winfo_screenwidth() - width) // 2
-        self.window.geometry(f'+{x}+20')
-        self._last_position = (x, 20)
+        position = clamp_position(None, width, height, monitor_work_areas(self.root))
+        self._place_overlay(position)
 
     def _create_canvas_items_if_needed(self, init_draw = False):
         if self.canvas_items.get('bg') is None or init_draw == True:
@@ -1810,15 +1829,20 @@ class GhostOverlay:
                 fill=self.theme.COLORS['text_dark'], anchor=tk.N, justify=tk.CENTER)
 
     def open_overlay(self):
-        if hasattr(self, 'search_overlay'):
+        if getattr(self, 'search_overlay', None) is not None:
             self.close_search_overlay(self._was_main_overlay_open_before_search)
             try: del self.search_overlay
             except AttributeError: pass
         if self.window and self.window.winfo_exists():
+            self.window.deiconify()
+            self._place_overlay(self._last_position)
             self.window.lift()
+            self._overlay_visible = True
+            self._save_overlay_state()
             return
 
         self.window = tk.Toplevel(self.root)
+        self.window.title('MusicApp · Player')
         self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes('-alpha', 0.7)
@@ -1835,9 +1859,14 @@ class GhostOverlay:
         
         self.update_display(init_draw=True)
         
-        if self._last_position: self.window.geometry(f"+{self._last_position[0]}+{self._last_position[1]}")
-        else: self.root.after(0, self.center_window)
         self.window.deiconify()
+        self.window.update_idletasks()
+        if self._last_position is None:
+            self.center_window()
+        else:
+            self._place_overlay(self._last_position)
+        self._overlay_visible = True
+        self._save_overlay_state()
 
         self._drag_start_x, self._drag_start_y = 0, 0
         self._win_start_x, self._win_start_y = 0, 0
@@ -1855,26 +1884,30 @@ class GhostOverlay:
             if self.window:
                 dx, dy = event.x_root - self._drag_start_x, event.y_root - self._drag_start_y
                 new_x, new_y = self._win_start_x + dx, self._win_start_y + dy
-                self.window.geometry(f"+{new_x}+{new_y}")
-                self._last_position = (new_x, new_y)
-                self.mouseEvents.update_window(new_x, new_y, self._win_start_size_width, self._win_start_size_height)
+                self._place_overlay((new_x, new_y))
+                self.mouseEvents.update_window(*self._last_position, self._win_start_size_width, self._win_start_size_height)
 
-        def do_stop(event): self._overlay_dragging = False
+        def do_stop(event):
+            self._overlay_dragging = False
+            self._save_overlay_state()
 
         self._overlay_start_move = start_move
         self.canvas.bind("<Button-3>", start_move)
         self.canvas.bind("<B3-Motion>", do_move)
         self.canvas.bind("<ButtonRelease-3>", do_stop)
 
-    def close_overlay(self):
+    def close_overlay(self, remember=True):
         if self.window:
             try:
-                parts = self.window.geometry().split('+')
-                if len(parts) == 3: self._last_position = (int(parts[1]), int(parts[2]))
+                self._place_overlay()
+                self._last_position = (self.window.winfo_x(), self.window.winfo_y())
             except (tk.TclError, AttributeError, ValueError): pass
             self.window.destroy()
             self.window, self.canvas = None, None
             self.clickThroughState = True
+        if remember:
+            self._overlay_visible = False
+            self._save_overlay_state()
             
     def update_display(self, init_draw = False):
         if not (self.window and self.canvas and self.window.winfo_exists()): return
@@ -1938,11 +1971,7 @@ class GhostOverlay:
                                total_height - self.overlay_text_padding - hint_font.metrics('linespace'))
 
             if self.window and self.window.winfo_exists():
-                parts = self.window.geometry().split('+')
-                if len(parts) == 3:
-                    self.window.geometry(f'{int(total_width)}x{int(total_height)}+{parts[1]}+{parts[2]}')
-                else:
-                    self.window.geometry(f'{int(total_width)}x{int(total_height)}')
+                self._place_overlay(self._last_position, total_width, total_height)
                     
             self._update_scheduled = False
 
@@ -1983,6 +2012,12 @@ class GhostOverlay:
             self._display_dirty = False
             self.update_display()
         now = monotonic()
+        if self.window and now >= self._screen_check_due:
+            self._screen_check_due = now + 1
+            try:
+                self._place_overlay()
+            except tk.TclError:
+                pass
         if self.window and now - self._last_mouse_poll >= 0.25:
             self._last_mouse_poll = now
             try:
@@ -1995,6 +2030,12 @@ class GhostOverlay:
         self._display_dirty = True
 
     def close(self):
+        if self._closing:
+            return
+        if self.window and self.window.winfo_exists():
+            self._place_overlay()
+        self._save_overlay_state()
+        self.overlay_preferences.close()
         self._closing = True
         self.readyForKeys = False
         if self.listener:
