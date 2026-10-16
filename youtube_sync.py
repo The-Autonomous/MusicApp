@@ -155,7 +155,8 @@ class YouTubeSync:
         return "YouTube couldn't connect. Check your connection and retry."
 
     def start(self, status, source=None, login=False, browser=None, sync=True,
-              on_connected=None, on_ready=None, on_failed=None, on_finished=None, playlist_urls=None):
+              on_connected=None, on_ready=None, on_failed=None, on_finished=None, playlist_urls=None,
+              on_authentication=None):
         with self._lock:
             if self.busy() or self._closed:
                 return False
@@ -221,8 +222,20 @@ class YouTubeSync:
                             raise
                         cookies = []
                 if not cookies:
-                    update("Sign in to YouTube in your default browser. Music will wait.", "connecting")
-                    cookies = request({"action": "login"}, timeout=360)
+                    update("Sign in to YouTube in your browser. Music will wait.", "browser")
+                    authentication = on_authentication
+                    overlay = getattr(self, "_authentication_overlay", None)
+                    if authentication is None and overlay is not None:
+                        authentication = lambda active: self._authentication_visibility(overlay, active)
+                    try:
+                        if authentication:
+                            authentication(True)
+                        if self.cancel.is_set() or self._closed:
+                            raise RuntimeError("Cancelled")
+                        cookies = request({"action": "login"}, timeout=360)
+                    finally:
+                        if authentication:
+                            authentication(False)
                     remembered = self.save_cookies(cookies)
                     tracks = fetch(cookies)
                 if self._closed:
@@ -461,6 +474,70 @@ class YouTubeSync:
         return self.message + ("\nSign in next time: Windows couldn't remember this login."
                                if self.connected and not self.session_remembered else "")
 
+    def _authentication_visibility(self, overlay, active):
+        """Temporarily withdraw this app's windows without changing preferences."""
+        finished = Event()
+        prepared = [False]
+        failures = []
+
+        def update():
+            try:
+                if getattr(overlay, "_closing", False):
+                    return
+                if active:
+                    if not getattr(overlay, "_authentication_active", False):
+                        overlay._authentication_active = True
+                        saved = []
+                        pending = [overlay.root]
+                        while pending:
+                            window = pending.pop()
+                            pending.extend(window.winfo_children())
+                            if window.winfo_toplevel() is not window:
+                                continue
+                            state = window.state()
+                            if state != "withdrawn":
+                                saved.append((window, state))
+                                window.withdraw()
+                        self._authentication_windows = saved
+                        helper = getattr(self, "loading_helper", None)
+                        if helper is not None:
+                            helper.suspend()
+                else:
+                    overlay._authentication_active = False
+                    for window, state in getattr(self, "_authentication_windows", []):
+                        try:
+                            # The player has separate readiness and user-intent
+                            # gates; restoring it directly could bypass them.
+                            if window is not getattr(overlay, "window", None) and window.winfo_exists():
+                                window.state(state)
+                        except Exception:
+                            pass
+                    self._authentication_windows = []
+                    helper = getattr(self, "loading_helper", None)
+                    if helper is not None:
+                        helper.resume()
+                refresh = getattr(overlay, "refresh_overlay_visibility", None)
+                if refresh:
+                    refresh()
+                prepared[0] = True
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        overlay.post_ui(update)
+        # Acknowledge the actual UI-thread hide before starting the browser.
+        # Never launch behind stale topmost app windows if the UI has stopped.
+        if active:
+            deadline = monotonic() + 5
+            while not finished.wait(0.1):
+                if self.cancel.is_set() or self._closed:
+                    raise RuntimeError("Cancelled")
+                if monotonic() >= deadline:
+                    raise RuntimeError("MusicApp couldn't prepare the sign-in window. Retry setup.")
+            if not prepared[0] or failures:
+                raise RuntimeError("MusicApp couldn't prepare the sign-in window. Retry setup.")
+
     def forget_login(self):
         self.cancel.set()
         with self._lock:
@@ -480,6 +557,8 @@ class YouTubeSync:
 
     def toggle(self, overlay):
         """Hide only the card; downloads and playback gating keep running."""
+        if getattr(overlay, "_authentication_active", False):
+            return
         existing = getattr(self, "window", None)
         if existing is not None and existing.winfo_exists() and existing.state() != "withdrawn":
             options = getattr(self, "options_window", None)
@@ -491,6 +570,9 @@ class YouTubeSync:
 
     def show(self, overlay, startup=False):
         import tkinter as tk
+        self._authentication_overlay = overlay
+        if getattr(overlay, "_authentication_active", False):
+            return
         startup = startup or not self.player._playback_ready.is_set()
         existing = getattr(self, "window", None)
         if existing is not None and existing.winfo_exists():
@@ -616,6 +698,8 @@ class YouTubeSync:
     def _show_options(self, overlay, parent):
         import tkinter as tk
         from tkinter import ttk
+        if getattr(overlay, "_authentication_active", False):
+            return
         existing = getattr(self, "options_window", None)
         if existing is not None and existing.winfo_exists():
             existing.lift()

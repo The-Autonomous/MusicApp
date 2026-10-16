@@ -1,0 +1,417 @@
+import os, socket, threading, requests
+from flask import Flask, send_from_directory, make_response, jsonify, request
+from flask_compress import Compress
+from waitress import create_server
+from waitress.task import ThreadedTaskDispatcher
+from html import escape
+import json
+import mimetypes
+from itertools import islice
+from time import sleep, monotonic, time
+
+try:
+    from log_loader import log_loader, OutputRedirector
+    from adminRaise import Administrator
+except:
+    from .log_loader import log_loader, OutputRedirector
+    from .adminRaise import Administrator
+
+### Logging Handler ###
+
+ll = log_loader("Radio Master", debugging=False)
+
+#######################
+
+class TimeSync:
+    def __init__(self):
+        self.offset = 0.0  # Host time - Client time
+        self.last_sync = 0
+    
+    def sync_with_host(self, host_ip):
+        """Client calls this to sync with host clock"""
+        try:
+            start = time()
+            response = requests.get(f"http://{host_ip}:8080/time", timeout=2)
+            end = time()
+            
+            host_time = float(response.text)
+            network_latency = (end - start) / 2
+            adjusted_host_time = host_time + network_latency
+            
+            self.offset = adjusted_host_time - end
+            self.last_sync = time()
+        except:
+            pass
+    
+    def get_synced_time(self):
+        return time() + self.offset
+    
+class RadioHost:
+    def __init__(self, player, port=8080, ip=None, fake_load=False):
+        # Flask app setup
+        self.MusicPlayer = player
+        self._host = ip or self._get_local_ip()
+        self._server = None
+        self._dispatcher = None
+        self._server_thread = None
+        self._socket_map = {}
+        self._log_lock = threading.Lock()
+        self._log_offsets = {0: 0}
+        self._log_identity = None
+        self._log_size = 0
+        self.app_pad_site = "app_pad"
+        self.app = Flask(__name__, static_folder='app_pad')
+        Compress(self.app)
+
+        # Shared state
+        self.current_data = {
+            'title': '',
+            'mp3_path': '', # Renamed for clarity to include WAV files later
+            'lyrics': '',
+            'mixer': None,
+            'duration': 0.0, # Add duration to current_data
+            'track_id': '',
+        }
+
+        def get_pos():
+            """Get current song position."""
+            try:
+                mix = self.current_data['mixer']
+                return mix.get_pos() if mix else 0
+            except Exception as e:
+                ll.debug(f"Exception getting position from mixer: {e}")
+                return 0
+
+        # Routes
+        @self.app.route('/')
+        def index():
+            master_time = time()
+            song_started_at = master_time - get_pos()
+            
+            # Construct the full URL for the song
+            song_url = f"http://{self._host}:{port}/song?track={self.current_data['track_id']}"
+            eq_data = self.MusicPlayer.get_bands() if hasattr(self.MusicPlayer, 'get_bands') else {}
+            eq_string = ','.join(f"{k}:{v}" for k,v in eq_data.items())
+
+            resp = make_response(
+                f"<title>{escape(self.current_data['title'])}</title>"
+                f"<track_id>{self.current_data['track_id']}</track_id>"
+                f"<master_time>{master_time}</master_time>"
+                f"<song_start_time>{song_started_at}</song_start_time>"
+                f"<paused>{self.MusicPlayer.pause_event.is_set() or self.current_data['mixer'] is None}</paused>"
+                f"<repeat>{self.MusicPlayer.repeat_event.is_set()}</repeat>"
+                f"<eq>{eq_string}</eq>"
+                f"<volume>{self.MusicPlayer.current_volume}</volume>"
+                f"<location>{get_pos()}</location>"
+                f"<duration>{self.current_data['duration']}</duration>" # Added duration
+                f"<url>{song_url}</url>" # Added song URL
+                f"<buffered_at>{monotonic()}</buffered_at>" # Added buffered_at
+                f"<script>location.href='/{self.app_pad_site}';</script>"
+            )
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+
+        @self.app.route(f'/{self.app_pad_site}') # App Pad Loader
+        def app_pad():
+            return self.app.send_static_file('index.html')
+        
+        @self.app.route(f'/{self.app_pad_site}/logs') # App Pad Loader
+        def app_log_pad():
+            return self.app.send_static_file('log.html')
+        
+        serve_log_path = OutputRedirector.filename
+        @self.app.route('/logs/api')
+        def serve_log_chunk():
+            if not os.path.isfile(serve_log_path):
+                return jsonify({'error': 'Log file not found'}), 404
+
+            try:
+                start = int(request.args.get('start', 0))
+                count = min(int(request.args.get('count', 100)), 5000)  # max 5000 lines
+                if start < 0 or count < 1:
+                    return jsonify({'error': 'Invalid start or count'}), 400
+
+                with self._log_lock:
+                    stat = os.stat(serve_log_path)
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity != self._log_identity or stat.st_size < self._log_size:
+                        self._log_offsets = {0: 0}
+                    self._log_identity, self._log_size = identity, stat.st_size
+                    nearest = max(line for line in self._log_offsets if line <= start)
+                    with open(serve_log_path, 'rb') as f:
+                        f.seek(self._log_offsets[nearest])
+                        for line in range(nearest, start):
+                            if not f.readline():
+                                break
+                        lines = []
+                        for line in range(start, start + count):
+                            raw = f.readline()
+                            if not raw:
+                                break
+                            lines.append(raw.decode('utf-8', errors='replace'))
+                        self._log_offsets[start + len(lines)] = f.tell()
+                    if len(self._log_offsets) > 512:
+                        self._log_offsets = {0: 0}
+
+                has_more = len(lines) == count
+
+                return jsonify({
+                    'lines': [line.rstrip('\n') for line in lines],
+                    'start': start,
+                    'count': len(lines),
+                    'has_more': has_more
+                })
+
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @self.app.route('/search', methods=['POST'])
+        def handle_search():
+            data = request.get_json() or {}
+            query = data.get('query', '').strip()
+            if not query:
+                return jsonify({ 'code': 'error', 'message': 'Empty search query' }), 400
+
+            # Perform search via your MusicPlayer helper
+            raw_results = self.MusicPlayer.get_search_term(query)
+            # raw_results is list of (title, path)
+            results = [{ 'title': title, 'path': path } for title, path, kind in raw_results if kind == 'path']
+            return jsonify({ 'code': 'success', 'results': results })
+        
+        @self.app.route('/time')
+        def get_time():
+            return str(time())
+        
+        @self.app.route('/action', methods=['POST'])
+        def handle_action():
+            data = request.get_json(silent=True) or {}
+            action = data.get('action', '').lower()
+
+            if action == 'pause':
+                self.MusicPlayer.pause()
+                
+            elif action == 'play':
+                self.MusicPlayer.pause(forcedState=True)  # Explicitly unpause
+
+            elif action == 'skip':
+                self.MusicPlayer.skip_next()
+
+            elif action == 'previous':
+                self.MusicPlayer.skip_previous()
+                
+            elif action == 'volume_up':
+                self.MusicPlayer.up_volume()
+                
+            elif action == 'volume_down':
+                self.MusicPlayer.dwn_volume()
+            
+            elif action == 'repeat':
+                self.MusicPlayer.repeat()
+                
+            elif action == 'play_search':
+                path = data.get('path')
+                if not path:
+                    return jsonify({ 'code': 'error', 'message': 'No path provided' }), 400
+                self.MusicPlayer.play_song(path)
+                
+            elif action == 'status':
+                pass  # just return the current state
+
+            else:
+                return jsonify({"code": "error", "message": "Invalid action"}), 400
+
+            return jsonify({
+                "code": "success",
+                "title": self.current_data["title"],
+                "track_id": self.current_data["track_id"],
+                "duration": self.current_data["duration"],
+                "position": round(get_pos(), 2),
+                "paused": self.MusicPlayer.pause_event.is_set() or self.current_data['mixer'] is None,
+                "repeat": self.MusicPlayer.repeat_event.is_set(),
+                "volume": round(self.MusicPlayer.current_volume, 2)
+            })
+
+        @self.app.route('/song')
+        def serve_song():
+            mp3_path = self.current_data['mp3_path']
+            if not mp3_path or not os.path.isfile(mp3_path):
+                return "No song loaded", 404
+            directory, filename = os.path.split(mp3_path)
+            return send_from_directory(directory, filename,
+                                       mimetype=mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+                                       conditional=True)
+
+        @self.app.route('/lyrics')
+        def serve_lyrics():
+            return self.current_data['lyrics'] or "[]"
+
+        @self.app.after_request
+        def add_no_cache_headers(response):
+            if request.path in ('/song', '/app_pad', '/app_pad/logs') or request.path.startswith('/app_pad/'):
+                response.headers['Cache-Control'] = 'private, max-age=3600'
+            else:
+                response.headers['Cache-Control'] = 'no-store'
+            return response
+
+        if not fake_load:
+            # Binding reports an occupied port; never terminate another application's process.
+            # Waitress otherwise starts workers before binding, leaking idle
+            # threads when construction fails on an already occupied port.
+            self._dispatcher = ThreadedTaskDispatcher()
+            try:
+                self._server = create_server(self.app, host=self._host, port=port, threads=2,
+                                             map=self._socket_map, _dispatcher=self._dispatcher,
+                                             connection_limit=16, channel_timeout=30,
+                                             outbuf_high_watermark=512 * 1024,
+                                             outbuf_overflow=256 * 1024,
+                                             max_request_body_size=64 * 1024)
+                self._dispatcher.set_thread_count(2)
+                self._server_thread = threading.Thread(target=self._server.run, daemon=True,
+                                                        name="radio-host")
+                self._server_thread.start()
+                ll.print(f"Phone controls: http://{self._host}:{port}/app_pad")
+            except BaseException:
+                self.close()
+                raise
+
+    def close(self):
+        self._server = None
+        # The map also owns a partially constructed server and its trigger if
+        # binding failed before create_server could return the server object.
+        dispatcher = self._dispatcher
+        owned_sockets = tuple(self._socket_map.values())
+        owned_servers = [connection for connection in owned_sockets
+                         if getattr(connection, "task_dispatcher", None) is dispatcher
+                         and hasattr(connection, "application")]
+        trigger_ids = {id(connection.trigger) for connection in owned_servers}
+        for owned_socket in owned_sockets:
+            try:
+                if owned_socket in owned_servers:
+                    # Stop accepting new clients while leaving the trigger
+                    # available for workers finishing their current response.
+                    owned_socket.del_channel()
+                    if owned_socket.socket:
+                        owned_socket.socket.close()
+                elif id(owned_socket) not in trigger_ids:
+                    owned_socket.close()
+            except Exception as exc:
+                ll.debug(f"Closing radio connection: {exc}")
+        if dispatcher:
+            dispatcher.shutdown(timeout=1)
+        self._dispatcher = None
+        for owned_socket in owned_servers + list(self._socket_map.values()):
+            try:
+                owned_socket.close()
+            except Exception as exc:
+                ll.debug(f"Closing radio listener: {exc}")
+        self._socket_map.clear()
+        if (self._server_thread and self._server_thread.is_alive()
+                and self._server_thread is not threading.current_thread()):
+            self._server_thread.join(timeout=2)
+
+    def initSong(self, title, mp3_song_file_path, current_mixer, current_song_lyrics="",
+                 duration=None, track_id=None):
+        if duration is None:
+            duration = current_mixer.get_duration() if current_mixer else 0
+        if not isinstance(current_song_lyrics, str):
+            current_song_lyrics = json.dumps(current_song_lyrics or [])
+        self.current_data = {
+            "title": title, "mp3_path": mp3_song_file_path,
+            "lyrics": current_song_lyrics or "[]", "mixer": current_mixer,
+            "duration": float(duration or 0),
+            "track_id": track_id or str(os.path.getmtime(mp3_song_file_path)),
+        }
+
+    def _get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('10.255.255.255', 1))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1'
+        finally:
+            s.close()
+        return ip
+
+# Example usage:
+if __name__ == '__main__':
+    # This block is only if you run radio_host.py directly.
+    # Replace these stubs with your actual pygame mixer and file paths:
+
+    try:
+        from audio import AudioPlayerRoot
+    except ImportError:
+        from .audio import AudioPlayerRoot
+
+    class MusicPlayer:
+        def __init__(self, directories=None, set_screen=None, set_duration=None, set_lyrics=None, set_ips=None):
+            self.directories = directories or []
+            self.set_screen = set_screen
+            self.set_duration = set_duration
+            self.set_lyrics = set_lyrics
+            self.set_ips = set_ips
+            self.pause_event = threading.Event()
+            self.repeat_event = threading.Event()
+            self.current_volume = 1.0
+        
+        def pause(self, forcedState=False):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer pause called", forcedState)
+            
+        def skip_next(self):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer skip_next called")
+            
+        def skip_previous(self):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer skip_previous called")
+            
+        def up_volume(self):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer up_volume called")
+            
+        def dwn_volume(self):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer dwn_volume called")
+            
+        def repeat(self):
+            # Dummy implementation for example
+            ll.debug("MusicPlayer repeat called")
+            
+        def play_song(self, path):
+            # Dummy implementation for example
+            ll.debug(f"MusicPlayer play_song called with path: {path}")
+            
+        def get_search_term(self, query):
+            # Dummy implementation for example
+            return [("Example Song", "example.mp3")]
+
+    # Create a dummy WAV file for the example usage within radioMaster.py's __main__ block
+    import tempfile, atexit
+    import numpy as np
+    from scipy.io.wavfile import write as write_wav
+
+    temp_dir_for_test = tempfile.gettempdir()
+    test_wav_path = os.path.join(temp_dir_for_test, "test_radio_host_file.wav")
+    samplerate_test = 44100
+    duration_test = 10 # seconds
+    num_samples_test = int(duration_test * samplerate_test)
+    silent_data_test = np.zeros(num_samples_test, dtype=np.float32)
+    write_wav(test_wav_path, samplerate_test, silent_data_test)
+    ll.debug(f"Created test WAV file: {test_wav_path}")
+    atexit.register(lambda: os.remove(test_wav_path) if os.path.exists(test_wav_path) else None)
+
+    host = RadioHost(player=MusicPlayer(), port=8080)
+    host.initSong(
+        title="Example Song![]!Mock Artist", # Use the expected format
+        mp3_song_file_path=test_wav_path, # Use the generated WAV file
+        current_mixer=AudioPlayerRoot(), # Audio mixer instance
+        current_song_lyrics="These are the lyrics..."
+    )
+
+    # Keep main thread alive
+    try:
+        while True:
+            sleep(1)
+    except KeyboardInterrupt:
+        pass

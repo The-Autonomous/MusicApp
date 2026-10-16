@@ -1,0 +1,12 @@
+{
+  "sources": [
+    {"file":"ffmpeg-7.1.5.tar.xz","url":"https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz","sha256":"de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f"},
+    {"file":"lame-3.100-source.tar.gz","url":"https://distfiles.macports.org/lame/lame-3.100.tar.gz","sha256":"ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"},
+    {"file":"zlib-1.3.2.tar.gz","url":"https://zlib.net/zlib-1.3.2.tar.gz","sha256":"bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"}
+  ],
+  "tools": [
+    {"file":"nasm-2.16.03-win64.zip","url":"https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip","sha256":"3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6"},
+    {"file":"make-4.4.1-2-x86_64.pkg.tar.zst","url":"https://repo.msys2.org/msys/x86_64/make-4.4.1-2-x86_64.pkg.tar.zst","sha256":"2408af61717dae87b00c855b132769a125c708907fc94a46bb16dae076113e5c"}
+  ],
+  "notes": "LAME source hash verified against the upstream MSYS2 mingw-w64-lame PKGBUILD. Downloads are stored only inside this project; no global installation."
+}

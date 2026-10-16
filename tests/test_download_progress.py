@@ -11,6 +11,22 @@ from ui_loading import LoadingHelper, song_progress_display
 
 
 class ProgressTests(unittest.TestCase):
+    def test_hidden_authentication_card_suspends_optional_animations(self):
+        helper = LoadingHelper.__new__(LoadingHelper)
+        helper.window = Mock()
+        helper.progress = Mock()
+        helper._animation = "pending-animation"
+        helper._indeterminate = True
+        helper._suspended = False
+        helper.collapsed = False
+        helper.download_rows = [(Mock(), Mock(), Mock())]
+        helper.suspend()
+        helper.window.after_cancel.assert_called_once_with("pending-animation")
+        helper.download_rows[0][2].stop.assert_called_once()
+        helper._animate()
+        helper.progress.step.assert_not_called()
+        helper.window.after.assert_not_called()
+
     def test_worker_publishes_download_fraction_and_processing_phase(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "progress.json"

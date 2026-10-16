@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "MusicApp YouTube connection",
+  "version": "1.0.0",
+  "description": "Connect your existing YouTube session to your local MusicApp when you click Connect.",
+  "permissions": ["cookies", "activeTab"],
+  "host_permissions": ["https://*.youtube.com/*", "http://127.0.0.1/*"],
+  "action": {"default_title": "Connect MusicApp", "default_popup": "popup.html"}
+}

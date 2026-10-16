@@ -58,7 +58,77 @@ class FakePlayer:
         self.playback.set()
 
 
+class AuthenticationWindowVisibility(unittest.TestCase):
+    def test_temporarily_hides_all_app_windows_and_restores_without_bypassing_player_gate(self):
+        class Window:
+            def __init__(self, state="normal", children=()):
+                self.current_state, self.children = state, list(children)
+            def state(self, value=None):
+                if value is not None:
+                    self.current_state = value
+                return self.current_state
+            def winfo_children(self):
+                return self.children
+            def winfo_toplevel(self):
+                return self
+            def withdraw(self):
+                self.current_state = "withdrawn"
+            def winfo_exists(self):
+                return True
+        player, card, hidden = Window(), Window("zoomed"), Window("withdrawn")
+        root = Window("withdrawn", [player, card, hidden])
+        refresh = Mock(side_effect=lambda: player.withdraw())
+        overlay = SimpleNamespace(root=root, window=player, _closing=False,
+                                  _authentication_active=False, post_ui=lambda callback: callback(),
+                                  refresh_overlay_visibility=refresh)
+        module = isolated_sync_module()
+        sync = module.YouTubeSync.__new__(module.YouTubeSync)
+        sync.cancel, sync._closed = Event(), False
+        sync.loading_helper = Mock()
+        sync._authentication_visibility(overlay, True)
+        self.assertTrue(overlay._authentication_active)
+        self.assertEqual([w.state() for w in (root, player, card, hidden)], ["withdrawn"] * 4)
+        sync.loading_helper.suspend.assert_called_once()
+        sync._authentication_visibility(overlay, False)
+        self.assertFalse(overlay._authentication_active)
+        self.assertEqual(card.state(), "zoomed")
+        self.assertEqual(hidden.state(), "withdrawn")
+        self.assertEqual(player.state(), "withdrawn")
+        self.assertEqual(refresh.call_count, 2)
+        sync.loading_helper.resume.assert_called_once()
+
+
 class YouTubeSyncFlow(unittest.TestCase):
+    def test_authentication_lifecycle_wraps_browser_job_on_success(self):
+        lifecycle = []
+        def request(job, cancel=None, timeout=None):
+            if job["action"] == "login":
+                self.assertEqual(lifecycle, [True])
+            if job["action"] == "music_likes":
+                self.assertEqual(lifecycle, [True, False])
+            return self.run_job(job, cancel, timeout)
+        self.module.run_job.side_effect = request
+        self.assertTrue(self.sync.start(self.statuses.append, login=True, sync=False,
+                                       on_authentication=lifecycle.append, on_finished=self.finished.set))
+        self.assertTrue(self.finished.wait(3))
+        self.assertEqual(lifecycle, [True, False])
+        self.assertTrue(self.sync.connected)
+
+    def test_authentication_lifecycle_restores_after_cancelled_login(self):
+        lifecycle = []
+        def request(job, cancel=None, timeout=None):
+            if job["action"] == "login":
+                self.assertEqual(lifecycle, [True])
+                self.sync.cancel.set()
+                raise RuntimeError("Cancelled")
+            return self.run_job(job, cancel, timeout)
+        self.module.run_job.side_effect = request
+        self.assertTrue(self.sync.start(self.statuses.append, login=True, sync=False,
+                                       on_authentication=lifecycle.append, on_finished=self.finished.set))
+        self.assertTrue(self.finished.wait(3))
+        self.assertEqual(lifecycle, [True, False])
+        self.assertFalse(self.sync.connected)
+
     def setUp(self):
         self.module = isolated_sync_module()
         self.directory = (ROOT / "tests" / ("MusicApp-sync-test-" + uuid.uuid4().hex)).resolve()
@@ -112,24 +182,25 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.module.SESSION_FILE.write_bytes(b"protected synthetic fixture")
 
     def test_youtube_hotkey_hides_and_reopens_card_without_stopping_sync(self):
+        overlay = Mock(_authentication_active=False)
         window = self.sync.window = Mock()
         window.winfo_exists.return_value = True
         window.state.return_value = 'normal'
         self.sync.loading_helper = Mock()
         self.sync._busy.set()
-        self.sync.toggle(Mock())
+        self.sync.toggle(overlay)
         window.withdraw.assert_called_once()
         self.assertFalse(self.sync.cancel.is_set())
         self.assertFalse(self.player.playback.is_set())
         window.state.return_value = 'withdrawn'
-        self.sync.toggle(Mock())
+        self.sync.toggle(overlay)
         window.deiconify.assert_called_once()
         self.sync.loading_helper.restore.assert_called_once()
         self.assertTrue(self.sync.busy())
 
     def test_youtube_hotkey_opens_missing_card_and_closes_options_with_visible_card(self):
         with patch.object(self.sync, 'show') as show:
-            overlay = Mock()
+            overlay = Mock(_authentication_active=False)
             self.sync.toggle(overlay)
             show.assert_called_once_with(overlay)
         self.sync.window = Mock()
@@ -137,8 +208,15 @@ class YouTubeSyncFlow(unittest.TestCase):
         self.sync.window.state.return_value = 'normal'
         self.sync.options_window = Mock()
         self.sync.options_window.winfo_exists.return_value = True
-        self.sync.toggle(Mock())
+        self.sync.toggle(Mock(_authentication_active=False))
         self.sync.options_window.destroy.assert_called_once()
+
+    def test_youtube_hotkey_leaves_cards_hidden_during_authentication(self):
+        self.sync.window = Mock()
+        with patch.object(self.sync, 'show') as show:
+            self.sync.toggle(Mock(_authentication_active=True))
+        show.assert_not_called()
+        self.sync.window.winfo_exists.assert_not_called()
 
     def run_job(self, job, cancel=None, timeout=None):
         if cancel is not None and cancel.is_set():

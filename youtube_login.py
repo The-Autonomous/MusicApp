@@ -260,7 +260,8 @@ class _OwnedWindowsBrowser:
                 raise OSError("set browser handle list")
             startup = StartupInfoEx()
             startup.StartupInfo.cb = ctypes.sizeof(startup)
-            startup.StartupInfo.dwFlags = 0x100  # STARTF_USESTDHANDLES
+            startup.StartupInfo.dwFlags = 0x100 | 0x1  # standard handles + explicit normal maximization
+            startup.StartupInfo.wShowWindow = 3  # SW_SHOWMAXIMIZED, never exclusive/fullscreen
             startup.StartupInfo.hStdInput = null_handle
             startup.StartupInfo.hStdOutput = null_handle
             startup.StartupInfo.hStdError = null_handle
@@ -340,7 +341,7 @@ def _chromium_login(choice, timeout, profile_dir=None):
             port = reservation.getsockname()[1]
         arguments = [choice["executable"], "--user-data-dir=" + str(profile),
                      f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
-                     "--no-first-run", "--no-default-browser-check", "--new-window", SIGN_IN_URL]
+                     "--no-first-run", "--no-default-browser-check", "--start-maximized", "--new-window", SIGN_IN_URL]
         if os.name == "nt":
             process = _OwnedWindowsBrowser(arguments)
         else:
@@ -375,6 +376,7 @@ def _chromium_login(choice, timeout, profile_dir=None):
                                  "browser_access") from None
             if not browser.contexts:
                 raise LoginError("The sign-in browser has no available window.", "browser_access")
+            _maximize_owned_browser(browser)
             context = browser.contexts[0]
             deadline = monotonic() + timeout
             while monotonic() < deadline:
@@ -421,6 +423,28 @@ def _chromium_login(choice, timeout, profile_dir=None):
         # This is our fresh temporary profile, never the user's real browser profile.
         if profile.parent == temp_root and profile.name.startswith("MusicApp-signin-"):
             shutil.rmtree(profile, ignore_errors=True)
+
+
+def _maximize_owned_browser(browser):
+    """Normally maximize our verified sign-in window; leave other browsers alone."""
+    session = None
+    try:
+        context = browser.contexts[0]
+        page = next(page for page in context.pages if not page.is_closed())
+        session = context.new_cdp_session(page)
+        window = session.send("Browser.getWindowForTarget")
+        session.send("Browser.setWindowBounds", {
+            "windowId": window["windowId"], "bounds": {"windowState": "maximized"}})
+    except Exception:
+        # --start-maximized and STARTUPINFO already request the same state.
+        # CDP versions which omit window bounds must not block sign-in.
+        pass
+    finally:
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                pass
 
 
 class _SilentCookieLogger:
@@ -477,8 +501,26 @@ def _firefox_login(timeout):
                      "signin_timeout")
 
 
-def browser_login(job):
+def _preferred_signin_browser():
+    """Prefer Chrome/Edge without changing Windows defaults or real profiles."""
     choice = default_browser()
+    if choice.get("cookie_browser") in {"chrome", "edge"}:
+        return choice
+    if os.name == "nt":
+        for relative, name, cookie_browser in (
+                ("Microsoft/Edge/Application/msedge.exe", "Microsoft Edge", "edge"),
+                ("Google/Chrome/Application/chrome.exe", "Google Chrome", "chrome")):
+            for variable in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+                root = os.environ.get(variable)
+                path = Path(root) / relative if root else None
+                if path is not None and path.is_file():
+                    return {"name": name, "executable": str(path),
+                            "cookie_browser": cookie_browser, "chromium": True}
+    return choice
+
+
+def browser_login(job):
+    choice = _preferred_signin_browser()
     timeout = max(30, min(300, float(job.get("signin_timeout", 300))))
     if choice["chromium"]:
         return _chromium_login(choice, timeout, job.get("profile_dir"))

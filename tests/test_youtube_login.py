@@ -37,6 +37,22 @@ def fixture_directory(prefix="MusicApp-test-"):
 
 
 class LoginHelpers(unittest.TestCase):
+    def test_owned_signin_window_requests_normal_maximization(self):
+        calls = []
+        session = SimpleNamespace(send=lambda method, *args: (
+            calls.append((method, args)) or {"windowId": 47}), detach=lambda: calls.append(("detach", ())))
+        page = SimpleNamespace(is_closed=lambda: False)
+        context = SimpleNamespace(pages=[page], new_cdp_session=lambda target: session)
+        login._maximize_owned_browser(SimpleNamespace(contexts=[context]))
+        self.assertEqual(calls[0][0], "Browser.getWindowForTarget")
+        self.assertEqual(calls[1], ("Browser.setWindowBounds", ({"windowId":47,"bounds":{"windowState":"maximized"}},)))
+        self.assertEqual(calls[-1][0], "detach")
+
+    def test_preferred_browser_preserves_registered_chrome_or_edge(self):
+        choice = {"name":"Microsoft Edge","executable":"fixture.exe","cookie_browser":"edge","chromium":True}
+        with patch.object(login, "default_browser", return_value=choice):
+            self.assertIs(login._preferred_signin_browser(), choice)
+
     def test_browser_command_parsing(self):
         with fixture_directory() as directory:
             executable = Path(directory) / "Browser with spaces.exe"

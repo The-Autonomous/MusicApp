@@ -1,4 +1,4 @@
-import ctypes, os, random
+import ctypes, os, random, sys
 import tkinter as tk
 from tkinter import font, messagebox, ttk
 from threading import Lock, RLock, Thread
@@ -297,8 +297,9 @@ class RoundedCanvas(tk.Canvas):
         return self.create_polygon(points, fill=color, outline="")
 
 class MouseTracker:
-    def __init__(self):
+    def __init__(self, on_right_button=None):
         self.user32 = ctypes.windll.user32
+        self._on_right_button = on_right_button
         self._right_button_pressed = False
         self._last_right_press_pos = None  # Stores coordinates of the last press
         self.window_proportions = [0, 0, 0, 0]
@@ -337,6 +338,8 @@ class MouseTracker:
                 else:
                     # Clear the position on release
                     self._last_right_press_pos = None
+                if self._on_right_button:
+                    self._on_right_button(x, y, pressed)
             ll.debug(f"Mouse tracker got key {'Pressed' if pressed else 'Released'} {button} at ({x}, {y})")
         except Exception as E:
             ll.warn(f"Mouse tracker met unexpected error {E}")
@@ -439,6 +442,13 @@ class GhostOverlay:
         self._display_dirty = False
         self._layout_key = None
         self._last_mouse_poll = 0.0
+        self._authentication_active = False
+        self._overlay_dragging = False
+        self._drag_after_id = None
+        self._drag_work_areas = None
+        self._hint_animation_after_id = None
+        self._hint_hide_after_id = None
+        self._hint_opacity = 0.0
         self.theme = ThemeManager()
         self.theme.apply_ttk_styles(self.root)
         
@@ -452,7 +462,8 @@ class GhostOverlay:
         self.modification_status_label = None # For "Listening..." message
         
         ### Mouse ###
-        self.mouseEvents = MouseTracker()
+        self.mouseEvents = MouseTracker(
+            on_right_button=lambda x, y, pressed: self.post_ui(self._on_overlay_mouse_button, x, y, pressed))
         self.clickThroughState = True # True To Click Through False To Click On
         
         ### Gaming Mode ###
@@ -934,6 +945,8 @@ class GhostOverlay:
             callback()
 
     def show_key_hints(self, force_state: bool = None, customize=False):
+        if getattr(self, '_authentication_active', False) and force_state is not False:
+            return
         if force_state is False:
             self._close_key_hints()
             return
@@ -985,6 +998,8 @@ class GhostOverlay:
 
     def show_eq_overlay(self):
         """ Pops a draggable EQ + Echo overlay with rotary knobs. """
+        if getattr(self, '_authentication_active', False):
+            return
         try:
             if getattr(self, "_eq_window", None) and self._eq_window.winfo_exists():
                 self._eq_window.destroy(); return
@@ -1137,6 +1152,8 @@ class GhostOverlay:
 #####################################################################################################
 
     def show_search_overlay(self):
+        if getattr(self, '_authentication_active', False):
+            return
         # Prevent opening if in radio mode or already open
         if self.display_radio or self._is_searching or self.is_spinning_downloading:
             return
@@ -1592,7 +1609,8 @@ class GhostOverlay:
 
     def toggle_overlay(self):
         # Showing controls is independent of whether audio was switched off.
-        if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+        if (getattr(self, '_overlay_visible', False)
+                or (self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn')):
             self.close_overlay()
         else:
             self.open_overlay()
@@ -1607,7 +1625,8 @@ class GhostOverlay:
         height = max(1, int(height if height is not None else self.window.winfo_height()))
         position = position if position is not None else (
             (self.window.winfo_x(), self.window.winfo_y()) if self._last_position is not None else None)
-        corrected = clamp_position(position, width, height, monitor_work_areas(self.root))
+        areas = getattr(self, '_drag_work_areas', None) if getattr(self, '_overlay_dragging', False) else None
+        corrected = clamp_position(position, width, height, areas or monitor_work_areas(self.root))
         if (width != self.window.winfo_width() or height != self.window.winfo_height()
                 or corrected != (self.window.winfo_x(), self.window.winfo_y())):
             place_window(self.window, corrected, width, height)
@@ -1675,8 +1694,113 @@ class GhostOverlay:
         ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
+    def _set_hint_opacity(self, opacity):
+        self._hint_opacity = max(0.0, min(1.0, opacity))
+        if not self.canvas or not self.window or not self.window.winfo_exists():
+            return
+        identity = self.canvas_items.get('controls_hint')
+        if identity is None:
+            return
+        target = self.theme.COLORS['text_dark'].lstrip('#')
+        background = self.bg_color.lstrip('#')
+        color = '#' + ''.join(f'{round(int(background[i:i+2], 16) * (1-self._hint_opacity) + int(target[i:i+2], 16) * self._hint_opacity):02x}'
+                              for i in (0, 2, 4))
+        self.canvas.itemconfig(identity, fill=color,
+                               state='normal' if self._hint_opacity > 0 else 'hidden')
+
+    def _fade_controls_hint(self, target, started=None, initial=None):
+        self._hint_animation_after_id = None
+        if self._closing or not self.window or not self.window.winfo_exists():
+            return
+        started = monotonic() if started is None else started
+        initial = self._hint_opacity if initial is None else initial
+        fraction = min(1.0, (monotonic() - started) / 0.2)
+        self._set_hint_opacity(initial + (target - initial) * fraction)
+        if fraction < 1:
+            self._hint_animation_after_id = self.root.after(
+                16, self._fade_controls_hint, target, started, initial)
+
+    def _show_controls_hint(self):
+        for attribute in ('_hint_animation_after_id', '_hint_hide_after_id'):
+            identity = getattr(self, attribute, None)
+            if identity is not None:
+                self.root.after_cancel(identity)
+                setattr(self, attribute, None)
+        self._fade_controls_hint(1.0)
+
+    def _schedule_controls_hint_hide(self):
+        identity = getattr(self, '_hint_hide_after_id', None)
+        if identity is not None:
+            self.root.after_cancel(identity)
+        self._hint_hide_after_id = self.root.after(10000, self._hide_controls_hint)
+
+    def _hide_controls_hint(self):
+        self._hint_hide_after_id = None
+        identity = getattr(self, '_hint_animation_after_id', None)
+        if identity is not None:
+            self.root.after_cancel(identity)
+        self._fade_controls_hint(0.0)
+
+    def _cancel_overlay_hint(self):
+        for attribute in ('_hint_animation_after_id', '_hint_hide_after_id'):
+            identity = getattr(self, attribute, None)
+            if identity is not None:
+                self.root.after_cancel(identity)
+                setattr(self, attribute, None)
+        self._set_hint_opacity(0.0)
+
+    def _on_overlay_mouse_button(self, x, y, pressed):
+        if not self.window or not self.window.winfo_exists() or self.window.state() == 'withdrawn':
+            return
+        if pressed:
+            wx, wy = self.window.winfo_x(), self.window.winfo_y()
+            if wx <= x < wx + self.window.winfo_width() and wy <= y < wy + self.window.winfo_height():
+                self._begin_overlay_drag(x, y)
+        else:
+            if self._overlay_dragging:
+                self._place_overlay((self._win_start_x + x - self._drag_start_x,
+                                     self._win_start_y + y - self._drag_start_y))
+            self._finish_overlay_drag()
+
+    def _begin_overlay_drag(self, x, y):
+        if self._overlay_dragging or not self.window or not self.window.winfo_exists():
+            return
+        self._drag_start_x, self._drag_start_y = x, y
+        self._win_start_x, self._win_start_y = self.window.winfo_x(), self.window.winfo_y()
+        self._win_start_size_width, self._win_start_size_height = self.window.winfo_width(), self.window.winfo_height()
+        self._drag_work_areas = monitor_work_areas(self.root)
+        self._overlay_dragging = True
+        self.clickThroughState = False
+        self.toggle_overlay_clickthrough(False)
+        self._show_controls_hint()
+        self._overlay_drag_tick()
+
+    def _overlay_drag_tick(self):
+        self._drag_after_id = None
+        if self._closing or not self._overlay_dragging:
+            return
+        self.parse_mouse_over_overlay()
+        if self._overlay_dragging:
+            self._drag_after_id = self.root.after(16, self._overlay_drag_tick)
+
+    def _finish_overlay_drag(self):
+        identity = getattr(self, '_drag_after_id', None)
+        if identity is not None:
+            self.root.after_cancel(identity)
+            self._drag_after_id = None
+        if not getattr(self, '_overlay_dragging', False):
+            return
+        self._overlay_dragging = False
+        self._drag_work_areas = None
+        self.clickThroughState = True
+        self.toggle_overlay_clickthrough(True)
+        self._place_overlay()
+        self._save_overlay_state()
+        if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+            self._schedule_controls_hint_hide()
+
     def parse_mouse_over_overlay(self):
-        if not self.window or not self.window.winfo_exists(): return
+        if not self.window or not self.window.winfo_exists() or self.window.state() == 'withdrawn': return
 
         # Get current overlay and mouse geometry
         currentPosition = self.mouseEvents.mouse_pos()
@@ -1689,43 +1813,17 @@ class GhostOverlay:
         # The condition for interactivity is now that the right mouse is down AND
         # the press that initiated it occurred within the overlay's bounds.
         if self.mouseEvents.is_right_mouse_down() and (self._overlay_dragging or self.mouseEvents.was_press_in_window()):
-            # If we meet the drag condition, make the window interactive.
-            if self.clickThroughState:
-                self.clickThroughState = False
-                self.toggle_overlay_clickthrough(self.clickThroughState)
-
-            # This block simulates the start of a drag since the initial <Button-3> event was missed
-            # due to the window being click-through. It runs only once at the start of a drag.
-            if not self._overlay_dragging and self._overlay_start_move:
-                self._drag_start_x = currentPosition[0]
-                self._drag_start_y = currentPosition[1]
-                self._overlay_dragging = True
-                self._win_start_x = self.window.winfo_x()
-                self._win_start_y = self.window.winfo_y()
-                self._win_start_size_width = ww
-                self._win_start_size_height = wh
-                
-                if self.window and self.window.winfo_exists():
-                    # Track dragging directly; leave GTA focused and do not inject mouse clicks.
-                    pass
-            if self._overlay_dragging:
-                new_x = self._win_start_x + currentPosition[0] - self._drag_start_x
-                new_y = self._win_start_y + currentPosition[1] - self._drag_start_y
-                self._place_overlay((new_x, new_y))
+            if not self._overlay_dragging:
+                self._begin_overlay_drag(*currentPosition)
+                return
+            new_x = self._win_start_x + currentPosition[0] - self._drag_start_x
+            new_y = self._win_start_y + currentPosition[1] - self._drag_start_y
+            self._place_overlay((new_x, new_y))
         else:
-            # If the drag conditions are NOT met (e.g., mouse released, or press was outside):
-            # 1. Reset the overlay to be click-through if it isn't already.
-            if not self.clickThroughState:
-                self.clickThroughState = True
-                self.toggle_overlay_clickthrough(self.clickThroughState)
-                try: self.root.after(100, self.keep_overlay_on_top)
-                except: ll.error("Couldn't Load Root After.")
-            
-            # 2. Ensure the dragging state is turned off.
-            was_dragging = self._overlay_dragging
-            self._overlay_dragging = False
-            if was_dragging:
-                self._save_overlay_state()
+            if self._overlay_dragging:
+                self._place_overlay((self._win_start_x + currentPosition[0] - self._drag_start_x,
+                                     self._win_start_y + currentPosition[1] - self._drag_start_y))
+            self._finish_overlay_drag()
                     
     def handle_overlay_background_process(self, time_dilation_for_key_reset: float = 300):
         """Loop To Handle Draggability - OPTIMIZED FOR GAMING"""
@@ -1734,10 +1832,9 @@ class GhostOverlay:
         time_dial = int(time_dilation_for_key_reset * ticks_per_second)
         time_tick = 0
         
-        while True:
+        while not self._closing:
             try:
-                if self.window and self.window.winfo_exists():
-                    self.parse_mouse_over_overlay()
+                self.post_ui(self.parse_mouse_over_overlay)
             except Exception as E:
                 ll.error(f"Cannot Toggle Mouse-Over Overlay: {E}")
             
@@ -1747,7 +1844,7 @@ class GhostOverlay:
                 self.background_key_reset()
             
             if time_tick % (ticks_per_second * 5) == 0:
-                self.keep_overlay_on_top()
+                self.post_ui(self.keep_overlay_on_top)
             
             sleep(thread_tick_size)
 
@@ -1786,10 +1883,49 @@ class GhostOverlay:
 #####################################################################################################
 
     def display_overlay(self):
-        if self.MusicPlayer is None:
-            self.root.after(100, self.display_overlay)
-        elif self._overlay_visible:
-            self.open_overlay()
+        self.refresh_overlay_visibility()
+
+    def _player_has_loaded_track(self):
+        player = getattr(self, 'MusicPlayer', None)
+        if player is None:
+            return False
+        ready = getattr(player, '_playback_ready', None)
+        if ready is None or not ready.is_set():
+            return False
+        radio_mode = getattr(player, 'current_player_mode', None)
+        if radio_mode is not None and radio_mode.is_set():
+            radio = getattr(player, 'radio_client', None)
+            if not radio or not getattr(radio, '_playing_track_id', None):
+                return False
+        elif not getattr(player, 'current_song', None):
+            return False
+        # current_song is assigned before decoder startup. The audio session's
+        # event distinguishes a successfully loaded track, including paused ones.
+        module = sys.modules.get(type(player).__module__)
+        audio = getattr(player, 'AudioPlayer', None) or getattr(module, 'AudioPlayer', None)
+        active = getattr(audio, '_play_event', None)
+        return active is not None and active.is_set()
+
+    def refresh_overlay_visibility(self):
+        """UI-thread-only temporary gating; never overwrite remembered visibility."""
+        if getattr(self, '_closing', False):
+            return
+        search = getattr(self, 'search_overlay', None)
+        blocked = (getattr(self, '_authentication_active', False)
+                   or not self._player_has_loaded_track()
+                   or bool(search and search.winfo_exists()))
+        wanted = bool(self._overlay_visible)
+        if blocked or not wanted:
+            self._finish_overlay_drag()
+            if (getattr(self, '_hint_opacity', 0) > 0
+                    or getattr(self, '_hint_animation_after_id', None) is not None
+                    or getattr(self, '_hint_hide_after_id', None) is not None):
+                self._cancel_overlay_hint()
+            if self.window and self.window.winfo_exists() and self.window.state() != 'withdrawn':
+                self.window.withdraw()
+            return
+        if not self.window or not self.window.winfo_exists() or self.window.state() == 'withdrawn':
+            self.open_overlay(remember=False)
 
     def keep_overlay_on_top_init(self):
         self.root.bind("<FocusIn>", self.keep_overlay_on_top)
@@ -1826,9 +1962,15 @@ class GhostOverlay:
             self.canvas_items['lyrics_text'] = self.canvas.create_text(0, 0, font=self.theme.FONTS["lyrics"], fill=self.theme.COLORS["text"], anchor=tk.N, justify=tk.CENTER)
             self.canvas_items['controls_hint'] = self.canvas.create_text(
                 0, 0, text='Both Alt keys · Controls', font=self.theme.FONTS['hint'],
-                fill=self.theme.COLORS['text_dark'], anchor=tk.N, justify=tk.CENTER)
+                fill=self.theme.COLORS['text_dark'], anchor=tk.N, justify=tk.CENTER,
+                state='hidden')
 
-    def open_overlay(self):
+    def open_overlay(self, remember=True):
+        if remember:
+            self._overlay_visible = True
+            self._save_overlay_state()
+        if getattr(self, '_authentication_active', False) or not self._player_has_loaded_track():
+            return
         if getattr(self, 'search_overlay', None) is not None:
             self.close_search_overlay(self._was_main_overlay_open_before_search)
             try: del self.search_overlay
@@ -1837,8 +1979,6 @@ class GhostOverlay:
             self.window.deiconify()
             self._place_overlay(self._last_position)
             self.window.lift()
-            self._overlay_visible = True
-            self._save_overlay_state()
             return
 
         self.window = tk.Toplevel(self.root)
@@ -1865,38 +2005,17 @@ class GhostOverlay:
             self.center_window()
         else:
             self._place_overlay(self._last_position)
-        self._overlay_visible = True
-        self._save_overlay_state()
 
         self._drag_start_x, self._drag_start_y = 0, 0
         self._win_start_x, self._win_start_y = 0, 0
         self._overlay_dragging = False
-        self._overlay_start_move = None
-
-        def start_move(event):
-            self._drag_start_x, self._drag_start_y = event.x_root, event.y_root
-            if self.window:
-                self._overlay_dragging = True
-                self._win_start_x, self._win_start_y = self.window.winfo_x(), self.window.winfo_y()
-                self._win_start_size_width, self._win_start_size_height = self.window.winfo_width(), self.window.winfo_height()
-
-        def do_move(event):
-            if self.window:
-                dx, dy = event.x_root - self._drag_start_x, event.y_root - self._drag_start_y
-                new_x, new_y = self._win_start_x + dx, self._win_start_y + dy
-                self._place_overlay((new_x, new_y))
-                self.mouseEvents.update_window(*self._last_position, self._win_start_size_width, self._win_start_size_height)
-
-        def do_stop(event):
-            self._overlay_dragging = False
-            self._save_overlay_state()
-
-        self._overlay_start_move = start_move
-        self.canvas.bind("<Button-3>", start_move)
-        self.canvas.bind("<B3-Motion>", do_move)
-        self.canvas.bind("<ButtonRelease-3>", do_stop)
+        # Global right-button input owns dragging, including its first click
+        # through this passive window. Avoid a second Tk motion path that could
+        # move/repaint the overlay again for every native mouse message.
 
     def close_overlay(self, remember=True):
+        self._finish_overlay_drag()
+        self._cancel_overlay_hint()
         if self.window:
             try:
                 self._place_overlay()
@@ -2008,6 +2127,7 @@ class GhostOverlay:
                 callback(*args, **kwargs)
             except Exception as exc:
                 ll.error(f"Interface update: {exc}")
+        self.refresh_overlay_visibility()
         if self._display_dirty:
             self._display_dirty = False
             self.update_display()
@@ -2018,8 +2138,7 @@ class GhostOverlay:
                 self._place_overlay()
             except tk.TclError:
                 pass
-        if self.window and now - self._last_mouse_poll >= 0.25:
-            self._last_mouse_poll = now
+        if self.window and not self._overlay_dragging and self.mouseEvents.is_right_mouse_down():
             try:
                 self.parse_mouse_over_overlay()
             except tk.TclError:
@@ -2032,6 +2151,8 @@ class GhostOverlay:
     def close(self):
         if self._closing:
             return
+        self._finish_overlay_drag()
+        self._cancel_overlay_hint()
         if self.window and self.window.winfo_exists():
             self._place_overlay()
         self._save_overlay_state()

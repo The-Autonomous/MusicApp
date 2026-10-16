@@ -1,15 +1,27 @@
 
-/__pycache__
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/tests/MusicApp-sync-test-*/
 *.mp3
-*.json
+/*.json
 /.youtube_deferred_downloads.json
 LOCAL_autoUpdate.py
-*.txt
+/*.txt
+!/requirements.txt
 *.lnk
 /Spotify Downloader
 /Test
 /backup
 /debug
+*.log
+*.pdb
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.dll
 *.1
 /.youtube-auth/
 /playwright/.auth/
@@ -18,5 +30,4 @@ LOCAL_autoUpdate.py
 *.m4a
 *.webm
 *.tmp
-/rust_reference_backup
-/rust_musicapp
+/ffmpeg-bin/

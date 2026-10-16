@@ -86,6 +86,7 @@ class OverlayRenderingTests(unittest.TestCase):
             self.assertEqual(overlay.canvas.lowered, overlay.canvas_items['bg'])
             self.assertGreater(max(point[0] for point in background['points']), 100)
             self.assertGreater(max(point[1] for point in background['points']), 50)
+            self.assertEqual(overlay.canvas.items[overlay.canvas_items['controls_hint']]['state'], 'hidden')
 
     def test_transparency_key_is_distinct_from_black_and_all_visible_theme_colors(self):
         theme = self.Theme()

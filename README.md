@@ -3,10 +3,15 @@
 A Python music overlay for Windows, with the original keyboard controls, EQ,
 lyrics, local-library search, YouTube playback, radio and phone control panel.
 
+The separate native Rust version and its complete local build workspace are in
+[`rust_musicapp`](rust_musicapp/README.md). Run `rust_musicapp/run.bat`, or compile
+with `rust_musicapp/build.bat`. Its executable has no Python/Node runtime dependency.
+
 ## Controls
 
 Press **both Alt keys together** to open the controls card from another window.
-The player also shows this shortcut beneath the song title. **Quick controls**
+Right-dragging fades this shortcut in beneath the song title; it fades out ten
+seconds after release. **Quick controls**
 offers buttons for playback, search, effects and YouTube; **Shortcuts** shows the
 actual saved bindings. Select **Change**, then press a key to remap an action.
 The existing Left or Right Alt side is kept, conflicting shortcuts are rejected,
@@ -37,7 +42,9 @@ Its window stays above other windows without taking keyboard focus. Use
 may be hidden by exclusive fullscreen. Interactive controls and sign-in cards
 accept focus when opened.
 The player retains its translucent black background when hidden and reopened.
-Left Alt + Left Shift shows or hides it even when the player is switched off.
+Left Alt + Left Shift changes its remembered visibility preference. The player
+stays hidden until startup finishes and audio is loaded; paused tracks remain
+visible. Temporary startup/sign-in hiding does not erase that preference.
 Visibility, the player on/off setting and its screen position are saved in
 `.musicapp_overlay.json`. The player restores those preferences on launch and
 keeps its window inside a connected monitor's usable area, including monitors
@@ -67,6 +74,11 @@ again to hide the YouTube card; downloads continue while it is hidden.
   and its persisted YouTube login is checked at a low polling rate; it may need
   a retry after the browser has saved its cookies. Other browsers open normally
   but report clearly if automatic confirmation is unsupported.
+- During interactive sign-in, MusicApp hides its windows until the browser step
+  finishes. Supported Chromium sign-in windows are normally maximized to fit the
+  screen; this does not use F11 fullscreen. Previously visible app windows return
+  afterward, with the player still subject to its playback readiness preference.
+
 - Login cookies are encrypted with Windows DPAPI under the current Windows
   account in `%LOCALAPPDATA%\MusicApp\youtube_session.bin`. If Windows cannot
   remember the login, the app explains this and uses it for this session only.

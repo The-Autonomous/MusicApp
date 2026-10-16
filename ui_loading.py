@@ -24,6 +24,7 @@ class LoadingHelper:
         self.full_geometry = None
         self._animation = None
         self._indeterminate = True
+        self._suspended = False
         self.colors = colors
         self.download_rows = []
         self.download_frame = None
@@ -87,9 +88,25 @@ class LoadingHelper:
 
     def _animate(self):
         self._animation = None
-        if self._indeterminate and not self.collapsed:
+        if self._indeterminate and not self.collapsed and not self._suspended:
             self.progress.step(3)
             self._animation = self.window.after(80, self._animate)
+
+    def suspend(self):
+        """Stop optional animations while all app windows are hidden for sign-in."""
+        self._suspended = True
+        self._stop_animation()
+        for _, _, progress in self.download_rows:
+            progress.stop()
+
+    def resume(self):
+        self._suspended = False
+        self._stop_animation()
+        self._animate()
+        if not self.collapsed:
+            for row, _, progress in self.download_rows:
+                if row.winfo_ismapped() and str(progress.cget("mode")) == "indeterminate":
+                    progress.start(100)
 
     def set_progress(self, saved=None, total=None, active=True):
         self._stop_animation()
@@ -131,7 +148,7 @@ class LoadingHelper:
             row.pack(fill="x")
             if fraction is None:
                 progress.configure(mode="indeterminate")
-                if not self.collapsed:
+                if not self.collapsed and not self._suspended:
                     progress.start(100)
             else:
                 progress.configure(mode="determinate", value=fraction * 100)

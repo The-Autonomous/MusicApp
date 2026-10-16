@@ -1,5 +1,6 @@
 """Real Tk widget layouts; no desktop capture, hooks, accounts or audio."""
 import os
+import gc
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -34,7 +35,13 @@ class WindowLayouts(unittest.TestCase):
         self.actions = prototype.key_actions
 
     def tearDown(self):
-        self.root.destroy()
+        root = self.root
+        root.destroy()
+        # Font/widget callback cycles can otherwise keep a destroyed Tcl
+        # interpreter alive until a later download worker happens to trigger
+        # collection. Tcl interpreter finalizers must run on their Tk thread.
+        self.theme = self.actions = self.root = None
+        gc.collect()
         self.assertEqual(self.errors, [])
 
     def inside(self, window, widget):
